@@ -1,0 +1,16 @@
+[project]
+name = "reld-ci"
+version = "0.0.0"
+description = "Benchmark parsing and chart rendering for the reld linker."
+requires-python = ">=3.10"
+dependencies = [
+    # Charts are drawn with plain ImageDraw primitives rather than matplotlib: one
+    # dependency instead of a scientific stack, and exact control over layout.
+    "pillow>=11.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["ci/tests"]

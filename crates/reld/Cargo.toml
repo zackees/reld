@@ -1,0 +1,17 @@
+[package]
+name = "reld"
+description = "An incremental linker for the inner dev loop. Not yet implemented."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "reld"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true

@@ -1,0 +1,110 @@
+name: Benchmark Stats
+
+# Runs the link benchmark against reference linkers and force-pushes the rendered chart to
+# an orphan `benchmark-stats` branch, which the README embeds via raw.githubusercontent.com.
+#
+# NOTE: raw.githubusercontent.com only serves unauthenticated requests for PUBLIC repos.
+# While reld is private the README image will 404 — the pipeline still runs and the
+# artifacts are still uploaded, so nothing is lost by running it early.
+#
+# Linux-only by construction: wild emits ELF only, so it cannot be benchmarked on Windows
+# or macOS runners. Those platforms get lld and the system linker once reld has backends.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * *"
+
+concurrency:
+  group: benchmark-stats-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    name: Generate benchmark stats
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install linkers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld mold python3-pil
+
+          # wild is not packaged. A failure here is not fatal — reld-bench probes each
+          # linker and reports an unavailable one as n/a, which shows up in the chart.
+          cargo install --locked wild-linker || echo "wild unavailable; will report n/a"
+
+          # `-fuse-ld=wild` makes clang search for `ld.wild`, but the crate installs a
+          # binary called `wild`. Without this alias wild is silently reported as n/a
+          # forever, which looks like a working pipeline and is not.
+          if command -v wild >/dev/null 2>&1; then
+            ln -sf "$(command -v wild)" "$HOME/.cargo/bin/ld.wild"
+          fi
+
+          # Fail loudly if a linker we expect is missing, rather than quietly charting n/a.
+          for l in ld.lld ld.mold; do
+            command -v "$l" >/dev/null || { echo "::error::$l missing"; exit 1; }
+          done
+          command -v ld.wild >/dev/null || echo "::warning::ld.wild missing; wild will chart as n/a"
+
+      - name: Carry forward history
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-stats
+          curl --fail --silent --location --max-time 30 \
+            -o benchmark-stats/history.jsonl \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/benchmark-stats/history.jsonl" \
+            || : > benchmark-stats/history.jsonl
+
+      - name: Run benchmark and render
+        env:
+          RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
+        run: |
+          set -euo pipefail
+          python3 -m ci.benchmark_stats \
+            --run-benchmarks \
+            --output-dir benchmark-stats \
+            --log-path benchmark-output/benchmark.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-stats
+          path: benchmark-stats
+          if-no-files-found: error
+
+      - name: Upload bench log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-log
+          path: benchmark-output/benchmark.log
+          if-no-files-found: warn
+
+      - name: Publish benchmark-stats branch
+        if: ${{ success() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          publish_dir="$(mktemp -d)"
+          cp -a benchmark-stats/. "$publish_dir/"
+          git -C "$publish_dir" init -b benchmark-stats
+          git -C "$publish_dir" config user.name "github-actions[bot]"
+          git -C "$publish_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$publish_dir" add .
+          git -C "$publish_dir" commit -m "chore: publish benchmark stats for ${GITHUB_SHA}"
+          git -C "$publish_dir" remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # Orphan branch, replaced wholesale each run. History lives in history.jsonl,
+          # which is carried forward above — so do not add branch protection here.
+          git -C "$publish_dir" push --force origin benchmark-stats

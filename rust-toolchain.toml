@@ -1,0 +1,10 @@
+[toolchain]
+# Normal builds and tests run on stable.
+#
+# The sanitizer and fuzz jobs deliberately override this with an explicit
+# nightly (`RUSTUP_TOOLCHAIN=nightly` / `cargo +nightly`), because
+# `-Zsanitizer=address` and `-Zbuild-std` are nightly-only. Pinning the repo
+# to nightly to serve those two jobs would make every other contributor
+# build on nightly for no reason.
+channel = "stable"
+components = ["rustfmt", "clippy"]

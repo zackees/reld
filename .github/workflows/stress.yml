@@ -1,0 +1,90 @@
+name: Stress
+
+# Randomized end-to-end link stress: generate a workload, compile it, link it with the
+# linker under test, run it, and check the exit code.
+#
+# The exit-code oracle is the reason this exists. A linker that mis-resolves a symbol
+# produces a binary that links cleanly and then behaves wrong; a crash-only test never
+# sees it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Number of seeds to run"
+        required: false
+        default: "500"
+  schedule:
+    # Nightly, offset off the hour to avoid the Actions rush.
+    - cron: "23 7 * * *"
+  pull_request:
+    paths:
+      - "crates/**"
+      - ".github/workflows/stress.yml"
+
+concurrency:
+  group: stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    name: ${{ matrix.os }} / ${{ matrix.linker || 'default' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # wild emits ELF only, so it is Linux-only by construction.
+          - os: ubuntu-24.04
+            linker: lld
+          - os: ubuntu-24.04
+            linker: bfd
+          - os: ubuntu-24.04
+            linker: mold
+          - os: windows-2022
+            linker: lld
+          - os: macos-14
+            linker: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linkers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld mold
+
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: choco install llvm --no-progress -y
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build stress harness
+        run: cargo build --release --bin reld-stress
+
+      - name: Run stress
+        shell: bash
+        env:
+          SEEDS: ${{ github.event.inputs.seeds || (github.event_name == 'pull_request' && '60' || '500') }}
+        run: |
+          set -euo pipefail
+          args=(--seeds "$SEEDS")
+          if [ -n "${{ matrix.linker }}" ]; then
+            args+=(--linker "${{ matrix.linker }}")
+          fi
+          cargo run --release --bin reld-stress -- "${args[@]}"
+
+      - name: Upload failing trees
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-failures-${{ matrix.os }}-${{ matrix.linker || 'default' }}
+          # reld-stress deliberately does not clean up a failing seed's tree.
+          path: |
+            ${{ runner.temp }}/reld-stress/**
+            /tmp/reld-stress/**
+          if-no-files-found: ignore
