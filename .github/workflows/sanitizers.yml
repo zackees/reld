@@ -1,0 +1,95 @@
+name: Sanitizers
+
+# ASAN / LSAN / UBSAN and Miri.
+#
+# HONEST NOTE ON CURRENT VALUE: today this repo is safe Rust with no object parsing, so
+# these jobs find approximately nothing. They exist now, wired and green, because the
+# moment reld starts mapping object files it will be full of `unsafe` — pointer casts
+# over mmap'd, attacker-shaped-but-really-just-corrupt input is the single most
+# defect-dense part of any linker. Retrofitting sanitizers onto an existing pile of
+# unsafe code is how projects end up never doing it.
+#
+# When the parsers land, this file should not need to change.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 6 * * *"
+  pull_request:
+    paths:
+      - "crates/**"
+      - ".github/workflows/sanitizers.yml"
+
+concurrency:
+  group: sanitizers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install clang/lld
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: cargo test under ASAN
+        env:
+          # -Zbuild-std is required so that std itself is instrumented; without it ASAN
+          # misses anything that crosses a std boundary and reports false negatives.
+          RUSTFLAGS: "-Zsanitizer=address -Cdebuginfo=1"
+          RUSTDOCFLAGS: "-Zsanitizer=address"
+          ASAN_OPTIONS: "detect_leaks=1:detect_stack_use_after_return=1:abort_on_error=1"
+        run: |
+          cargo +nightly test \
+            -Zbuild-std \
+            --workspace \
+            --target x86_64-unknown-linux-gnu
+
+  ubsan:
+    name: UndefinedBehaviorSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: cargo test under UBSAN
+        env:
+          RUSTFLAGS: "-Zsanitizer=undefined -Cdebuginfo=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: |
+          cargo +nightly test \
+            -Zbuild-std \
+            --workspace \
+            --target x86_64-unknown-linux-gnu
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: cargo miri test
+        env:
+          # Miri cannot run subprocesses, so the stress harness (which shells out to a
+          # compiler) is excluded. Miri's job here is the pure data structures —
+          # symbol tables, arenas, section graphs — which is exactly where it is
+          # strongest and where ASAN is weakest.
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+        run: cargo +nightly miri test -p reld-testkit --lib
