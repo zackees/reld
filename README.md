@@ -2,70 +2,82 @@
 
 *relink. reweld. reload.*
 
-A cross-platform incremental linker built for the **inner dev loop** — not for release builds.
+**A successor to the [`wild`](https://github.com/wild-linker/wild) linker** — with Windows,
+Linux, and macOS as co-equal targets, incremental linking as the architecture, and a mandate to
+beat `wild` in every measured category.
 
-> Status: **design / exploration.** No working linker yet. This repo currently holds the thesis,
-> the research that motivated it, and the target design. See [Prior art](#prior-art) for why this
-> is being started rather than contributed to an existing project.
+> **Status: design / exploration. No implementation yet.**
+> Every performance number below is a **target**, not a measurement. Nothing has been
+> benchmarked because there is nothing to benchmark. See [DESIGN.md](DESIGN.md).
 
-## Thesis
+<!-- BENCHMARK:BEGIN -->
+<!-- Auto-generated benchmark graphic is published to the `benchmarks` branch by CI and
+     embedded here. Not yet wired up — no results exist. -->
+<!-- BENCHMARK:END -->
 
-Every fast linker in existence — `lld`, `mold`, `wild`, `radlink` — optimizes the **final link**.
-They are batch linkers that happen to be quick. Correctness at release quality is the bar they
-must clear, and clearing it is what consumes years of engineering and what has killed prior
-efforts outright.
+## What it is
 
-`reld` inverts the priority:
+`wild` is the best-architected fast linker in existence — the only one that paid the cost of a
+real format abstraction instead of hardcoding ELF. `reld` starts from that and changes the
+scope:
 
-- **The edit → link → run loop is the product.** Nothing else is.
-- **Release linking is an explicit non-goal.** Ship with your platform's linker.
-- **Incremental is the architecture, not a feature.** The image is *reflowed*, not rebuilt.
+| | `wild` | `reld` |
+|---|---|---|
+| Platforms | Linux / ELF | **Windows, Linux, macOS — co-equal** |
+| Incremental linking | on the roadmap | **the architecture** |
+| Optimizes for | the final link | the **edit → link → run** loop |
+| Release-quality output | required | **explicit non-goal** |
 
-Dropping release linking as a goal is not a limitation to apologize for. It is the design
-freedom that makes the rest tractable: no LTO, no PGO/BOLT interaction, no
-determinism-for-reproducible-builds constraint, and a correctness bar set at "runs correctly on
-this developer's machine right now" instead of "byte-identical and correct for every downstream
-consumer forever."
+## The four claims
+
+1. **Runs and targets everywhere** — Windows, Linux, macOS. Not "Linux plus ports."
+2. **Incremental** — a one-object change reflows the image instead of rebuilding it.
+   Target: **warm relink in low single-digit milliseconds**, largely independent of binary size.
+3. **Faster than `wild` in every category** — cold link, warm full link, warm incremental,
+   peak RSS, *and* single-threaded. All five, or the claim fails. See
+   [DESIGN.md §2.3](DESIGN.md) for why single-threaded is on that list.
+4. **Benchmarks are auto-generated and published by CI** — same harness pattern as
+   [`zccache`](https://github.com/zackees/zccache), on pinned competitor versions, with
+   regressions published rather than hidden.
+
+## Why this is worth doing
+
+Dropping release linking as a goal is not a limitation to apologize for — it is the design
+freedom that makes the rest tractable. No LTO, no PGO/BOLT interaction, no reproducible-build
+determinism, and a correctness bar of "correct on this developer's machine right now" instead
+of "byte-identical and correct for every downstream consumer forever." That bar is what has
+historically consumed years and killed prior efforts outright.
+
+And the evidence says throughput is the wrong thing to chase. On a 46 MB debug Rust binary on
+`x86_64-pc-windows-gnu`, `ld.bfd` and `ld.lld` measure **statistically identical**. If a
+target's entire link budget is ~1 second, an infinitely fast batch linker saves under a second.
+**Incremental is the product; throughput is table stakes.**
+
+Notably, incremental linking sits **above** both Mach-O and Windows on `wild`'s own roadmap —
+the clearest signal available that this is the unserved need.
 
 ## Non-goals
-
-Stated up front, because they define the project more than the goals do:
 
 - Release / shipping builds
 - LTO
 - Byte-for-byte reproducible output
-- Being a drop-in replacement for `ld` in a distro build system
-- Beating any linker on a cold, from-scratch link
+- Drop-in `ld` replacement for distro build systems
 
-If you need any of the above, use `lld` or your platform linker. `reld` is for the 200th
-rebuild of the day, not the one that goes to customers.
+Use `lld`, `wild`, or your platform linker for those. `reld` is for the 200th rebuild of the
+day, not the one that goes to customers.
 
-## Goals
+## Honest risks
 
-- **Warm relink in the low milliseconds** for a single-object change
-- **Cross-platform**: ELF, PE/COFF, Mach-O — in that order of likelihood, not commitment
-- **Works everywhere**, including Windows hosts as first-class, not an afterthought
-- Persistent/daemon mode so the symbol graph stays hot between edits
+Recorded up front rather than discovered later — see [DESIGN.md §5](DESIGN.md):
 
-## Prior art
-
-`reld` exists because of what the landscape actually looks like, not in ignorance of it:
-
-- **[mold](https://github.com/rui314/mold)** — ELF-only by construction. The author explicitly
-  declined PE/COFF and recommends `lld` instead. Its one non-ELF backend (Mach-O) was removed
-  and commercialized as `sold`, which is now archived.
-- **[wild](https://github.com/wild-linker/wild)** — the best-architected base available: a real
-  `Platform` trait with three backends and a genuinely format-neutral layout core. Mach-O and
-  Wasm ports are in flight. Notably, **incremental linking sits above both Mach-O and Windows on
-  its own roadmap** — which is the strongest signal that this is the unserved need.
-- **[radlink](https://github.com/EpicGamesExt/raddebugger)** — a real, shipping, parallel PE/COFF
-  linker (MIT). Excellent reference for parallel COFF parsing and lock-free symbol tables.
-  MSVC-flavored and PDB-centric; no format abstraction.
-- **[lld](https://lld.llvm.org/)** — four largely separate linkers sharing ~2.5% of their code.
-  It began as a unified multi-format design and deleted that abstraction layer in 2021
-  (244 files, 36,441 lines). Worth knowing before attempting unification again.
-
-**None of them do incremental.** That is the gap.
+- **macOS is weak on speed.** Apple's `ld_prime` is already **1.4–2× faster than `ld64.lld`**
+  (measured by `wild`'s own Mach-O lead). The honest macOS pitch is incremental linking and an
+  open implementation, not raw throughput.
+- **~1.5–2 person-years per format backend** to production, by expert practitioners.
+- **Unification has failed before.** LLD began as a unified multi-format linker and deleted
+  that abstraction in 2021 — 244 files, 36,441 lines. Its backends now share ~2.5% of their
+  code. `reld` bets that Rust's monomorphized traits change this calculus, and scopes the
+  abstraction narrowly on that basis.
 
 ## License
 
@@ -73,5 +85,5 @@ BSD 3-Clause. See [LICENSE](LICENSE).
 
 ## Related
 
-- [`soldr`](https://github.com/zackees/soldr) — Rust/C++ build tool with content-addressed caching.
+- [`soldr`](https://github.com/zackees/soldr) — build tool with content-addressed caching.
   `soldr` makes the compile fast; `reld` is the other half of the loop.
