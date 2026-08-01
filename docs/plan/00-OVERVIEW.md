@@ -10,7 +10,7 @@ as a miscompiled binary three months later, not as a failing test today.
 | Doc | Contents |
 |---|---|
 | `00-OVERVIEW.md` | This file. Phase map, global rules, definition of done. |
-| `01-DECISIONS.md` | Locked decisions (D1–D12) with rationale. Do not relitigate. |
+| `01-DECISIONS.md` | Locked decisions (D1–D13) with rationale. Do not relitigate. |
 | `02-PHASE-0-FORK.md` | Fork wild, licensing, rename, argv[0] dispatch. |
 | `03-PHASE-1-HARNESS.md` | Acceptance-test infrastructure. Built **before** new format code. |
 | `04-PHASE-2-LINUX.md` | Prove inherited ELF works under reld's name and CI. |

@@ -67,6 +67,13 @@ is ignored, since MSBuild passes it unconditionally and erroring would break eve
 **not** reld's. Accept and ignore it with a warning; reld's incremental path is orthogonal and
 is selected by the daemon, not by this flag.
 
+`/LTCG` and `/GL`: LTO is a **deferred stretch goal** (D13), not a non-goal. MSBuild passes
+`/LTCG` unconditionally in release configurations, so it must be accepted-and-diagnosed — a
+message naming LTO as not yet implemented — rather than either silently ignored (which would
+mislink `/GL` objects containing IL, not machine code) or hard-errored (which would break every
+release build outright). Note `/GL` objects are **not linkable at all** without LTO, so that
+specific case must be a hard, clear error.
+
 `Acceptance:` an MSBuild-generated link line completes with warnings but no errors.
 
 ## P5-T4 — Phase gate

@@ -184,7 +184,10 @@ directory changed (state records relative paths)
 
 **C. Invocation shape** — 10 any linker option changed · 11 an input object added, removed, or
 reordered · 12 linker script / mapfile changed · 13 any unsupported option present at all
-(`--gc-sections`, `-r`, `--emit-relocs`, LTO plugins, `/OPT:REF`, `/OPT:ICF`, `/ORDER`)
+(`--gc-sections`, `-r`, `--emit-relocs`, LTO plugins, `/OPT:REF`, `/OPT:ICF`, `/ORDER`).
+Note LTO is a deferred **stretch goal**, not a non-goal (`DESIGN.md` §3.1) — when it lands it
+will be incompatible with the incremental path (gold and MSVC both fall back for it), so this
+trigger stays permanent regardless.
 
 **D. Space exhaustion** — 14 patch space exhausted in any section · 15 input section
 incompatible in size or alignment with its recorded slot · 16 **check both per-file and generic

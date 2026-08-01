@@ -139,7 +139,14 @@ Recorded so these read as decisions rather than oversights.
   fixtures. Neither wild nor mold has a fuzzer. Revisit once the formats are stable — the
   requirement will be *clean error, never panic, never wrong binary*.
 - **No byte-reproducibility tests.** Explicit non-goal.
-- **No release-quality assertions** — no LTO, no PGO/BOLT interaction. Non-goals per `DESIGN.md`.
+- **No release-quality assertions** — no PGO/BOLT interaction, no reproducibility. Non-goals per
+  `DESIGN.md`.
+- **No LTO acceptance tests yet.** (Thin)LTO is a **stretch goal, sequenced after the fast
+  linker on all platforms** (`DESIGN.md` §3.1) — not a non-goal. What v0 *must* test is that LTO
+  flags produce a clear diagnostic rather than a silent mislink: one fixture per platform
+  passing `-flto` / `--plugin` / `/LTCG` and asserting the error names the feature. Note the fork
+  inherits wild's linker-plugin LTO (with known issues) on ELF, so P2 must not regress it — add
+  a smoke test pinning current behaviour rather than deleting the code.
 
 ---
 

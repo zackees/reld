@@ -128,6 +128,28 @@ Phase 3 (`/OPT:REF` equivalent). **ICF is deferred indefinitely** — it is a si
 (radlink's is ~630 lines of generation-tagged concurrent hash tables) and reld optimizes the
 dev loop, where output size is irrelevant.
 
+## D13 — (Thin)LTO. **Locked: stretch goal, sequenced after the fast linker. Not a non-goal.**
+
+LTO is **deferred, not rejected**. The fast linker across Linux, Windows and macOS is the
+priority; LTO interacts with nearly every subsystem (symbol resolution, archive extraction,
+section layout, debug info) and pulling it forward would slow down the thing the project exists
+to deliver. See `DESIGN.md` §3.1.
+
+Consequences for every phase:
+
+- **Do not delete wild's linker-plugin LTO.** The fork inherits a working-with-known-issues
+  implementation on ELF (`linker_plugins.rs`, ~1467 LOC, driven from `lib.rs:325` and
+  `lib.rs:374`). P2 must not regress it; pin current behaviour with a smoke test.
+- **Until LTO is implemented on a given format, its flags are rejected or ignored with a
+  specific diagnostic naming the feature** — never silently mislinked. This matters most where
+  build systems pass the flag unconditionally: rustc passes `-plugin` on the MinGW gcc path
+  (unless `-fno-use-linker-plugin`), and MSBuild passes `/LTCG`.
+- When LTO does land it will be **incompatible with the incremental path** — gold and MSVC both
+  fall back to a full link for it — so trigger 13 in `09-INCREMENTAL.md` §I1 stays permanent.
+
+Do not treat "LTO is a non-goal" as current. Earlier drafts of `DESIGN.md` and `README.md` said
+that; both have been corrected.
+
 ## D12 — Test oracle. **Locked: semantic differential, not byte comparison.**
 
 Byte-comparing our output against a reference linker is wrong — reproducible output is an

@@ -48,8 +48,9 @@ scope:
 ## Why this is worth doing
 
 Dropping release linking as a goal is not a limitation to apologize for — it is the design
-freedom that makes the rest tractable. No LTO, no PGO/BOLT interaction, no reproducible-build
-determinism, and a correctness bar of "correct on this developer's machine right now" instead
+freedom that makes the rest tractable. LTO deferred, no PGO/BOLT interaction, no
+reproducible-build determinism, and a correctness bar of "correct on this developer's machine
+right now" instead
 of "byte-identical and correct for every downstream consumer forever." That bar is what has
 historically consumed years and killed prior efforts outright.
 
@@ -64,12 +65,18 @@ the clearest signal available that this is the unserved need.
 ## Non-goals
 
 - Release / shipping builds
-- LTO
 - Byte-for-byte reproducible output
 - Drop-in `ld` replacement for distro build systems
 
 Use `lld`, `wild`, or your platform linker for those. `reld` is for the 200th rebuild of the
 day, not the one that goes to customers.
+
+## Stretch goals
+
+**(Thin)LTO is a stretch goal, not a non-goal** — deliberately sequenced after the fast linker
+on all three platforms. The inner loop is the priority; LTO touches nearly every subsystem and
+would slow down the thing this project exists to deliver. Until then, LTO flags are rejected
+with a clear diagnostic rather than silently mislinked.
 
 ## Honest risks
 
