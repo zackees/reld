@@ -1,0 +1,17 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local scratch
+/.tmp/
+/dist/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
