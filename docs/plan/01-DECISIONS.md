@@ -38,14 +38,38 @@ the **GNU dialect with the COFF platform** — the format axis and the argument-
 independent, and the code must treat them as such. Select via `-m i386pep` (the MinGW emulation
 name) or an explicit `--target`.
 
-## D3 — v0 target matrix. **Locked.**
+## D3 — v0 target matrix. **REVISED after review 01: msvc before gnu.**
 
 | Order | Target | Notes |
 |---|---|---|
 | 1 | `x86_64-unknown-linux-gnu` | Inherited working |
-| 2 | `x86_64-pc-windows-gnu` | First new backend |
+| 2 | **`x86_64-pc-windows-msvc`** | First new backend; debug info deferred |
 | 3 | `aarch64-apple-darwin` | Apple Silicon, not x86_64 |
-| 4 | `x86_64-pc-windows-msvc` | After COFF is proven |
+| 4 | `x86_64-pc-windows-gnu` | After the COFF core is proven |
+
+**The original ordering (gnu first) was wrong and is superseded.** It priced only the
+debug-info axis and priced MinGW compatibility at zero. Corrected ledger:
+
+| | windows-gnu | windows-msvc |
+|---|---|---|
+| Debug info | DWARF, but **COMDAT-grouped `.debug_frame`** | PDB — deferred per D5 |
+| Auto-import + runtime pseudo-relocs | **required** (R1) | n/a |
+| Default linker-script emulation: ~25 provided symbols, `KEEP` set, `.idata$N` ordering | **required** (R5, R6) | n/a — `link.exe` semantics *are* the spec |
+| `.rsrc` | **every link** (`default-manifest.o`) | required |
+| `.CRT$X*` + `.ctors`/`.dtors` | **both** | `.CRT$X*` only |
+| `.drectve` | not needed | needed |
+| In-tree reference implementation | **none** | radlink, 19.7k LOC, exactly this target |
+| Spec quality | folklore + binutils `emultempl/pe.em` | Microsoft PE/COFF spec + radlink + lld/COFF |
+
+Findings R1, R5 and R6 are all in the region where radlink gives zero help. Going msvc-first
+reduces the net-new-without-reference surface to roughly zero, because radlink carries COMDAT,
+weak externals, base relocations, `.rsrc`, TLS, imports/exports and `.drectve` case-for-case.
+
+The COFF **core** (parsing, COMDAT, relocations, base relocations, writer, `.pdata`) is shared
+between the two ABIs. windows-gnu then becomes an additive phase: the GNU arg dialect,
+auto-import, default-script emulation, `.ctors`/`.dtors`, and DWARF.
+
+Accepted cost: **no debugger on Windows until D5 is resolved.** That is the explicit tradeoff.
 
 ## D4 — Input parsing. **Locked: the `object` crate for v0.**
 
@@ -110,16 +134,77 @@ more attractive once a daemon holds the table hot across links). radlink's
 take-exchange/CAS-put-back merge protocol maps cleanly onto `AtomicPtr::swap` +
 `compare_exchange`. Nodes are never freed, which sidesteps reclamation entirely.
 
-## D10 — MinGW features explicitly NOT supported in v0.
+## D10 — **REVISED after review 01. The original decision was refuted by measurement.**
 
-Each must produce a clear diagnostic naming the feature, never a silent mislink:
+The original text said auto-import / pseudo-relocs could simply be rejected, requiring
+`__declspec(dllimport)`. **That is false.** Measured on the local MSYS2 UCRT64 gcc 14.2.0
+toolchain, a six-line C++ program using `std::string` and `try/throw/catch`:
 
-- **Auto-import / pseudo-relocs** (`_pei386_runtime_relocator`). radlink does not implement these
-  either. Error out; require `__declspec(dllimport)`.
+```
+$ g++ -g cpp.cpp -o cpp.exe -Wl,--disable-auto-import,--disable-runtime-pseudo-reloc
+ld.exe: cpp.cpp:(.rdata$_ZTISt13runtime_error+0x0): undefined reference to
+        `vtable for __cxxabiv1::__si_class_type_info'
+```
+
+Those are **data** exports of `libstdc++-6.dll` referenced from a constant initializer. MinGW
+C++ headers do not mark them `dllimport` and no compiler flag changes that. "Reject auto-import"
+means "no C++ on the default MinGW toolchain."
+
+Revised position for the windows-gnu phase:
+
+- **Auto-import + `--enable-runtime-pseudo-reloc` v2 are REQUIRED**, not optional. ~200 LOC;
+  reference `lld/COFF/MinGW.cpp` and mingw-w64's `pseudo-reloc.c`. radlink gives zero help.
+- **The default `i386pep` script must be reimplemented, not merely its ordering.** `-T` is still
+  rejected (verified: MinGW gcc never passes it), but the script *provides* ~25 symbols the CRT
+  undefined-references — `__CTOR_LIST__`, `__RUNTIME_PSEUDO_RELOC_LIST__`, `__rt_psrelocs_*`,
+  `__IAT_{start,end}__`, `___crt_x{c,i,l,p,t}_{start,end}__`, `__data_start__`, `etext`, `end` —
+  plus a `KEEP` set that doubles as the `--gc-sections` root set.
+- **`.rsrc` is required on every link.** Every MinGW executable links `default-manifest.o`, a
+  `.rsrc` object. Do not confuse resource *objects* (unconditional) with manifest *files*
+  (deferrable).
+- **`.CRT$X*` and `.ctors`/`.dtors` both run** on mingw-w64 x86_64. `crt2.o` contains
+  `.CRT$XCAA`/`.CRT$XIAA` and references `__xc_a`/`__xc_z`/`__xi_a`/`__xi_z`.
+- **`--gc-sections` is passed by default by rustc on windows-gnu**, so it is not an optimization
+  and must land before the phase gate.
+
+Still genuinely deferred, each with a clear diagnostic naming the feature:
+
 - **Delay-load imports.**
 - **`/GUARD:CF` control-flow guard**, manifests, hotpatch padding.
-- **Linker scripts.** MinGW's `ld` uses default scripts that define section merge order; we
-  implement that ordering natively and **reject** `-T` with an explicit message.
+- **Custom linker scripts** via `-T` — rejected with an explicit message.
+
+## D14 — Wasm. **Locked: delete the backend in P0.**
+
+The fork inherits a **fourth** platform the original plan was entirely unaware of:
+`PlatformKind::{Elf, MachO, Wasm}`, with `wasm.rs` (5766) + `wasm_writer.rs` (482) +
+`args/wasm.rs` (305) + `wasm_wasm32.rs` (105) ≈ **6,650 LOC** and two dedicated CI jobs
+requiring wasmtime, wabt, wasi-libc and wasm-tools.
+
+Delete it in P0 and record the removal in `UPSTREAM.md` as an intentional divergence. Rationale:
+consistent with D3's four-target matrix, removes ~6,650 LOC from every future refactor of the
+163-member `Platform` trait, and drops two CI jobs.
+
+Accepted cost: raises the upstream-rebase delta, and forecloses wasm as a future target without
+re-porting.
+
+**Consequence for every enumeration in the plan:** counts of "add an arm" edit sites were written
+assuming three platforms. After deletion they are correct at three (Elf, MachO, Coff); before
+deletion they are four. Do the deletion first.
+
+## D15 — Incremental sequencing. **REVISED: the incremental workstream moves ahead of P4/P5.**
+
+The original plan put all incremental work after Phase 4. Combined with `DESIGN.md`'s own
+~1.5–2 person-years-per-format estimate, the product feature would not start for 3–4
+person-years — by which time, per `09-INCREMENTAL.md`'s own argument, the competitive opening
+has closed. That is the wild failure mode exactly: wild was *named* for incremental linking and
+has not reached it in two years because the base linker consumed the time.
+
+Revised: the first incremental phase lands **immediately after P2 (Linux proven)**, on ELF
+alone, before Windows and macOS.
+
+⚠️ **But its content is not what the plan originally specified.** See review finding R25 — the
+phase must be re-derived from measurement before it is scheduled. Caching parsed inputs targets
+~5% of link time; string merging is ~66%. This is an open item, not a settled design.
 
 ## D11 — Identical Code Folding and `--gc-sections`.
 

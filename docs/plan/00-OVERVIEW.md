@@ -22,17 +22,39 @@ as a miscompiled binary three months later, not as a failing test today.
 
 ## Phase map
 
+**Revised after adversarial review — see `REVIEW-01.md` and `REVIEW-02.md`. The original map is
+superseded.**
+
 ```
-P0 Fork ──► P1 Harness ──► P2 Linux parity ──► P3 win-gnu ──► P4 macOS ──► P5 win-msvc
-                                                    │                          │
-                                                    └──────────► I0..I5 Incremental
-                                                       (starts after P4 green)
+P0 Fork ──► P1 Harness ──► P2 Linux parity ──► IX Incremental (ELF only) ──► P3 win-msvc
+   │                                                                            │
+   └─ I0 preconditions run concurrently through P0–P2 ─┘                        ▼
+                                                                             P4 macOS
+                                                                                │
+                                                                                ▼
+                                                                             P5 win-gnu
+                                                                                │
+                                                                                ▼
+                                                                        I3.. patching etc.
 ```
 
-Phases are strictly sequential. **P1 before P3 is the load-bearing ordering** — the differential
-harness must be proven against a known-good linker before it is asked to judge our own new
-backend. A harness first exercised on unproven code cannot distinguish "the linker is wrong"
-from "the harness is wrong."
+Three orderings are load-bearing:
+
+1. **P1 before any new backend.** The differential harness must be proven against a known-good
+   linker before it judges our own new code. A harness first exercised on unproven code cannot
+   distinguish "the linker is wrong" from "the harness is wrong."
+2. **IX before P3/P4/P5** (D15). The incremental thesis gets proven on ELF alone, before two
+   more backends consume the schedule. This directly de-risks the failure mode that stopped
+   wild. ⚠️ **IX's content is an open item** — see `REVIEW-02.md` R25; the phase must be
+   re-derived from measurement, because the originally specified version targets ~5% of link
+   time while string merging is ~66%.
+3. **win-msvc before win-gnu** (D3, revised). radlink is an in-tree MSVC-target reference;
+   MinGW's requirements — auto-import, default-script emulation, `.rsrc`, `.CRT$X*` — are all in
+   the region where it gives zero help.
+
+I0's preconditions (content-addressed identity, global section IDs, layout journaling,
+`--verify`, no-global-state, `reld log`) are built **concurrently through P0–P2**, not after.
+Retrofitting any of them is far more expensive than maintaining them.
 
 ## Global rules
 
