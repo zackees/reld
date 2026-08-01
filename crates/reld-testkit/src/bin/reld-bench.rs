@@ -21,7 +21,10 @@ use clap::Parser;
 use reld_testkit::{generate, WorkloadSpec};
 
 #[derive(Parser, Debug)]
-#[command(name = "reld-bench", about = "Link-time benchmark against reference linkers")]
+#[command(
+    name = "reld-bench",
+    about = "Link-time benchmark against reference linkers"
+)]
 struct Args {
     /// C compiler used to produce objects and drive the link.
     #[arg(long, default_value = "clang")]
@@ -46,15 +49,18 @@ struct Args {
 
 /// Workload sizes. Small is where incremental linking will eventually matter most; large is
 /// where throughput differences become visible at all.
-const SCENARIOS: &[(&str, WorkloadSpec)] = &[];
-
 fn scenarios() -> Vec<(String, WorkloadSpec)> {
     vec![
-        ("small (16 units)".into(), WorkloadSpec::small(0xBE))
-        ,
+        ("small (16 units)".into(), WorkloadSpec::small(0xBE)),
         (
             "medium (128 units)".into(),
-            WorkloadSpec { seed: 0xBE, units: 128, symbols_per_unit: 32, comdat_fns: 16, ..Default::default() },
+            WorkloadSpec {
+                seed: 0xBE,
+                units: 128,
+                symbols_per_unit: 32,
+                comdat_fns: 16,
+                ..Default::default()
+            },
         ),
         ("large (512 units)".into(), WorkloadSpec::large(0xBE)),
     ]
@@ -66,7 +72,6 @@ fn default_linkers() -> Vec<&'static str> {
 }
 
 fn main() -> Result<()> {
-    let _ = SCENARIOS;
     let args = Args::parse();
 
     let root = match &args.workdir {
@@ -140,11 +145,19 @@ fn compile_all(args: &Args, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathB
     for src in sources {
         let obj = src.with_extension("o");
         let mut cmd = Command::new(&args.cc);
-        cmd.arg("-c").arg(src).arg("-o").arg(&obj).arg("-I").arg(dir).arg("-O0");
+        cmd.arg("-c")
+            .arg(src)
+            .arg("-o")
+            .arg(&obj)
+            .arg("-I")
+            .arg(dir)
+            .arg("-O0");
         if !cfg!(windows) {
             cmd.arg("-fPIC");
         }
-        let out = cmd.output().with_context(|| format!("spawning {}", args.cc))?;
+        let out = cmd
+            .output()
+            .with_context(|| format!("spawning {}", args.cc))?;
         if !out.status.success() {
             bail!("compile failed: {}", String::from_utf8_lossy(&out.stderr));
         }
@@ -153,7 +166,7 @@ fn compile_all(args: &Args, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathB
     Ok(objects)
 }
 
-fn link_once(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str, out: &Path) -> Result<()> {
+fn link_once(args: &Args, objects: &[PathBuf], linker: &str, out: &Path) -> Result<()> {
     let mut cmd = Command::new(&args.cc);
     cmd.args(objects).arg("-o").arg(out);
     if !linker.is_empty() {
@@ -201,7 +214,7 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
     let out = dir.join(format!("bench-{linker}.bin"));
 
     for _ in 0..args.warmup {
-        link_once(args, dir, objects, linker, &out)?;
+        link_once(args, objects, linker, &out)?;
     }
 
     let mut samples = Vec::with_capacity(args.trials);
@@ -210,7 +223,7 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
         // up-to-date target.
         let _ = std::fs::remove_file(&out);
         let t = Instant::now();
-        link_once(args, dir, objects, linker, &out)?;
+        link_once(args, objects, linker, &out)?;
         samples.push(t.elapsed());
     }
     samples.sort();

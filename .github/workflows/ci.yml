@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Smoke-test the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --bin reld -- --targets
+          # reld exits non-zero by design until it is implemented; assert that contract
+          # rather than letting a future accidental exit(0) go unnoticed.
+          if cargo run --quiet --bin reld; then
+            echo "::error::reld exited 0 but is not implemented"
+            exit 1
+          fi
+
+  smoke-link:
+    name: Harness smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install clang/lld (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+
+      - name: Stress (short)
+        run: cargo run --release --bin reld-stress -- --seeds 15
+
+      - name: Bench (short) and render
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pillow
+          cargo run --release --bin reld-bench -- --trials 2 --linker lld > bench.log
+          cat bench.log
+          python3 -m ci.benchmark_stats --input-log bench.log --output-dir out
+          test -s out/benchmark-link.jpg
+
+  python:
+    name: Python
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet pillow pytest
+      - run: python -m pytest ci/tests -q

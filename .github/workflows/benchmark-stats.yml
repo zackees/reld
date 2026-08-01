@@ -37,9 +37,23 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y clang lld mold python3-pil
-          # wild is not packaged; a failure here is not fatal — reld-bench probes each
+
+          # wild is not packaged. A failure here is not fatal — reld-bench probes each
           # linker and reports an unavailable one as n/a, which shows up in the chart.
           cargo install --locked wild-linker || echo "wild unavailable; will report n/a"
+
+          # `-fuse-ld=wild` makes clang search for `ld.wild`, but the crate installs a
+          # binary called `wild`. Without this alias wild is silently reported as n/a
+          # forever, which looks like a working pipeline and is not.
+          if command -v wild >/dev/null 2>&1; then
+            ln -sf "$(command -v wild)" "$HOME/.cargo/bin/ld.wild"
+          fi
+
+          # Fail loudly if a linker we expect is missing, rather than quietly charting n/a.
+          for l in ld.lld ld.mold; do
+            command -v "$l" >/dev/null || { echo "::error::$l missing"; exit 1; }
+          done
+          command -v ld.wild >/dev/null || echo "::warning::ld.wild missing; wild will chart as n/a"
 
       - name: Carry forward history
         run: |

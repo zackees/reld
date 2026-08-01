@@ -22,7 +22,10 @@ use clap::Parser;
 use reld_testkit::{generate, WorkloadSpec};
 
 #[derive(Parser, Debug)]
-#[command(name = "reld-stress", about = "Randomized end-to-end link stress testing")]
+#[command(
+    name = "reld-stress",
+    about = "Randomized end-to-end link stress testing"
+)]
 struct Args {
     /// Run seeds 0..N.
     #[arg(long, default_value_t = 50, conflicts_with = "seed")]
@@ -112,7 +115,13 @@ fn run_seed(args: &Args, seed: u64, dir: &Path) -> Result<()> {
     for src in &workload.sources {
         let obj = src.with_extension("o");
         let mut cmd = Command::new(&args.cc);
-        cmd.arg("-c").arg(src).arg("-o").arg(&obj).arg("-I").arg(dir).arg("-O0");
+        cmd.arg("-c")
+            .arg(src)
+            .arg("-o")
+            .arg(&obj)
+            .arg("-I")
+            .arg(dir)
+            .arg("-O0");
         // PIC is the default and the flag is rejected outright on Windows targets.
         if !cfg!(windows) {
             cmd.arg("-fPIC");

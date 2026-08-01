@@ -61,12 +61,24 @@ impl Default for WorkloadSpec {
 impl WorkloadSpec {
     /// A small workload — fast enough for per-commit CI.
     pub fn small(seed: u64) -> Self {
-        Self { seed, units: 16, symbols_per_unit: 16, comdat_fns: 4, ..Default::default() }
+        Self {
+            seed,
+            units: 16,
+            symbols_per_unit: 16,
+            comdat_fns: 4,
+            ..Default::default()
+        }
     }
 
     /// A large workload — for benchmarking and nightly stress.
     pub fn large(seed: u64) -> Self {
-        Self { seed, units: 512, symbols_per_unit: 64, comdat_fns: 64, ..Default::default() }
+        Self {
+            seed,
+            units: 512,
+            symbols_per_unit: 64,
+            comdat_fns: 64,
+            ..Default::default()
+        }
     }
 
     /// Derive a randomized spec from a seed. Used by stress runs so that the *shape* varies,
@@ -134,7 +146,11 @@ pub fn generate(spec: &WorkloadSpec, root: &Path) -> Result<Workload> {
     let manifest = root.join("workload.json");
     fs::write(&manifest, serde_json::to_string_pretty(spec)?).context("writing workload.json")?;
 
-    Ok(Workload { root: root.to_path_buf(), sources, spec: spec.clone() })
+    Ok(Workload {
+        root: root.to_path_buf(),
+        sources,
+        spec: spec.clone(),
+    })
 }
 
 fn write_common_header(spec: &WorkloadSpec, root: &Path) -> Result<()> {
@@ -174,7 +190,10 @@ fn render_unit(spec: &WorkloadSpec, unit: usize, rng: &mut ChaCha8Rng) -> String
     }
 
     if rng.gen_bool(spec.tls_ratio.clamp(0.0, 1.0)) {
-        s.push_str(&format!("_Thread_local int unit_{unit:04}_tls = {};\n\n", unit as i32));
+        s.push_str(&format!(
+            "_Thread_local int unit_{unit:04}_tls = {};\n\n",
+            unit as i32
+        ));
     }
 
     for sym in 0..spec.symbols_per_unit {
@@ -223,10 +242,7 @@ fn render_main(spec: &WorkloadSpec) -> String {
     }
     // acc is 0; the exit code encodes the unit count so a mislinked binary is detectable
     // by its return value rather than only by crashing.
-    s.push_str(&format!(
-        "    return (acc + {}) % 256;\n}}\n",
-        spec.units
-    ));
+    s.push_str(&format!("    return (acc + {}) % 256;\n}}\n", spec.units));
     s
 }
 
