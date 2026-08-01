@@ -11,8 +11,13 @@ beat `wild` in every measured category.
 > benchmarked because there is nothing to benchmark. See [DESIGN.md](DESIGN.md).
 
 <!-- BENCHMARK:BEGIN -->
-<!-- Auto-generated benchmark graphic is published to the `benchmarks` branch by CI and
-     embedded here. Not yet wired up — no results exist. -->
+[![Latest reld link benchmark](https://raw.githubusercontent.com/zackees/reld/benchmark-stats/benchmark-link.jpg)](https://github.com/zackees/reld/tree/benchmark-stats)
+
+*Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
+published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
+alongside `latest.json` and `history.jsonl`. The `reld` column reads `n/a` until there is a
+linker to measure — the column is published empty rather than omitted, so the gap is visible
+rather than implied. Reproduce locally with `cargo run --release --bin reld-bench`.*
 <!-- BENCHMARK:END -->
 
 ## What it is
