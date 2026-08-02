@@ -10,6 +10,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 use std::sync::OnceLock;
+use std::time::Duration;
+
+use super::external_process;
+use super::external_process::TimedOutput;
+
+const EXTERNAL_TEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub(super) fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
     mold_tests::collect_tests(tests, filter)
@@ -173,5 +179,13 @@ fn run_external_test(external_test: &Path, extra_env: &[(&str, &str)]) -> Result
         command.env(key, value);
     }
 
-    command.output().map_err(Into::into)
+    match external_process::output_with_timeout(&mut command, EXTERNAL_TEST_TIMEOUT)? {
+        TimedOutput::Completed(output) => Ok(output),
+        TimedOutput::TimedOut => Err(format!(
+            "External test `{}` timed out after {} seconds; terminated its process group",
+            external_test.display(),
+            EXTERNAL_TEST_TIMEOUT.as_secs(),
+        )
+        .into()),
+    }
 }

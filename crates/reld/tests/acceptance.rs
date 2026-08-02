@@ -307,6 +307,9 @@
 #[allow(dead_code)]
 mod external_tests;
 
+#[path = "external_process.rs"]
+mod external_process;
+
 use bitflags::bitflags;
 use gimli::Reader as _;
 use itertools::Itertools;

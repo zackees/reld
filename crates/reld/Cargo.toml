@@ -29,6 +29,10 @@ name = "external"
 path = "tests/external.rs"
 harness = false
 
+[[test]]
+name = "external-runner"
+path = "tests/external_process.rs"
+
 [dependencies]
 reld-core = { path = "../reld-core", version = "0.0.0", default-features = false }
 
@@ -65,6 +69,9 @@ which.workspace = true
 
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
 wait-timeout.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
 
 [features]
 default = ["fork", "plugins", "zstd"]

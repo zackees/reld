@@ -201,7 +201,7 @@ jobs:
           "${RUNNER_TEMP}/smoke-apple-ld"
           "${RUNNER_TEMP}/smoke-lld"
 
-      - name: Linux native and acceptance tests
+      - name: Linux build and native tests
         if: matrix.kind == 'linux-gnu'
         shell: bash
         env:
@@ -214,8 +214,32 @@ jobs:
           $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
           $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test external-runner 2>&1 | tee -a platform-tests.log
+
+      - name: Linux acceptance tests
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+        run: |
+          set -euxo pipefail
           $CARGO_COMMAND test -p reld --test acceptance 2>&1 | tee acceptance-tests.log
+
+      - name: Linux differential tests
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
           $CARGO_COMMAND run --bin reld-difftest -- --seeds 100 --reference-linker bfd 2>&1 | tee difftest.log
+
+      - name: Linux mold corpus
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+        run: |
+          set -euxo pipefail
           $CARGO_COMMAND test -p reld --test external -- mold 2>&1 | tee external-tests.log
 
       - name: Windows GNU native tests
