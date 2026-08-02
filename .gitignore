@@ -25,3 +25,6 @@ __pycache__/
 
 /out/
 *.log
+
+# Reference checkouts (clud-managed)
+/.extern-repos/

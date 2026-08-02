@@ -24,9 +24,9 @@ Where `reld` diverges is scope and priority:
 
 The last row is what makes the rest affordable. `wild` must eventually be correct enough to
 link a distribution. `reld` must be correct enough to link *your machine, right now, on the
-200th rebuild of the day*. Dropping the release bar removes LTO, PGO/BOLT interaction,
-reproducible-build determinism, and the long tail of compatibility that has historically
-consumed years — and killed prior efforts outright.
+200th rebuild of the day*. Dropping the release bar defers LTO, and removes PGO/BOLT
+interaction, reproducible-build determinism, and the long tail of compatibility that has
+historically consumed years — and killed prior efforts outright.
 
 ## 2. Goals
 
@@ -75,7 +75,6 @@ commit.** See §6.
 Stated as prominently as the goals, because they define the project:
 
 - Release / shipping builds
-- LTO
 - Byte-for-byte reproducible output
 - Drop-in `ld` replacement for distro build systems
 - Winning a cold, from-scratch link against a batch linker on its own terms
@@ -83,6 +82,18 @@ Stated as prominently as the goals, because they define the project:
 
 If you need any of these, use `lld`, `wild`, or your platform linker. `reld` is for the inner
 loop.
+
+### 3.1 Stretch goals — deferred, not rejected
+
+**(Thin)LTO is a stretch goal, not a non-goal.** It is deliberately sequenced *after* the fast
+linker across all target platforms, because a fast non-LTO linker is what the inner loop
+actually needs and because LTO interacts with almost every other subsystem — sequencing it
+early would slow down the thing the project exists to deliver.
+
+Until it is implemented, LTO flags (`-flto`, `--plugin`, `/LTCG`) must be **rejected or ignored
+with a clear, specific diagnostic** — never silently mislinked. Note that `wild` already has a
+linker-plugin LTO implementation with known issues; the fork inherits it, so on ELF the starting
+position is "partially works", not "absent". Do not delete that code.
 
 ## 4. Architecture
 
