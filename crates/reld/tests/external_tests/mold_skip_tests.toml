@@ -51,10 +51,37 @@ tests = [
   "warn-once.sh",
 ]
 
-[skipped_groups.version_script]
-reason = "Reld's version-script implementation does not yet satisfy these cases"
+[skipped_groups.symbol_versioning]
+reason = "Reld's version-script and symbol-versioning implementations do not yet satisfy these cases"
 tracking_issue = 14
-tests = ["version-script15.sh"]
+tests = [
+  "empty-default-symver.sh",
+  "linker-script-version.sh",
+  "symver-dup.sh",
+  "version-script15.sh",
+  "version-script23.sh",
+  "versym-local-def.sh",
+]
+
+[skipped_groups.icf_semantics]
+reason = "Reld's identical-code-folding implementation does not yet preserve these preemption and alignment semantics"
+tracking_issue = 14
+tests = ["icf-alignment-bug.sh", "icf-preemption.sh"]
+
+[skipped_groups.as_needed_gc]
+reason = "Reld's --as-needed and --gc-sections interaction does not yet satisfy this case"
+tracking_issue = 14
+tests = ["as-needed-gc.sh"]
+
+[skipped_groups.static_dso]
+reason = "Reld does not yet match the required static-link handling and diagnostic for a DSO input"
+tracking_issue = 14
+tests = ["static-dso.sh"]
+
+[skipped_groups.symtab_binding]
+reason = "Reld does not yet emit the required symbol-table binding for this case"
+tracking_issue = 14
+tests = ["symtab-binding.sh"]
 
 [skipped_groups.z_options]
 reason = "Reld does not yet implement the required -z option semantics"

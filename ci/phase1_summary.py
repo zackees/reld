@@ -9,17 +9,21 @@ from pathlib import Path
 
 
 RUST_RESULT = re.compile(
-    r"test result: ok\. (?P<run>\d+) passed; \d+ failed; (?P<skip>\d+) ignored"
+    r"test result: (?:ok|FAILED)\. (?P<passed>\d+) passed; "
+    r"(?P<failed>\d+) failed; (?P<skip>\d+) ignored"
 )
 DIFFTEST_RESULT = re.compile(r"(?P<run>\d+) seeds, 0 differential failures")
+ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def counts(text: str) -> tuple[int, int]:
+    text = ANSI_CSI.sub("", text)
     run = skipped = 0
-    for pattern in (RUST_RESULT, DIFFTEST_RESULT):
-        for match in pattern.finditer(text):
-            run += int(match.group("run"))
-            skipped += int(match.groupdict().get("skip", 0))
+    for match in RUST_RESULT.finditer(text):
+        run += int(match.group("passed")) + int(match.group("failed"))
+        skipped += int(match.group("skip"))
+    for match in DIFFTEST_RESULT.finditer(text):
+        run += int(match.group("run"))
     return run, skipped
 
 
@@ -34,7 +38,7 @@ def main() -> int:
         action="append",
         default=[],
         metavar="PATH=COUNT",
-        help="require passed plus ignored in the named log to equal COUNT",
+        help="require passed plus failed plus ignored in the named log to equal COUNT",
     )
     args = parser.parse_args()
 
