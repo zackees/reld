@@ -59,6 +59,9 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install clang/lld (Linux)
@@ -72,10 +75,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pillow
+          python -m pip install --quiet pillow
           cargo run --release --bin reld-bench -- --trials 2 --linker lld > bench.log
           cat bench.log
-          python3 -m ci.benchmark_stats --input-log bench.log --output-dir out
+          python -m ci.benchmark_stats --input-log bench.log --output-dir out
           test -s out/benchmark-link.jpg
 
   python:
