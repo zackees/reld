@@ -40,9 +40,9 @@
 //#SkipArch: x86_64,riscv64,loongarch64,ppc64le
 
 //#Config:clang-tls-desc:gcc-tls-desc
-//#CompArgs:-mtls-dialect=gnu2 -fPIC
+//#CompArgs:-mtls-dialect=desc -fPIC
 //#Compiler:clang
-//#RequiresCompilerFlags:-mtls-dialect=gnu2
+//#RequiresCompilerFlags:-mtls-dialect=desc
 //#Arch: x86_64
 
 //#Config:clang-tls-desc-desc:clang-tls-desc
@@ -50,7 +50,7 @@
 //#SkipArch: x86_64,riscv64
 
 //#Config:clang-tls-desc-shared:clang-tls-desc
-//#CompArgs:-mtls-dialect=gnu2 -fPIC
+//#CompArgs:-mtls-dialect=desc -fPIC
 //#Shared:tlsdesc-obj.c
 //#Arch: x86_64
 

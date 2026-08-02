@@ -31,7 +31,11 @@ harness = false
 
 [[test]]
 name = "external-runner"
-path = "tests/external_process.rs"
+path = "tests/external_runner.rs"
+
+[[test]]
+name = "acceptance-policy"
+path = "tests/acceptance_policy_tests.rs"
 
 [dependencies]
 reld-core = { path = "../reld-core", version = "0.0.0", default-features = false }

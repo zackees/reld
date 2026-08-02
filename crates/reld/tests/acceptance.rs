@@ -307,6 +307,8 @@
 #[allow(dead_code)]
 mod external_tests;
 
+mod acceptance_policy;
+
 #[path = "external_process.rs"]
 mod external_process;
 
@@ -374,9 +376,14 @@ pub(crate) fn main() -> Result<std::process::ExitCode> {
         args.color = Some(libtest_mimic::ColorSetting::Always);
     }
     let filter = Filter::new(&args);
+    let enforce_aggregate_coverage = acceptance_policy::should_enforce_aggregate_coverage(&args);
     let mut tests = Vec::new();
     collect_tests(&mut tests, &filter)?;
-    Ok(libtest_mimic::run(&args, tests).exit_code())
+    let conclusion = libtest_mimic::run(&args, tests);
+    if enforce_aggregate_coverage {
+        verify_aggregate_oracle_coverage()?;
+    }
+    Ok(conclusion.exit_code())
 }
 
 #[allow(dead_code)]
@@ -5762,7 +5769,38 @@ impl Clone for LinkCommand {
     }
 }
 
-fn diff_shared_objects(config: &Config, programs: &[Program]) -> Result {
+const ORACLE_COVERAGE_FLOOR: u64 = 50;
+static AGGREGATE_ORACLE_COVERAGE: LazyLock<Mutex<acceptance_policy::AggregateOracleCoverage>> =
+    LazyLock::new(|| Mutex::new(acceptance_policy::AggregateOracleCoverage::default()));
+
+fn record_oracle_coverage(platform: PlatformKind, report: &reld_diff::Report) {
+    let Some(coverage) = report.coverage.as_ref() else {
+        return;
+    };
+    let (diffed, total) = coverage.relocation_counts();
+    let format = match platform {
+        PlatformKind::Elf => acceptance_policy::OracleFormat::Elf,
+        PlatformKind::MachO => acceptance_policy::OracleFormat::MachO,
+    };
+    AGGREGATE_ORACLE_COVERAGE
+        .lock()
+        .unwrap()
+        .record(format, diffed, total);
+}
+
+fn verify_aggregate_oracle_coverage() -> Result {
+    let aggregate = AGGREGATE_ORACLE_COVERAGE.lock().unwrap();
+    for summary in aggregate.summaries(ORACLE_COVERAGE_FLOOR) {
+        println!("{summary}");
+    }
+    aggregate.verify(ORACLE_COVERAGE_FLOOR)
+}
+
+fn diff_shared_objects(
+    config: &Config,
+    programs: &[Program],
+    validation: &mut acceptance_policy::FixtureOracleValidation,
+) -> Result {
     // If we're using a single linker for all shared objects, then there's nothing to diff.
     if config.so_single_linker.is_some() {
         return Ok(());
@@ -5787,17 +5825,22 @@ fn diff_shared_objects(config: &Config, programs: &[Program]) -> Result {
             filenames,
             // Shared objects should always have a command.
             so_group.last().unwrap().command.as_ref().unwrap(),
+            validation,
         )?;
     }
     Ok(())
 }
 
-fn diff_executables(config: &Config, programs: &[Program]) -> Result {
+fn diff_executables(
+    config: &Config,
+    programs: &[Program],
+    validation: &mut acceptance_policy::FixtureOracleValidation,
+) -> Result {
     let filenames = programs
         .iter()
         .map(|p| p.link_output.binary.clone())
         .collect_vec();
-    diff_files_report_command(config, filenames, programs.last().unwrap())
+    diff_files_report_command(config, filenames, programs.last().unwrap(), validation)
 }
 
 fn normalise_report(report: &reld_diff::Report) -> String {
@@ -5879,6 +5922,7 @@ fn diff_files_report_command(
     config: &Config,
     files: Vec<PathBuf>,
     command_display: &dyn Display,
+    validation: &mut acceptance_policy::FixtureOracleValidation,
 ) -> Result {
     if !config.should_diff || files.len() < 2 {
         return Ok(());
@@ -5886,7 +5930,7 @@ fn diff_files_report_command(
 
     let diff_config = create_diff_config(config, files)?;
 
-    diff_files(config, &diff_config).with_context(|| {
+    diff_files(config, &diff_config, validation).with_context(|| {
         format!(
             "Diff reported error: {command_display}\nTo revalidate:\n\
             cargo run --bin linker-diff -- {}",
@@ -5896,8 +5940,14 @@ fn diff_files_report_command(
 }
 
 /// Diff the supplied files. The last file should be the one that we produced.
-fn diff_files(config: &Config, diff_config: &reld_diff::Config) -> Result {
+fn diff_files(
+    config: &Config,
+    diff_config: &reld_diff::Config,
+    validation: &mut acceptance_policy::FixtureOracleValidation,
+) -> Result {
     let report = produce_diff_report(diff_config)?;
+    record_oracle_coverage(config.platform, &report);
+    validation.record_used_ignores(report.used_ignores());
 
     if let Some(malfunction) = config.active_malfunction.as_ref() {
         if !report.has_problems() {
@@ -5927,9 +5977,14 @@ fn create_diff_config(config: &Config, files: Vec<PathBuf>) -> Result<reld_diff:
         reld_diff::ColourMode::Always
     };
     diff_config.reld_defaults = true;
-    diff_config.ratchet_ignores = true;
+    // A fixture may produce multiple shared objects plus an executable. An ignore is stale only
+    // when none of those reports uses it, so the acceptance harness ratchets their union after all
+    // reports for the fixture/config have completed.
+    diff_config.ratchet_ignores = false;
     diff_config.coverage = true;
-    diff_config.coverage_floor = Some(50);
+    // Coverage is an aggregate per-format gate. Relocation-free fixture binaries contribute a
+    // zero denominator instead of failing a meaningless per-binary percentage check.
+    diff_config.coverage_floor = None;
     diff_config
         .ignore
         .extend(config.diff_ignore.iter().cloned());
@@ -6222,8 +6277,10 @@ fn run_with_config(
     // DT_PPC64_GLINK emission and section alignment aren't matched yet), so we validate that
     // binaries link and run, but don't byte-compare them. Drop this carve-out as parity lands.
     if config.test_config.run_all_diffs && config.arch != Architecture::Ppc64 {
-        diff_shared_objects(config, &programs)?;
-        diff_executables(config, &programs)?;
+        let mut validation = acceptance_policy::FixtureOracleValidation::default();
+        diff_shared_objects(config, &programs, &mut validation)?;
+        diff_executables(config, &programs, &mut validation)?;
+        validation.verify(&config.diff_ignore)?;
     }
 
     if should_print_timing() {

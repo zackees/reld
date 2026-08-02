@@ -18,6 +18,8 @@ env:
   CARGO_COMMAND: cargo
   RUST_VERSION: 1.94.1
   NIGHTLY_TOOLCHAIN: nightly-2026-08-01
+  CLANG_VERSION: 21.1.8
+  CLANG_PACKAGE_VERSION: "1:21.1.8~++20251221032922+2078da43e25a-1~exp1~20251221153059.70"
   LLD_VERSION: 18.1.8
   MOLD_VERSION: 2.41.0
   WILD_VERSION: 0.9.0
@@ -124,8 +126,15 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/llvm-snapshot.gpg.key" https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo '8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d  '${RUNNER_TEMP}'/llvm-snapshot.gpg.key' | sha256sum --check
+          gpg --dearmor < "${RUNNER_TEMP}/llvm-snapshot.gpg.key" > "${RUNNER_TEMP}/llvm-snapshot.gpg"
+          sudo install -m 644 "${RUNNER_TEMP}/llvm-snapshot.gpg" /usr/share/keyrings/llvm-snapshot.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y \
+            "clang-21=${CLANG_PACKAGE_VERSION}" \
+            "llvm-21-linker-tools=${CLANG_PACKAGE_VERSION}"
           curl -fsSL -o "${RUNNER_TEMP}/libtinfo5.deb" "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_${LIBTINFO5_VERSION}_amd64.deb"
           echo 'b9bb64e716a7d9de05b1b33992763142ca81bcae3a7f8ce7e29fa3c6fd32f1e8  '${RUNNER_TEMP}'/libtinfo5.deb' | sha256sum --check
           sudo apt-get install -y "${RUNNER_TEMP}/libtinfo5.deb"
@@ -138,6 +147,8 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/wild.tar.gz" -C "${RUNNER_TEMP}/refs"
           cp "$(find "${RUNNER_TEMP}/refs" -type f -path '*/bin/mold' | head -1)" "${RUNNER_TEMP}/ref-bin/mold"
           cp "$(find "${RUNNER_TEMP}/refs" -type f -name wild | head -1)" "${RUNNER_TEMP}/ref-bin/ld.wild"
+          ln -s /usr/bin/clang-21 "${RUNNER_TEMP}/ref-bin/clang"
+          ln -s /usr/bin/clang++-21 "${RUNNER_TEMP}/ref-bin/clang++"
           chmod +x "${RUNNER_TEMP}/ref-bin/mold" "${RUNNER_TEMP}/ref-bin/ld.wild"
           echo "${RUNNER_TEMP}/ref-bin" >> "${GITHUB_PATH}"
 
@@ -150,10 +161,14 @@ jobs:
           ld.lld --version | head -1 | tee -a versions.txt
           mold --version | head -1 | tee -a versions.txt
           ld.wild --version | head -1 | tee -a versions.txt
+          clang --version | head -1 | tee -a versions.txt
           ld.bfd --version | grep -q '2.42'
           ld.lld --version | grep -q "${LLD_VERSION}"
           mold --version | grep -q "${MOLD_VERSION}"
           ld.wild --version | grep -q "${WILD_VERSION}"
+          clang --version | grep -q "${CLANG_VERSION}"
+          printf 'int fixture(void) { return 0; }\n' | clang -shared -nostdlib -flto -x c - -fuse-ld=bfd -o "${RUNNER_TEMP}/plugin-smoke.so"
+          printf 'int fixture(void) { return 0; }\n' | clang -c -x c - -Wa,--crel,--allow-experimental-crel -o "${RUNNER_TEMP}/crel-smoke.o"
           printf '.global _start\n.text\n_start:\n  mov $60, %%rax\n  xor %%rdi, %%rdi\n  syscall\n' > "${RUNNER_TEMP}/smoke.S"
           clang -c "${RUNNER_TEMP}/smoke.S" -o "${RUNNER_TEMP}/smoke.o"
           for linker in ld.bfd ld.lld mold ld.wild; do
@@ -233,7 +248,7 @@ jobs:
           $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
           $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
-          $CARGO_COMMAND test -p reld --test external-runner 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test acceptance-policy --test external-runner 2>&1 | tee -a platform-tests.log
 
       - name: Linux relocation malfunction oracle
         if: matrix.kind == 'linux-gnu'
@@ -284,6 +299,7 @@ jobs:
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld-core --lib 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
 
       - name: Windows MSVC native tests
@@ -298,6 +314,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:CARGO_COMMAND test -p reld --bins 2>&1 | Tee-Object -Append platform-tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | Tee-Object -Append platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | Tee-Object -Append platform-tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -310,6 +328,7 @@ jobs:
           $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
           $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
 
       - name: Publish Linux counts and skips

@@ -806,6 +806,12 @@ impl Report {
         !self.diffs.is_empty()
     }
 
+    /// Caller-supplied ignore patterns that suppressed at least one observed difference.
+    #[must_use]
+    pub fn used_ignores(&self) -> std::collections::HashSet<String> {
+        self.used_ignores.borrow().clone()
+    }
+
     #[must_use]
     pub fn should_ignore(&self, key: &str) -> bool {
         if !self.config.only.is_empty() {
@@ -940,9 +946,16 @@ impl Display for Coverage {
 }
 
 impl Coverage {
+    /// Number of relocations analyzed by the semantic oracle and total relocations observed.
+    #[must_use]
+    pub fn relocation_counts(&self) -> (u64, u64) {
+        let total = self.sections.values().map(|s| s.total_relocations).sum();
+        let diffed = self.sections.values().map(|s| s.diffed_relocations).sum();
+        (diffed, total)
+    }
+
     fn relocation_percentage(&self) -> u64 {
-        let total: u64 = self.sections.values().map(|s| s.total_relocations).sum();
-        let diffed: u64 = self.sections.values().map(|s| s.diffed_relocations).sum();
+        let (diffed, total) = self.relocation_counts();
         if total == 0 { 0 } else { diffed * 100 / total }
     }
 }
