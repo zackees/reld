@@ -2336,7 +2336,11 @@ mod tests {
         // Create a temporary file containing a @file option
         let file1 = NamedTempFile::new().expect("Could not create temp file");
         let file2 = NamedTempFile::new().expect("Could not create temp file");
-        let file_option = format!("@{}", file2.path().to_str().unwrap());
+        // Response-file parsing treats backslashes as escapes. Quote the whole
+        // argument and escape Windows separators so a nested @file survives a
+        // round trip through `arguments_from_string`.
+        let nested_path = file2.path().to_str().unwrap().replace('\\', "\\\\");
+        let file_option = format!("\"@{nested_path}\"");
         write_options_to_file(file1.as_file(), &[&file_option]);
         write_options_to_file(file2.as_file(), INPUT1);
 

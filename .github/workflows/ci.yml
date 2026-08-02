@@ -22,7 +22,8 @@ env:
   WILD_VERSION: 0.9.0
   MSYS2_BINUTILS_VERSION: 2.46.1-2
   MSVC_LINK_VERSION: "14.44"
-  APPLE_LD_VERSION: "1115.7.3"
+  APPLE_LD_VERSION: "1053.12"
+  LIBTINFO5_VERSION: "6.3-2ubuntu0.2"
 
 jobs:
   hygiene:
@@ -35,7 +36,6 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
         with:
-          toolchain: 1.94.1
           components: rustfmt, clippy
       - uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # cargo-deny
         with:
@@ -78,6 +78,7 @@ jobs:
         with:
           msystem: UCRT64
           update: false
+          path-type: inherit
           install: mingw-w64-ucrt-x86_64-clang
 
       - if: matrix.kind == 'windows-msvc'
@@ -92,8 +93,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
         with:
-          toolchain: 1.94.1
           targets: ${{ matrix.target }}
+
+      - name: Install host test tooling
+        uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # taplo-cli
+        with:
+          tool: taplo-cli@0.10.0
 
       - name: Install Linux reference linkers
         if: matrix.kind == 'linux-gnu'
@@ -102,6 +107,9 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y clang
+          curl -fsSL -o "${RUNNER_TEMP}/libtinfo5.deb" "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_${LIBTINFO5_VERSION}_amd64.deb"
+          echo 'b9bb64e716a7d9de05b1b33992763142ca81bcae3a7f8ce7e29fa3c6fd32f1e8  '${RUNNER_TEMP}'/libtinfo5.deb' | sha256sum --check
+          sudo apt-get install -y "${RUNNER_TEMP}/libtinfo5.deb"
           mkdir -p "${RUNNER_TEMP}/refs" "${RUNNER_TEMP}/ref-bin"
           curl -fsSL -o "${RUNNER_TEMP}/mold.tar.gz" "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz"
           echo 'a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d  '${RUNNER_TEMP}'/mold.tar.gz' | sha256sum --check
@@ -138,6 +146,8 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euxo pipefail
+          llvm_bin="$(cygpath -u "${LLVM_PATH}")/bin"
+          install -m 755 "${llvm_bin}/ld.lld.exe" /ucrt64/bin/ld.lld.exe
           curl -fsSL -o "${RUNNER_TEMP}/binutils.pkg.tar.zst" "https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-binutils-${MSYS2_BINUTILS_VERSION}-any.pkg.tar.zst"
           echo '631ff3c6d043a4eeca151415c313bda713537d4a7c6807eb7a2d4e7a026df89b  '${RUNNER_TEMP}'/binutils.pkg.tar.zst' | sha256sum --check
           pacman -U --noconfirm "${RUNNER_TEMP}/binutils.pkg.tar.zst"
@@ -213,6 +223,7 @@ jobs:
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld-core --lib 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
 
       - name: Windows MSVC native tests
         if: matrix.kind == 'windows-msvc'
@@ -226,6 +237,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:CARGO_COMMAND test -p reld --bins 2>&1 | Tee-Object -Append platform-tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | Tee-Object -Append platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: macOS native tests
         if: matrix.kind == 'macos-arm64'
@@ -236,6 +249,7 @@ jobs:
           $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
           $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
 
       - name: Publish Linux counts and skips
         if: always() && matrix.kind == 'linux-gnu'
@@ -248,7 +262,7 @@ jobs:
 
       - name: Publish Windows GNU counts and skips
         if: always() && matrix.kind == 'windows-gnu'
-        shell: msys2 {0}
+        shell: pwsh
         run: python ci/phase1_summary.py --job windows-gnu --log platform-tests.log --versions versions.txt
 
       - name: Publish Windows MSVC counts and skips

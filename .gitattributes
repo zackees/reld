@@ -1,2 +1,11 @@
+# Keep source and configuration files byte-identical on every CI host. The
+# source tidy test intentionally rejects CRLF, so Windows checkouts must not
+# rewrite tracked text files.
+* text=auto eol=lf
+
+# Binary linker inputs must never be newline-normalized.
+*.a -text
+*.o -text
+
 # Malfunction snapshots are byte-exact test data and may contain significant trailing whitespace.
 *.exp -text -whitespace

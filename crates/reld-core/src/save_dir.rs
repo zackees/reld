@@ -661,6 +661,7 @@ mod tests {
 
     #[test]
     fn make_relative_path_works() {
+        let root = std::env::temp_dir().join("reld-relative-path-test");
         let cases = [
             ("/a/b/c", "/a/b"),
             ("/a/b/c/d", "/a/b"),
@@ -679,8 +680,8 @@ mod tests {
         ];
 
         for (a, b) in cases {
-            let a = PathBuf::from(a);
-            let b = PathBuf::from(b);
+            let a = root.join(a.trim_start_matches('/'));
+            let b = root.join(b.trim_start_matches('/'));
             test_make_relative_path(&a, &b);
             test_make_relative_path(&b, &a);
         }
