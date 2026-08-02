@@ -17,8 +17,16 @@ name = "reld-link"
 path = "src/bin/reld-link.rs"
 
 [[test]]
-name = "integration_tests"
-path = "tests/integration_tests.rs"
+name = "acceptance"
+path = "tests/acceptance.rs"
+harness = false
+
+# Keep the external-suite entry point separate at the Cargo level so it can be
+# scheduled independently on the Linux runner. The libtest-mimic name filter
+# selects only external trials for this target.
+[[test]]
+name = "external"
+path = "tests/external.rs"
 harness = false
 
 [dependencies]

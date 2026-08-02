@@ -3548,6 +3548,13 @@ fn apply_relocation<
         value = thunked_value;
     }
 
+    // Mutation oracle: corrupt the value written at a real input relocation site. Unlike the
+    // inherited relaxation-suppression mutations, this exercises the differ's core promise that
+    // it can reverse relocation arithmetic and recover a wrong symbolic target.
+    if malfunction::malfunction_point("elf-relocation-target-plus-one") {
+        value = value.wrapping_add(1);
+    }
+
     rel_info.write_to_buffer(value, &mut out[offset_in_section..])?;
 
     Ok(next_modifier)

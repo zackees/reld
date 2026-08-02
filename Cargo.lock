@@ -1534,6 +1534,7 @@ dependencies = [
  "rand_chacha",
  "serde",
  "serde_json",
+ "which",
 ]
 
 [[package]]

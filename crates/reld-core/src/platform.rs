@@ -262,6 +262,7 @@ pub(crate) struct RelaxSymbolInfo {
 pub(crate) trait Platform:
     Copy + Send + Sync + Sized + Default + std::fmt::Debug + 'static
 {
+    const BINARY_FORMAT: reld_layout_schema::BinaryFormat;
     const NUM_SINGLE_PART_SECTIONS: u32;
     const NUM_BUILT_IN_REGULAR_SECTIONS: usize;
 

@@ -17,6 +17,10 @@ pub struct Metrics {
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Layout {
+    /// Object format of the linked image. Consumers must dispatch on this field instead of
+    /// assuming ELF when interpreting contribution addresses.
+    pub format: BinaryFormat,
+
     /// The input files to the linker.
     pub files: Vec<InputFile>,
 
@@ -25,8 +29,19 @@ pub struct Layout {
     pub metrics: Metrics,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+pub enum BinaryFormat {
+    #[default]
+    Elf,
+    Coff,
+    MachO,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct InputFile {
+    /// Stable zero-based object index used by COFF contribution records and diagnostics.
+    pub object_index: u32,
+
     /// Path to the input file on disk. In case of archives, multiple inputs may have the same
     /// path.
     pub path: PathBuf,
@@ -54,7 +69,28 @@ pub struct ArchiveEntryInfo {
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Section {
+    /// Zero-based input section index in the object file.
+    pub input_section_index: u32,
+
+    /// Name of the output section (ELF/COFF) or segment+section pair (Mach-O).
+    pub output_section: String,
+
+    /// Format-neutral description of where this contribution was placed.
+    pub address: ContributionAddress,
+
+    /// Legacy absolute-address view used by the ELF relocation differ.
     pub mem_range: Range<u64>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
+pub enum ContributionAddress {
+    /// ELF virtual-address range.
+    VirtualAddress(Range<u64>),
+    /// PE/COFF RVA range. Together with InputFile::object_index and Section::input_section_index,
+    /// this is a complete COFF contribution record.
+    RelativeVirtualAddress(Range<u32>),
+    /// Mach-O contribution within a named segment.
+    SegmentOffset { segment: String, range: Range<u64> },
 }
 
 impl Layout {
@@ -98,10 +134,17 @@ mod tests {
     #[test]
     fn test_round_trip() {
         let layout = Layout {
+            format: BinaryFormat::Elf,
             files: vec![InputFile {
+                object_index: 0,
                 path: PathBuf::new(),
                 archive_entry: None,
-                sections: vec![Some(Section { mem_range: 42..48 })],
+                sections: vec![Some(Section {
+                    input_section_index: 0,
+                    output_section: ".text".to_owned(),
+                    address: ContributionAddress::VirtualAddress(42..48),
+                    mem_range: 42..48,
+                })],
                 temporary: true,
             }],
             metrics: Metrics { thunk_count: 3 },
@@ -109,5 +152,15 @@ mod tests {
         let bytes = layout.to_bytes().unwrap();
         let layout2 = Layout::from_bytes(&bytes).unwrap();
         assert_eq!(layout, layout2);
+    }
+
+    #[test]
+    fn represents_coff_and_macho_contributions() {
+        let coff = ContributionAddress::RelativeVirtualAddress(0x1000..0x1020);
+        let macho = ContributionAddress::SegmentOffset {
+            segment: "__TEXT".to_owned(),
+            range: 0x40..0x60,
+        };
+        assert_ne!(coff, macho);
     }
 }

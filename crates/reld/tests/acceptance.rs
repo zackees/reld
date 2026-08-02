@@ -304,6 +304,7 @@
 //!
 //! mem-size=N: Type: Integer. Asserts the mem size of the segment.
 
+#[allow(dead_code)]
 mod external_tests;
 
 use bitflags::bitflags;
@@ -364,7 +365,7 @@ use strum::EnumString;
 use strum::VariantNames;
 use wait_timeout::ChildExt;
 
-fn main() -> Result<std::process::ExitCode> {
+pub(crate) fn main() -> Result<std::process::ExitCode> {
     let mut args = libtest_mimic::Arguments::from_args();
     if should_emit_colour() {
         args.color = Some(libtest_mimic::ColorSetting::Always);
@@ -372,6 +373,17 @@ fn main() -> Result<std::process::ExitCode> {
     let filter = Filter::new(&args);
     let mut tests = Vec::new();
     collect_tests(&mut tests, &filter)?;
+    Ok(libtest_mimic::run(&args, tests).exit_code())
+}
+
+#[allow(dead_code)]
+pub(crate) fn external_main() -> Result<std::process::ExitCode> {
+    let mut args = libtest_mimic::Arguments::from_args();
+    if should_emit_colour() {
+        args.color = Some(libtest_mimic::ColorSetting::Always);
+    }
+    let filter = Filter::new(&args);
+    let mut tests = Vec::new();
     external_tests::collect_tests(&mut tests, &filter)?;
     Ok(libtest_mimic::run(&args, tests).exit_code())
 }
@@ -379,11 +391,23 @@ fn main() -> Result<std::process::ExitCode> {
 fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
     let test_config = read_test_config()?;
 
+    // Directive-name validation is host-independent and happens before platform/test filtering.
+    // Thus a typo cannot disappear merely because a fixture is not executable on this runner.
+    for platform_name in ["elf", "macho"] {
+        for_each_test_dir(platform_name, |base_name, path| {
+            if !path.ends_with("common") {
+                let primary_source_file = identify_primary_source(&path, base_name)?;
+                fixture_uses_deferred_directive(&primary_source_file)?;
+            }
+            Ok(())
+        })?;
+    }
+
     let host_arch = get_host_architecture();
 
     for platform in [PlatformKind::Elf, PlatformKind::MachO] {
         // Right now, the Mach-O provided Clang and the ld linker do not support the ELF format.
-        if platform == PlatformKind::Elf && cfg!(target_os = "macos") {
+        if platform == PlatformKind::Elf && !cfg!(target_os = "linux") {
             continue;
         }
 
@@ -406,13 +430,16 @@ fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
                 return Ok(());
             }
 
+            let primary_source_file = identify_primary_source(&path, base_name)?;
+            if fixture_uses_deferred_directive(&primary_source_file)? {
+                return Ok(());
+            }
+
             for &arch in platform.supported_architectures() {
                 let name_prefix = format!("{platform_name}/{arch}/{base_name}");
                 if filter.excludes(&name_prefix) {
                     continue;
                 }
-
-                let primary_source_file = identify_primary_source(&path, base_name)?;
 
                 let configs = parse_configs(
                     &primary_source_file,
@@ -464,6 +491,89 @@ fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
     Ok(())
 }
 
+/// Account for inherited fixtures that intentionally remain outside the frozen Phase 1 language.
+/// A recognized legacy directive defers that fixture to Phase 2; any other unknown spelling is a
+/// hard error with source location so typos cannot silently remove coverage.
+fn fixture_uses_deferred_directive(src_filename: &Path) -> Result<bool> {
+    let source = std::fs::read_to_string(src_filename)
+        .with_context(|| format!("Failed to read {}", src_filename.display()))?;
+    let is_wat = src_filename.extension().is_some_and(|ext| ext == "wat");
+    let mut deferred = false;
+    for (index, line) in source.lines().enumerate() {
+        let line = line.trim();
+        let rest = if is_wat {
+            line.strip_prefix(";;#")
+        } else {
+            line.strip_prefix("//#")
+        };
+        let Some(rest) = rest else { continue };
+        let (name, _) = rest.split_once(':').with_context(|| {
+            format!(
+                "Failed to process test directive {}:{}: missing argument separator",
+                src_filename.display(),
+                index + 1
+            )
+        })?;
+        if is_frozen_directive(name) {
+            continue;
+        }
+        if is_deferred_legacy_directive(name) {
+            deferred = true;
+            continue;
+        }
+        bail!(
+            "Failed to process test directive {}:{}: unknown acceptance directive `{name}` (the directive surface is frozen)",
+            src_filename.display(),
+            index + 1
+        );
+    }
+    Ok(deferred)
+}
+
+fn is_deferred_legacy_directive(name: &str) -> bool {
+    matches!(
+        name,
+        "AssertOutputFileMatches"
+            | "AugmentLinkerScript"
+            | "AutoAddObjects"
+            | "BsdArchive"
+            | "CompSoArgs"
+            | "Cross"
+            | "DoesNotContain"
+            | "DriverMode"
+            | "ExpectComment"
+            | "ExpectEntry"
+            | "ExpectErrorReld"
+            | "ExpectGdbIndexCuCount"
+            | "ExpectGdbIndexDistinctAddrCus"
+            | "ExpectGdbIndexSymbol"
+            | "ExpectLoadAlignment"
+            | "ExpectMessage"
+            | "ExpectProgramHeader"
+            | "ExpectWarning"
+            | "ExpectWarningReld"
+            | "FatArchive"
+            | "FatArchive64"
+            | "FatDylib"
+            | "FatDylib64"
+            | "FatObject"
+            | "FatObject64"
+            | "LinkSoArgs"
+            | "MaxThunks"
+            | "NoDynamic"
+            | "NoProgramHeader"
+            | "ReldExtraLinkArgs"
+            | "Relocatable"
+            | "RelrCount"
+            | "RemoveSection"
+            | "RunDynSym"
+            | "SoSingleLinker"
+            | "TestUpdateInPlace"
+            | "ThinArchive"
+            | "Variant"
+    )
+}
+
 /// Iterates over subdirectories under `tests/sources/{platform_name}/`, calling `cb` with the
 /// directory name and path for each entry.
 fn for_each_test_dir(platform_name: &str, mut cb: impl FnMut(&str, PathBuf) -> Result) -> Result {
@@ -499,7 +609,7 @@ fn for_each_test_dir(platform_name: &str, mut cb: impl FnMut(&str, PathBuf) -> R
 /// for running all tests.
 const FULL_PLATFORM_REQUIRED_VAR: &str = "RELD_VERIFY_PLATFORM_REQUIREMENTS";
 
-type Result<T = (), E = reld_core::error::Error> = core::result::Result<T, E>;
+pub(crate) type Result<T = (), E = reld_core::error::Error> = core::result::Result<T, E>;
 type ElfFile64<'data> = object::read::elf::ElfFile64<'data, LittleEndian>;
 
 const TEMPLATE_PLACEHOLDER: &str = "$O";
@@ -1672,6 +1782,13 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
         };
 
         if let Some(rest) = rest {
+            validate_frozen_directive(rest).with_context(|| {
+                format!(
+                    "Failed to process test directive {}:{}",
+                    src_filename.display(),
+                    i + 1
+                )
+            })?;
             process_directive(
                 rest,
                 &mut config,
@@ -1700,6 +1817,61 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
     }
 
     Ok(configs)
+}
+
+/// The Phase 1 directive language is intentionally frozen. Adding a parser arm is not enough:
+/// the plan must be updated first so fixture semantics cannot drift accidentally.
+fn validate_frozen_directive(rest: &str) -> Result {
+    let (name, _) = rest.split_once(':').context("Missing arg")?;
+    if !is_frozen_directive(name) {
+        bail!("unknown acceptance directive `{name}` (the directive surface is frozen)");
+    }
+    Ok(())
+}
+
+fn is_frozen_directive(name: &str) -> bool {
+    matches!(
+        name,
+        "Config"
+            | "AbstractConfig"
+            | "Object"
+            | "Archive"
+            | "Shared"
+            | "LinkerScript"
+            | "CompArgs"
+            | "LinkArgs"
+            | "LinkerDriver"
+            | "Compiler"
+            | "Mode"
+            | "Arch"
+            | "SkipArch"
+            | "Platform"
+            | "ReferenceLinkers"
+            | "ExpectSym"
+            | "NoSym"
+            | "ExpectDynSym"
+            | "NoDynSym"
+            | "ExpectSection"
+            | "NoSection"
+            | "ExpectSectionBytes"
+            | "ExpectDynamic"
+            | "ExpectError"
+            | "Contains"
+            | "RunEnabled"
+            | "DiffEnabled"
+            | "DiffIgnore"
+            | "DiffMatchAny"
+            | "Malfunction"
+            | "RequiresCompilerFlags"
+            | "RequiresGlibc"
+            | "RequiresGlibcVersion"
+            | "RequiresLinkerFlags"
+            | "RequiresLinkerPlugin"
+            | "RequiresNightlyRustc"
+            | "RequiresRustMusl"
+            | "RequiresSFrameBacktrace"
+            | "RequiresZstdCompression"
+    )
 }
 
 fn process_directive(
@@ -1928,6 +2100,24 @@ fn process_directive(
                 config.assertions.expect_dynamic = true;
             }
             config.linker_driver.direct_mut()?.mode = mode;
+        }
+        "Platform" => {
+            let platforms = arg
+                .split(',')
+                .map(str::trim)
+                .map(|name| match name {
+                    "elf" => Ok("elf"),
+                    "coff" => Ok("coff"),
+                    "macho" => Ok("macho"),
+                    _ => bail!("Unknown Platform `{name}`; expected elf, coff, or macho"),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            // COFF is distinct even though it does not have a linker backend in Phase 1. It must
+            // never alias the ELF platform merely because the host happens to be Windows.
+            let enabled = platforms.contains(&config.platform.to_str());
+            if !enabled {
+                config.support_architectures.clear();
+            }
         }
         "DiffIgnore" => config.diff_ignore.push(arg.to_owned()),
         "DiffEnabled" => {
@@ -2490,7 +2680,11 @@ fn spawn_with_retry(command: &mut Command, timeout: Duration) -> Result<std::pro
         match command.spawn() {
             Ok(child) => return Ok(child),
             Err(error) => {
-                if start.elapsed() >= timeout || error.kind() != ErrorKind::ExecutableFileBusy {
+                let retryable = error.kind() == ErrorKind::ExecutableFileBusy
+                    // Win32 ERROR_SHARING_VIOLATION: the loader can briefly retain the freshly
+                    // written .exe just as Linux can return ETXTBSY.
+                    || (cfg!(windows) && error.raw_os_error() == Some(32));
+                if start.elapsed() >= timeout || !retryable {
                     return Err(error.into());
                 }
 
@@ -5725,6 +5919,9 @@ fn create_diff_config(config: &Config, files: Vec<PathBuf>) -> Result<reld_diff:
         reld_diff::ColourMode::Always
     };
     diff_config.reld_defaults = true;
+    diff_config.ratchet_ignores = true;
+    diff_config.coverage = true;
+    diff_config.coverage_floor = Some(50);
     diff_config
         .ignore
         .extend(config.diff_ignore.iter().cloned());
@@ -5914,6 +6111,15 @@ fn available_linkers_for_linux() -> Result<Vec<Linker>> {
             gcc_name: "mold",
             path,
             cross_paths: find_cross_paths("mold"),
+            enabled_by_default: false,
+        }));
+    }
+    if let Ok(path) = find_bin(&["ld.wild", "wild"]) {
+        linkers.push(Linker::ThirdParty(ThirdPartyLinker {
+            name: "wild",
+            gcc_name: "wild",
+            path,
+            cross_paths: find_cross_paths("ld.wild"),
             enabled_by_default: false,
         }));
     }

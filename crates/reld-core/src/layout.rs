@@ -1632,12 +1632,13 @@ impl<'data, P: Platform> Layout<'data, P> {
     pub(crate) fn layout_data(&self) -> reld_layout_schema::Layout {
         let thunk_count = self.thunk_count();
 
-        let files = self
+        let mut files = self
             .group_layouts
             .iter()
             .flat_map(|group| {
                 group.files.iter().filter_map(|file| match file {
                     FileLayout::Object(obj) => Some(reld_layout_schema::InputFile {
+                        object_index: 0,
                         path: obj.input.file.filename.to_owned(),
                         archive_entry: obj.input.entry.as_ref().map(|e| {
                             reld_layout_schema::ArchiveEntryInfo {
@@ -1650,7 +1651,8 @@ impl<'data, P: Platform> Layout<'data, P> {
                             .iter()
                             .zip(obj.object.section_iter())
                             .zip(&obj.sections)
-                            .map(|((res, section), section_slot)| {
+                            .enumerate()
+                            .map(|(input_section_index, ((res, section), section_slot))| {
                                 (matches!(section_slot, SectionSlot::Loaded(..))
                                     && section.is_alloc()
                                     && obj.object.section_size(section).is_ok_and(|s| s > 0))
@@ -1660,8 +1662,21 @@ impl<'data, P: Platform> Layout<'data, P> {
                                         SectionSlot::Loaded(sec) => sec.size,
                                         _ => obj.object.section_size(section).unwrap(),
                                     };
+                                    let mem_range = address..(address + size);
+                                    let part_id = obj.section_part_id(
+                                        object::SectionIndex(input_section_index),
+                                        &self.symbol_db.section_part_ids,
+                                    );
                                     reld_layout_schema::Section {
-                                        mem_range: address..(address + size),
+                                        input_section_index: input_section_index as u32,
+                                        output_section: self
+                                            .output_sections
+                                            .section_debug(part_id.output_section_id::<P>()),
+                                        address:
+                                            reld_layout_schema::ContributionAddress::VirtualAddress(
+                                                mem_range.clone(),
+                                            ),
+                                        mem_range,
                                     }
                                 })
                             })
@@ -1671,9 +1686,14 @@ impl<'data, P: Platform> Layout<'data, P> {
                     _ => None,
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        for (object_index, file) in files.iter_mut().enumerate() {
+            file.object_index = object_index as u32;
+        }
 
         reld_layout_schema::Layout {
+            format: P::BINARY_FORMAT,
             files,
             metrics: reld_layout_schema::Metrics { thunk_count },
         }

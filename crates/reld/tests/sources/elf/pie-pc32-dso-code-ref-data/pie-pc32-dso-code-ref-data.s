@@ -6,7 +6,7 @@
 //#Shared:pie-pc32-dso-shared.s
 //#SoSingleLinker:reld
 //#LinkArgs:-pie --no-gc-sections
-//#SkipLinker:ld
+//#ReferenceLinkers:lld
 //#RunEnabled:false
 .global _start
 _start:
