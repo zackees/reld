@@ -100,7 +100,7 @@ Windows host:
 ```bash
 docker build -t reld-ci -f docker/ci/ubuntu.Dockerfile .
 docker run --rm -v "$PWD:/src" -w /src reld-ci \
-  bash -lc 'RELD_TEST_CONFIG=test-config-ci.toml rustup run --install 1.94.1 cargo test --workspace'
+  bash -lc 'RELD_TEST_CONFIG=/src/test-config-ci.toml rustup run --install 1.94.1 cargo test --workspace'
 ```
 
 See [UPSTREAM.md](UPSTREAM.md) for the tracked source delta.
