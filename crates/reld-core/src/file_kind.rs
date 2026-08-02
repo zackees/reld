@@ -1,0 +1,153 @@
+//! Code for identifying what sort of file we're dealing with based on the bytes of the file.
+
+use crate::bail;
+use crate::elf;
+use crate::ensure;
+use crate::error::Result;
+use object::Endian;
+use object::Endianness;
+use object::LittleEndian;
+use object::macho;
+use object::read::elf::FileHeader;
+use object::read::elf::SectionHeader;
+use object::read::macho::MachHeader;
+use zerocopy::IntoBytes;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum FileKind {
+    ElfObject,
+    ElfDynamic,
+    MachOObject,
+    MachODylib,
+    FatMachOObject,
+    MachOStubLibrary,
+    Archive,
+    ThinArchive,
+    Text,
+    LlvmIr,
+    GccIr,
+}
+
+impl FileKind {
+    pub(crate) fn identify_bytes(bytes: &[u8]) -> Result<FileKind> {
+        if bytes.starts_with(&object::archive::MAGIC) {
+            Ok(FileKind::Archive)
+        } else if bytes.starts_with(&object::archive::THIN_MAGIC) {
+            Ok(FileKind::ThinArchive)
+        } else if bytes.starts_with(&object::elf::ELFMAG) {
+            const HEADER_LEN: usize = size_of::<elf::FileHeader64>();
+            if bytes.len() < HEADER_LEN {
+                bail!("Invalid ELF file");
+            }
+            let header: &elf::FileHeader64 = object::from_bytes(&bytes[..HEADER_LEN]).unwrap().0;
+            ensure!(
+                header.e_ident.class == object::elf::ELFCLASS64,
+                "Only 64 bit ELF is currently supported"
+            );
+            ensure!(
+                header.e_ident.data == object::elf::ELFDATA2LSB,
+                "Only little endian is currently supported"
+            );
+
+            match header.e_type.get(LittleEndian) {
+                object::elf::ET_REL => {
+                    if is_gcc_bitcode(bytes, header).unwrap_or(false) {
+                        Ok(FileKind::GccIr)
+                    } else {
+                        Ok(FileKind::ElfObject)
+                    }
+                }
+                object::elf::ET_DYN => Ok(FileKind::ElfDynamic),
+                t => bail!("Unsupported ELF kind {t}"),
+            }
+        } else if bytes.starts_with(macho::MH_MAGIC_64.as_bytes())
+            || bytes.starts_with(&macho::MH_MAGIC_64.to_be_bytes())
+        {
+            determine_macho_kind(bytes)
+        } else if bytes.starts_with(&macho::FAT_MAGIC.to_be_bytes())
+            || bytes.starts_with(&macho::FAT_MAGIC_64.to_be_bytes())
+        {
+            Ok(FileKind::FatMachOObject)
+        } else if bytes.starts_with(b"--- !tapi-tbd") || bytes.starts_with(b"tbd-version:") {
+            Ok(FileKind::MachOStubLibrary)
+        } else if bytes.is_ascii() {
+            Ok(FileKind::Text)
+        } else if bytes.starts_with(b"BC") {
+            Ok(FileKind::LlvmIr)
+        } else if let Some(start) = bytes.get(..4) {
+            bail!("Couldn't identify file type starting with {start:x?}");
+        } else {
+            bail!("Input file is only {} bytes", bytes.len());
+        }
+    }
+
+    pub(crate) fn is_compiler_ir(self) -> bool {
+        matches!(self, FileKind::LlvmIr | FileKind::GccIr)
+    }
+}
+
+fn determine_macho_kind(bytes: &[u8]) -> Result<FileKind> {
+    let header = macho::MachHeader64::<object::Endianness>::parse(bytes, 0)?;
+
+    ensure!(
+        header.endian()?.is_little_endian(),
+        "Only little endian is currently supported"
+    );
+
+    ensure!(
+        header.cputype(Endianness::Little) == macho::CPU_TYPE_ARM64,
+        "Only ARM64 is currently supported"
+    );
+
+    match header.filetype(Endianness::Little) {
+        macho::MH_OBJECT => Ok(FileKind::MachOObject),
+        macho::MH_DYLIB => Ok(FileKind::MachODylib),
+        other => bail!("Unsupported MachO input file type {other:?}"),
+    }
+}
+
+/// Returns whether the supplied file contents is GCC IR. Scanning the entire section table would be
+/// expensive. Instead, we assume that we'll find a GCC LTO section within the first few sections,
+/// so just scan part of the section header strings table. It's unfortunate that GCC didn't tag
+/// these objects in some fast-to-check way.
+fn is_gcc_bitcode(data: &[u8], header: &crate::elf::FileHeader64) -> Option<bool> {
+    // If we don't have plugin support, then we skip checking if the file contains GCC IR. If it is,
+    // then we'll figure that out later on and report an error. We do this because this code has a
+    // measurable performance impact.
+    if !cfg!(all(feature = "plugins", unix)) {
+        return Some(false);
+    }
+    let e = LittleEndian;
+    let section_headers = header.section_headers(e, data).ok()?;
+    let sh_str_index = header.shstrndx(e, data).ok()?;
+    let strings_section_header = section_headers.get(sh_str_index as usize)?;
+    let start_offset = strings_section_header.sh_offset(e) as usize;
+    let len = strings_section_header.sh_size(e) as usize;
+    // In observed GCC IR files, the LTO section names start at offset 44 and end at 454. We want to
+    // scan roughly the middle of this range.
+    const START: usize = 100;
+    // The longest GCC LTO section name is 47 bytes. We scan a bit more in case the first LTO
+    // section started later than START.
+    const MAX_SCAN: usize = 200;
+    let strings = data.get(start_offset + START..start_offset + (START + MAX_SCAN).min(len))?;
+    Some(memchr::memmem::find(strings, b"\0.gnu.lto_.").is_some())
+}
+
+impl std::fmt::Display for FileKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            FileKind::ElfObject => "ELF object",
+            FileKind::ElfDynamic => "ELF dynamic",
+            FileKind::MachOObject => "Mach-O object",
+            FileKind::MachODylib => "Mach-O dylib",
+            FileKind::FatMachOObject => "Fat Mach-O object",
+            FileKind::MachOStubLibrary => "Mach-O TBD library",
+            FileKind::Archive => "archive",
+            FileKind::ThinArchive => "thin archive",
+            FileKind::Text => "text",
+            FileKind::LlvmIr => "LLVM-IR",
+            FileKind::GccIr => "GCC-IR",
+        };
+        std::fmt::Display::fmt(s, f)
+    }
+}

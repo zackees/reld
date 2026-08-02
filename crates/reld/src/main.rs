@@ -1,29 +1,40 @@
-//! `reld` — an incremental linker for the inner dev loop.
-//!
-//! There is no linker here yet. This binary exists so the workspace, CI, sanitizer, and
-//! stress harnesses are wired and green from the first commit rather than retrofitted later.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::Result;
-use clap::Parser;
+#[cfg(feature = "dhat")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
-#[derive(Parser, Debug)]
-#[command(name = "reld", version, about = "relink. reweld. reload.", long_about = None)]
-struct Args {
-    /// Print the target formats reld intends to support and exit.
-    #[arg(long)]
-    targets: bool,
+fn main() {
+    if let Err(error) = run() {
+        reld_core::error::report_error_and_exit(&error)
+    }
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+/// The current Reld version as written by build.rs.
+const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 
-    if args.targets {
-        for t in ["elf (linux)", "pe/coff (windows)", "mach-o (macos)"] {
-            println!("{t}");
-        }
-        return Ok(());
+fn run() -> reld_core::error::Result {
+    #[cfg(feature = "dhat")]
+    let _profiler = dhat::Profiler::new_heap();
+
+    reld_core::init_timing()?;
+
+    let mut args = reld_core::Args::new(std::env::args)?;
+    args.set_version(VERSION);
+    args.parse(std::env::args)?;
+
+    if reld_core::should_fork(&args) {
+        // Safety: We haven't spawned any threads yet.
+        unsafe { reld_core::run_in_subprocess(args) };
+    } else {
+        // Run the linker in this process without forking.
+
+        // Note, we need to setup tracing before worker, otherwise the threads won't contribute to
+        // counters such as --time=cycles,instructions etc.
+        reld_core::setup_tracing(&args)?;
+
+        reld_core::run(args)
     }
-
-    eprintln!("reld is not implemented yet — see DESIGN.md");
-    std::process::exit(2);
 }

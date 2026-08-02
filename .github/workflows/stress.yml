@@ -19,7 +19,7 @@ on:
     - cron: "23 7 * * *"
   pull_request:
     paths:
-      - "crates/**"
+      - "crates/reld-testkit/**"
       - ".github/workflows/stress.yml"
 
 concurrency:
@@ -35,7 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # wild emits ELF only, so it is Linux-only by construction.
+          # The inherited linker emits ELF only, so it is Linux-only by construction.
           - os: ubuntu-24.04
             linker: lld
           - os: ubuntu-24.04
@@ -61,7 +61,7 @@ jobs:
         shell: bash
         run: choco install llvm --no-progress -y
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
 
       - name: Build stress harness
         run: cargo build --release --bin reld-stress

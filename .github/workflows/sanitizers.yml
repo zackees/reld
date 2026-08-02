@@ -2,14 +2,8 @@ name: Sanitizers
 
 # ASAN / LSAN / UBSAN and Miri.
 #
-# HONEST NOTE ON CURRENT VALUE: today this repo is safe Rust with no object parsing, so
-# these jobs find approximately nothing. They exist now, wired and green, because the
-# moment reld starts mapping object files it will be full of `unsafe` — pointer casts
-# over mmap'd, attacker-shaped-but-really-just-corrupt input is the single most
-# defect-dense part of any linker. Retrofitting sanitizers onto an existing pile of
-# unsafe code is how projects end up never doing it.
-#
-# When the parsers land, this file should not need to change.
+# These jobs cover the reld-owned workload generator. The inherited linker has its full
+# Linux-only acceptance suite in ci.yml's development container.
 
 on:
   workflow_dispatch:
@@ -17,7 +11,7 @@ on:
     - cron: "41 6 * * *"
   pull_request:
     paths:
-      - "crates/**"
+      - "crates/reld-testkit/**"
       - ".github/workflows/sanitizers.yml"
 
 concurrency:
@@ -53,7 +47,7 @@ jobs:
         run: |
           cargo +nightly test \
             -Zbuild-std \
-            --workspace \
+            -p reld-testkit \
             --target x86_64-unknown-linux-gnu
 
   ubsan:
@@ -73,7 +67,7 @@ jobs:
         run: |
           cargo +nightly test \
             -Zbuild-std \
-            --workspace \
+            -p reld-testkit \
             --target x86_64-unknown-linux-gnu
 
   miri:

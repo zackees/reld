@@ -1,0 +1,152 @@
+use crate::header_diff::DiffMode;
+use crate::header_diff::FieldValues;
+use anyhow::Result;
+use object::File;
+use object::Object;
+use object::ObjectSymbol;
+use object::elf;
+use object::elf::VER_FLG_BASE;
+use object::read::elf::Sym;
+use reld_reloc::elf::secnames::GNU_VERSION_D_SECTION_NAME_STR;
+use reld_reloc::elf::secnames::GNU_VERSION_SECTION_NAME_STR;
+
+pub(crate) fn report_diffs(report: &mut crate::Report, objects: &[crate::Binary]) {
+    report.add_diffs(crate::header_diff::diff_fields(
+        objects,
+        read_gnu_version_d,
+        "version_d",
+        DiffMode::Normal,
+    ));
+    report.add_diffs(crate::header_diff::diff_fields(
+        objects,
+        read_gnu_version,
+        "version",
+        DiffMode::IgnoreMissingValues,
+    ));
+}
+
+// Reads version names defined in the binary's version_d section and their parent name to find
+// whether all the versions are present.
+fn read_gnu_version_d(bin: &crate::Binary) -> Result<FieldValues> {
+    let e = bin.file.endianness();
+    let mut values = FieldValues::default();
+
+    let File::Elf64(elf_file) = bin.file else {
+        return Ok(values);
+    };
+
+    let Some((mut verdef_iterator, strings_index)) = elf_file
+        .elf_section_table()
+        .gnu_verdef(e, elf_file.data())?
+    else {
+        values.insert_string_owned(
+            GNU_VERSION_D_SECTION_NAME_STR.to_owned(),
+            "Missing".to_owned(),
+        );
+        return Ok(values);
+    };
+
+    let strings = elf_file
+        .elf_section_table()
+        .strings(e, elf_file.data(), strings_index)?;
+
+    while let Some((verdef, mut aux_iterator)) = verdef_iterator.next()? {
+        let verdef_index = verdef.vd_ndx.get(e).0;
+        let mut verdef_version = String::new();
+
+        if let Some(aux) = aux_iterator.next()? {
+            let name = std::str::from_utf8(aux.name(e, strings)?)?;
+            verdef_version = format!("Version name: {name}");
+        }
+
+        // The base version points to the name of the binary, which is problematic for integration
+        // tests. They will add `.<linker_name>` or `.<linker_name>.so` to the output name.
+        // Thus, we strip it here.
+        if verdef.vd_flags.get(e).contains(VER_FLG_BASE) {
+            verdef_version = verdef_version.trim_end_matches(".so").to_string();
+            if let Some(pos) = verdef_version.rfind('.') {
+                verdef_version.truncate(pos);
+            }
+        }
+
+        let mut version_parents = Vec::new();
+        while let Some(aux) = aux_iterator.next()? {
+            version_parents.push(std::str::from_utf8(aux.name(e, strings)?)?);
+        }
+        if !version_parents.is_empty() {
+            verdef_version += &format!(" Version parents: {}", version_parents.join(","));
+        }
+
+        values.insert_string_owned(format!("verdef_{verdef_index}"), verdef_version);
+    }
+
+    Ok(values)
+}
+
+// Reads dynamic symbol names and their corresponding version names to find whether all dynamic
+// symbols have the correct version.
+fn read_gnu_version(bin: &crate::Binary) -> Result<FieldValues> {
+    let e = bin.file.endianness();
+    let mut values = FieldValues::default();
+
+    let File::Elf64(elf_file) = bin.file else {
+        return Ok(values);
+    };
+
+    let Some((versyms, _)) = elf_file
+        .elf_section_table()
+        .gnu_versym(e, elf_file.data())?
+    else {
+        values.insert_string_owned(
+            GNU_VERSION_SECTION_NAME_STR.to_owned(),
+            "Missing".to_owned(),
+        );
+        return Ok(values);
+    };
+
+    let versions = elf_file
+        .elf_section_table()
+        .versions(e, elf_file.data())?
+        .unwrap();
+
+    let dynsym_iter = elf_file.dynamic_symbols();
+
+    // dynsym_iter skips the first symbol, make versym the same.
+    for (versym, dynsym) in versyms.iter().skip(1).zip(dynsym_iter) {
+        let Ok(sym_name) = dynsym.name_bytes() else {
+            continue;
+        };
+
+        let version_index_raw = versym.0.get(e);
+        let version_index = version_index_raw.index();
+        let hidden = version_index_raw.is_hidden();
+
+        // TODO: Currently Reld doesn't differentiate between local and global symbols.
+        let version_name = if version_index.is_special() {
+            b"local or global"
+        } else {
+            versions.version(version_index)?.unwrap().name()
+        };
+
+        // GNU ld creates an empty symbol for each version, Reld doesn't, so we skip it.
+        if dynsym.elf_symbol().st_type() == elf::STT_OBJECT
+            && dynsym.elf_symbol().is_absolute(e)
+            && sym_name == version_name
+        {
+            continue;
+        }
+
+        values.insert_string_owned(
+            str::from_utf8(sym_name)?.to_string(),
+            format!(
+                "{}{}",
+                str::from_utf8(version_name)?,
+                if hidden { " (hidden)" } else { "" }
+            ),
+        );
+    }
+
+    values.sort_values();
+
+    Ok(values)
+}

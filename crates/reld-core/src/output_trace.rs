@@ -1,0 +1,75 @@
+//! Sets up a tracing layer for recording diagnostics associated with particular addresses in the
+//! output file.
+
+use crate::FileSystem;
+use crate::error::Result;
+use reld_trace::AddressTrace;
+use std::mem::take;
+use std::ops::DerefMut;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+pub(crate) struct TraceOutput {
+    state: Option<State>,
+}
+
+struct State {
+    trace_path: PathBuf,
+    data: Mutex<reld_trace::TraceData>,
+}
+
+impl TraceOutput {
+    pub(crate) fn new(should_write_trace: bool, base_output: &Path) -> Self {
+        if !should_write_trace {
+            return TraceOutput { state: None };
+        }
+
+        let trace_path = reld_trace::trace_path(base_output);
+
+        TraceOutput {
+            state: Some(State {
+                trace_path,
+                data: Default::default(),
+            }),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn emit(&self, address: u64, message_cb: impl Fn() -> String) {
+        if let Some(state) = self.state.as_ref() {
+            let message = message_cb();
+            state.data.lock().unwrap().traces.push(AddressTrace {
+                address,
+                messages: message.split('\n').map(|s| s.to_owned()).collect(),
+            });
+        }
+    }
+
+    pub(crate) fn close(&self, file_system: &impl FileSystem) -> Result {
+        if let Some(state) = self.state.as_ref() {
+            let mut bytes = Vec::new();
+            let data = take(state.data.lock().unwrap().deref_mut());
+            data.write(&mut bytes)?;
+            file_system.write_auxiliary(&state.trace_path, &bytes)?;
+        }
+
+        Ok(())
+    }
+}
+
+pub(crate) struct HexU64 {
+    value: u64,
+}
+
+impl HexU64 {
+    pub(crate) fn new(value: u64) -> Self {
+        Self { value }
+    }
+}
+
+impl std::fmt::Display for HexU64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.value)
+    }
+}

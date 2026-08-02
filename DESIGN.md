@@ -1,12 +1,13 @@
 # reld — Design
 
-> **Status: design document. No implementation exists yet.**
-> Every performance figure in this document is a *target*, not a measurement.
-> Nothing here has been benchmarked because there is nothing to benchmark.
+> **Status: ELF/Linux linking works today, inherited from wild.** Windows/COFF and macOS/Mach-O
+> remain planned. Every performance figure in this document is a *target*, not a measurement;
+> reld-specific results will be published only after the Phase 2 CI benchmark exists.
 
 ## 1. Position
 
-`reld` is a successor to [`wild`](https://github.com/wild-linker/wild).
+`reld` is a source fork of [`wild`](https://github.com/wild-linker/wild), vendored from commit
+`5793935f1d8b05b9a978ce2089e16e718072e9a9`.
 
 `wild` is the best-architected fast linker in existence. It is the only one that has paid the
 cost of a genuine format abstraction: a `Platform` trait with three live backends and a layout

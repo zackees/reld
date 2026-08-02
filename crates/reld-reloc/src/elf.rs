@@ -1,0 +1,1237 @@
+use crate::bit_misc::BitExtraction;
+use crate::bit_misc::BitRange;
+use anyhow::Result;
+use std::borrow::Cow;
+use std::fmt;
+use std::io::Cursor;
+
+macro_rules! const_or_literal {
+    ($name:ident $prefix:ident $const:ident = $value:expr) => {
+        $name($value)
+    };
+    ($name:ident $prefix:ident $const:ident) => {
+        ::paste::paste! {
+            ::object::elf::[<$prefix _ $const>]
+        }
+    };
+}
+
+/// Reexport newtypes for the non-flag, enum constants exposed by [object].
+/// Constants not (yet) defined by [object] can be given literal values.
+/// For each type, define a Display wrapper that has an automatically generated
+/// [Display] implementation.
+macro_rules! elf_constant_newtype {
+    (
+        $name:ident,
+        $inner_type:ty,
+        $constants_module:ident,
+        $prefix:ident,
+        $(
+            $const:ident $(= $value:expr)?
+        ),* $(,)?
+    ) => {
+        pub use $inner_type as $name;
+
+        pub mod $constants_module {
+            #![allow(non_upper_case_globals)]
+            use super::$name;
+            use std::borrow::Cow;
+
+            #[allow(unreachable_patterns)] // rustc issues a spurious warning here
+            #[must_use]
+            pub fn as_str(val: $name) -> Cow<'static, str> {
+                    match val {
+                        $(
+                            const_or_literal!($name $prefix $const $(= $value )?)
+                                => ::std::borrow::Cow::Borrowed(stringify!($const)),
+                        )*
+                        $name(r) => Cow::Owned(format!("Unknown({r})")),
+                    }
+            }
+
+            pub struct Display(pub $name);
+
+            impl std::fmt::Display for Display {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "{}", as_str(self.0))
+                }
+            }
+
+            $(pub const $const: $name = const_or_literal!($name $prefix $const $(= $value)?);)*
+        }
+    };
+}
+
+elf_constant_newtype!(
+    SegmentType,
+    object::elf::ProgramType,
+    pt,
+    PT,
+    NULL,
+    LOAD,
+    DYNAMIC,
+    INTERP,
+    NOTE,
+    SHLIB,
+    PHDR,
+    TLS,
+    GNU_EH_FRAME,
+    GNU_STACK,
+    GNU_RELRO,
+    GNU_PROPERTY,
+    GNU_SFRAME,
+    RISCV_ATTRIBUTES,
+);
+
+elf_constant_newtype!(
+    SectionType,
+    object::elf::SectionType,
+    sht,
+    SHT,
+    NULL,
+    PROGBITS,
+    SYMTAB,
+    STRTAB,
+    RELA,
+    RELR,
+    HASH,
+    DYNAMIC,
+    NOTE,
+    NOBITS,
+    REL,
+    SHLIB,
+    DYNSYM,
+    INIT_ARRAY,
+    FINI_ARRAY,
+    PREINIT_ARRAY,
+    GROUP,
+    SYMTAB_SHNDX,
+    GNU_SFRAME,
+    GNU_ATTRIBUTES,
+    GNU_HASH,
+    GNU_LIBLIST,
+    CHECKSUM,
+    SUNW_COMDAT,
+    SUNW_syminfo,
+    GNU_VERDEF,
+    GNU_VERNEED,
+    GNU_VERSYM,
+    RISCV_ATTRIBUTES,
+);
+
+elf_constant_newtype!(SymbolType, object::elf::SymbolType, stt, STT, NOTYPE, TLS);
+
+#[must_use]
+pub fn x86_64_rel_type_to_string(r_type: object::elf::RelocationType) -> Cow<'static, str> {
+    if let Some(name) = object::elf::NAMES_R_X86_64.name(r_type) {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("Unknown x86_64 relocation type 0x{r_type:x}"))
+    }
+}
+
+#[must_use]
+pub fn aarch64_rel_type_to_string(r_type: object::elf::RelocationType) -> Cow<'static, str> {
+    if let Some(name) = object::elf::NAMES_R_AARCH64.name(r_type) {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("Unknown aarch64 relocation type 0x{r_type:x}"))
+    }
+}
+
+#[must_use]
+pub fn riscv64_rel_type_to_string(r_type: object::elf::RelocationType) -> Cow<'static, str> {
+    if let Some(name) = object::elf::NAMES_R_RISCV.name(r_type) {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("Unknown riscv64 relocation type 0x{r_type:x}"))
+    }
+}
+
+#[must_use]
+pub fn loongarch64_rel_type_to_string(r_type: object::elf::RelocationType) -> Cow<'static, str> {
+    if let Some(name) = object::elf::NAMES_R_LARCH.name(r_type) {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("Unknown loongarch relocation type 0x{r_type:x}"))
+    }
+}
+
+#[must_use]
+pub fn ppc64_rel_type_to_string(r_type: object::elf::RelocationType) -> Cow<'static, str> {
+    if let Some(name) = object::elf::NAMES_R_PPC64.name(r_type) {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("Unknown ppc64 relocation type 0x{r_type:x}"))
+    }
+}
+
+pub use object::elf::SectionFlags;
+
+/// Section flag bit values.
+pub mod shf {
+    use super::SectionFlags;
+
+    pub const WRITE: SectionFlags = object::elf::SHF_WRITE;
+    pub const ALLOC: SectionFlags = object::elf::SHF_ALLOC;
+    pub const EXECINSTR: SectionFlags = object::elf::SHF_EXECINSTR;
+    pub const MERGE: SectionFlags = object::elf::SHF_MERGE;
+    pub const STRINGS: SectionFlags = object::elf::SHF_STRINGS;
+    pub const INFO_LINK: SectionFlags = object::elf::SHF_INFO_LINK;
+    pub const LINK_ORDER: SectionFlags = object::elf::SHF_LINK_ORDER;
+    pub const OS_NONCONFORMING: SectionFlags = object::elf::SHF_OS_NONCONFORMING;
+    pub const GROUP: SectionFlags = object::elf::SHF_GROUP;
+    pub const TLS: SectionFlags = object::elf::SHF_TLS;
+    pub const COMPRESSED: SectionFlags = object::elf::SHF_COMPRESSED;
+    pub const GNU_RETAIN: SectionFlags = object::elf::SHF_GNU_RETAIN;
+    pub const EXCLUDE: SectionFlags = object::elf::SHF_EXCLUDE;
+
+    pub struct Display(pub SectionFlags);
+
+    impl std::fmt::Display for Display {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            for (flag, ch) in [
+                (WRITE, "W"),
+                (ALLOC, "A"),
+                (EXECINSTR, "X"),
+                (MERGE, "M"),
+                (STRINGS, "S"),
+                (INFO_LINK, "I"),
+                (LINK_ORDER, "L"),
+                (OS_NONCONFORMING, "O"),
+                (GROUP, "G"),
+                (TLS, "T"),
+                (COMPRESSED, "C"),
+                (EXCLUDE, "E"),
+                // TODO: ld linker sometimes propagates the flag
+                // (shf::GNU_RETAIN, "R"),
+            ] {
+                if self.0.contains(flag) {
+                    f.write_str(ch)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+pub mod secnames {
+    pub const FILEHEADER_SECTION_NAME_STR: &str = "";
+    pub const FILEHEADER_SECTION_NAME: &[u8] = FILEHEADER_SECTION_NAME_STR.as_bytes();
+    pub const RODATA_SECTION_NAME_STR: &str = ".rodata";
+    pub const RODATA_SECTION_NAME: &[u8] = RODATA_SECTION_NAME_STR.as_bytes();
+    pub const TEXT_SECTION_NAME_STR: &str = ".text";
+    pub const TEXT_SECTION_NAME: &[u8] = TEXT_SECTION_NAME_STR.as_bytes();
+    pub const CTORS_SECTION_NAME_STR: &str = ".ctors";
+    pub const CTORS_SECTION_NAME: &[u8] = CTORS_SECTION_NAME_STR.as_bytes();
+    pub const DTORS_SECTION_NAME_STR: &str = ".dtors";
+    pub const DTORS_SECTION_NAME: &[u8] = DTORS_SECTION_NAME_STR.as_bytes();
+    pub const INIT_ARRAY_SECTION_NAME_STR: &str = ".init_array";
+    pub const INIT_ARRAY_SECTION_NAME: &[u8] = INIT_ARRAY_SECTION_NAME_STR.as_bytes();
+    pub const FINI_ARRAY_SECTION_NAME_STR: &str = ".fini_array";
+    pub const FINI_ARRAY_SECTION_NAME: &[u8] = FINI_ARRAY_SECTION_NAME_STR.as_bytes();
+    pub const PREINIT_ARRAY_SECTION_NAME_STR: &str = ".preinit_array";
+    pub const PREINIT_ARRAY_SECTION_NAME: &[u8] = PREINIT_ARRAY_SECTION_NAME_STR.as_bytes();
+    pub const DATA_SECTION_NAME_STR: &str = ".data";
+    pub const DATA_SECTION_NAME: &[u8] = DATA_SECTION_NAME_STR.as_bytes();
+    pub const EH_FRAME_SECTION_NAME_STR: &str = ".eh_frame";
+    pub const EH_FRAME_SECTION_NAME: &[u8] = EH_FRAME_SECTION_NAME_STR.as_bytes();
+    pub const EH_FRAME_HDR_SECTION_NAME_STR: &str = ".eh_frame_hdr";
+    pub const EH_FRAME_HDR_SECTION_NAME: &[u8] = EH_FRAME_HDR_SECTION_NAME_STR.as_bytes();
+    pub const SFRAME_SECTION_NAME_STR: &str = ".sframe";
+    pub const SFRAME_SECTION_NAME: &[u8] = SFRAME_SECTION_NAME_STR.as_bytes();
+    pub const SHSTRTAB_SECTION_NAME_STR: &str = ".shstrtab";
+    pub const SHSTRTAB_SECTION_NAME: &[u8] = SHSTRTAB_SECTION_NAME_STR.as_bytes();
+    pub const SYMTAB_SECTION_NAME_STR: &str = ".symtab";
+    pub const SYMTAB_SECTION_NAME: &[u8] = SYMTAB_SECTION_NAME_STR.as_bytes();
+    pub const STRTAB_SECTION_NAME_STR: &str = ".strtab";
+    pub const STRTAB_SECTION_NAME: &[u8] = STRTAB_SECTION_NAME_STR.as_bytes();
+    pub const TDATA_SECTION_NAME_STR: &str = ".tdata";
+    pub const TDATA_SECTION_NAME: &[u8] = TDATA_SECTION_NAME_STR.as_bytes();
+    pub const TBSS_SECTION_NAME_STR: &str = ".tbss";
+    pub const TBSS_SECTION_NAME: &[u8] = TBSS_SECTION_NAME_STR.as_bytes();
+    pub const BSS_SECTION_NAME_STR: &str = ".bss";
+    pub const BSS_SECTION_NAME: &[u8] = BSS_SECTION_NAME_STR.as_bytes();
+    pub const GOT_SECTION_NAME_STR: &str = ".got";
+    pub const GOT_SECTION_NAME: &[u8] = GOT_SECTION_NAME_STR.as_bytes();
+    pub const INIT_SECTION_NAME_STR: &str = ".init";
+    pub const INIT_SECTION_NAME: &[u8] = INIT_SECTION_NAME_STR.as_bytes();
+    pub const FINI_SECTION_NAME_STR: &str = ".fini";
+    pub const FINI_SECTION_NAME: &[u8] = FINI_SECTION_NAME_STR.as_bytes();
+    pub const RELA_SECTION_NAME_STR: &str = ".rela";
+    pub const RELA_SECTION_NAME: &[u8] = RELA_SECTION_NAME_STR.as_bytes();
+    pub const CREL_SECTION_NAME_STR: &str = ".crel";
+    pub const CREL_SECTION_NAME: &[u8] = CREL_SECTION_NAME_STR.as_bytes();
+    pub const RELA_PLT_SECTION_NAME_STR: &str = ".rela.plt";
+    pub const RELA_PLT_SECTION_NAME: &[u8] = RELA_PLT_SECTION_NAME_STR.as_bytes();
+    pub const COMMENT_SECTION_NAME_STR: &str = ".comment";
+    pub const COMMENT_SECTION_NAME: &[u8] = COMMENT_SECTION_NAME_STR.as_bytes();
+    pub const DYNAMIC_SECTION_NAME_STR: &str = ".dynamic";
+    pub const DYNAMIC_SECTION_NAME: &[u8] = DYNAMIC_SECTION_NAME_STR.as_bytes();
+    pub const DYNSYM_SECTION_NAME_STR: &str = ".dynsym";
+    pub const DYNSYM_SECTION_NAME: &[u8] = DYNSYM_SECTION_NAME_STR.as_bytes();
+    pub const DYNSTR_SECTION_NAME_STR: &str = ".dynstr";
+    pub const DYNSTR_SECTION_NAME: &[u8] = DYNSTR_SECTION_NAME_STR.as_bytes();
+    pub const RELA_DYN_SECTION_NAME_STR: &str = ".rela.dyn";
+    pub const RELA_DYN_SECTION_NAME: &[u8] = RELA_DYN_SECTION_NAME_STR.as_bytes();
+    pub const RELR_DYN_SECTION_NAME_STR: &str = ".relr.dyn";
+    pub const RELR_DYN_SECTION_NAME: &[u8] = RELR_DYN_SECTION_NAME_STR.as_bytes();
+    pub const GCC_EXCEPT_TABLE_SECTION_NAME_STR: &str = ".gcc_except_table";
+    pub const GCC_EXCEPT_TABLE_SECTION_NAME: &[u8] = GCC_EXCEPT_TABLE_SECTION_NAME_STR.as_bytes();
+    pub const INTERP_SECTION_NAME_STR: &str = ".interp";
+    pub const INTERP_SECTION_NAME: &[u8] = INTERP_SECTION_NAME_STR.as_bytes();
+    pub const GNU_VERSION_SECTION_NAME_STR: &str = ".gnu.version";
+    pub const GNU_VERSION_SECTION_NAME: &[u8] = GNU_VERSION_SECTION_NAME_STR.as_bytes();
+    pub const GNU_VERSION_D_SECTION_NAME_STR: &str = ".gnu.version_d";
+    pub const GNU_VERSION_D_SECTION_NAME: &[u8] = GNU_VERSION_D_SECTION_NAME_STR.as_bytes();
+    pub const GNU_VERSION_R_SECTION_NAME_STR: &str = ".gnu.version_r";
+    pub const GNU_VERSION_R_SECTION_NAME: &[u8] = GNU_VERSION_R_SECTION_NAME_STR.as_bytes();
+    pub const HASH_SECTION_NAME_STR: &str = ".hash";
+    pub const HASH_SECTION_NAME: &[u8] = HASH_SECTION_NAME_STR.as_bytes();
+    pub const PROGRAM_HEADERS_SECTION_NAME_STR: &str = ".phdr";
+    pub const PROGRAM_HEADERS_SECTION_NAME: &[u8] = PROGRAM_HEADERS_SECTION_NAME_STR.as_bytes();
+    pub const SECTION_HEADERS_SECTION_NAME_STR: &str = ".shdr";
+    pub const SECTION_HEADERS_SECTION_NAME: &[u8] = SECTION_HEADERS_SECTION_NAME_STR.as_bytes();
+    pub const GNU_HASH_SECTION_NAME_STR: &str = ".gnu.hash";
+    pub const GNU_HASH_SECTION_NAME: &[u8] = GNU_HASH_SECTION_NAME_STR.as_bytes();
+    pub const PLT_SECTION_NAME_STR: &str = ".plt";
+    pub const PLT_SECTION_NAME: &[u8] = PLT_SECTION_NAME_STR.as_bytes();
+    pub const IPLT_SECTION_NAME_STR: &str = ".iplt";
+    pub const IPLT_SECTION_NAME: &[u8] = IPLT_SECTION_NAME_STR.as_bytes();
+    pub const PLT_GOT_SECTION_NAME_STR: &str = ".plt.got";
+    pub const PLT_GOT_SECTION_NAME: &[u8] = PLT_GOT_SECTION_NAME_STR.as_bytes();
+    pub const GOT_PLT_SECTION_NAME_STR: &str = ".got.plt";
+    pub const GOT_PLT_SECTION_NAME: &[u8] = GOT_PLT_SECTION_NAME_STR.as_bytes();
+    pub const PLT_SEC_SECTION_NAME_STR: &str = ".plt.sec";
+    pub const PLT_SEC_SECTION_NAME: &[u8] = PLT_SEC_SECTION_NAME_STR.as_bytes();
+    pub const NOTE_ABI_TAG_SECTION_NAME_STR: &str = ".note.ABI-tag";
+    pub const NOTE_ABI_TAG_SECTION_NAME: &[u8] = NOTE_ABI_TAG_SECTION_NAME_STR.as_bytes();
+    pub const NOTE_GNU_PROPERTY_SECTION_NAME_STR: &str = ".note.gnu.property";
+    pub const NOTE_GNU_PROPERTY_SECTION_NAME: &[u8] = NOTE_GNU_PROPERTY_SECTION_NAME_STR.as_bytes();
+    pub const NOTE_GNU_BUILD_ID_SECTION_NAME_STR: &str = ".note.gnu.build-id";
+    pub const NOTE_GNU_BUILD_ID_SECTION_NAME: &[u8] = NOTE_GNU_BUILD_ID_SECTION_NAME_STR.as_bytes();
+    pub const NOTE_GNU_STACK_SECTION_NAME_STR: &str = ".note.GNU-stack";
+    pub const NOTE_GNU_STACK_SECTION_NAME: &[u8] = NOTE_GNU_STACK_SECTION_NAME_STR.as_bytes();
+    pub const DEBUG_LOC_SECTION_NAME_STR: &str = ".debug_loc";
+    pub const DEBUG_LOC_SECTION_NAME: &[u8] = DEBUG_LOC_SECTION_NAME_STR.as_bytes();
+    pub const DEBUG_RANGES_SECTION_NAME_STR: &str = ".debug_ranges";
+    pub const DEBUG_RANGES_SECTION_NAME: &[u8] = DEBUG_RANGES_SECTION_NAME_STR.as_bytes();
+    pub const GROUP_SECTION_NAME_STR: &str = ".group";
+    pub const GROUP_SECTION_NAME: &[u8] = GROUP_SECTION_NAME_STR.as_bytes();
+    pub const DATA_REL_RO_SECTION_NAME_STR: &str = ".data.rel.ro";
+    pub const DATA_REL_RO_SECTION_NAME: &[u8] = DATA_REL_RO_SECTION_NAME_STR.as_bytes();
+    pub const RISCV_ATTRIBUTES_SECTION_NAME_STR: &str = ".riscv.attributes";
+    pub const RISCV_ATTRIBUTES_SECTION_NAME: &[u8] = RISCV_ATTRIBUTES_SECTION_NAME_STR.as_bytes();
+    pub const RELRO_PADDING_SECTION_NAME_STR: &str = ".relro_padding";
+    pub const RELRO_PADDING_SECTION_NAME: &[u8] = RELRO_PADDING_SECTION_NAME_STR.as_bytes();
+    pub const SYMTAB_SHNDX_SECTION_NAME_STR: &str = ".symtab_shndx";
+    pub const SYMTAB_SHNDX_SECTION_NAME: &[u8] = SYMTAB_SHNDX_SECTION_NAME_STR.as_bytes();
+    pub const DEBUG_INFO_SECTION_NAME_STR: &str = ".debug_info";
+    pub const DEBUG_INFO_SECTION_NAME: &[u8] = DEBUG_INFO_SECTION_NAME_STR.as_bytes();
+    pub const GDB_INDEX_SECTION_NAME_STR: &str = ".gdb_index";
+    pub const GDB_INDEX_SECTION_NAME: &[u8] = GDB_INDEX_SECTION_NAME_STR.as_bytes();
+    pub const DEBUG_GNU_PUBNAMES_STR: &str = ".debug_gnu_pubnames";
+    pub const DEBUG_GNU_PUBNAMES: &[u8] = DEBUG_GNU_PUBNAMES_STR.as_bytes();
+    pub const DEBUG_GNU_PUBTYPES_STR: &str = ".debug_gnu_pubtypes";
+    pub const DEBUG_GNU_PUBTYPES: &[u8] = DEBUG_GNU_PUBTYPES_STR.as_bytes();
+
+    pub const GNU_LTO_SYMTAB_PREFIX: &str = ".gnu.lto_.symtab";
+}
+
+pub use object::elf::ProgramFlags as SegmentFlags;
+
+pub mod pf {
+    use super::SegmentFlags;
+
+    pub const EXECUTABLE: SegmentFlags = object::elf::PF_X;
+    pub const WRITABLE: SegmentFlags = object::elf::PF_W;
+    pub const READABLE: SegmentFlags = object::elf::PF_R;
+
+    pub struct Display(pub SegmentFlags);
+
+    impl std::fmt::Display for Display {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.0.contains(WRITABLE) {
+                f.write_str("W")?;
+            }
+            if self.0.contains(READABLE) {
+                f.write_str("R")?;
+            }
+            if self.0.contains(EXECUTABLE) {
+                f.write_str("X")?;
+            }
+            Ok(())
+        }
+    }
+}
+
+// RISC-V related constants
+
+/// Dynamic thread vector pointers point 0x800 past the start of each TLS block.
+pub const RISCV_TLS_DTV_OFFSET: u64 = 0x800;
+
+pub const RISCV_ATTRIBUTE_VENDOR_NAME: &str = "riscv";
+
+// RISC-V ELF Tag constants, see: https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc#risc-v-specific-dynamic-section-tags
+pub mod riscvattr {
+    // Attributes relate to whole file.
+    pub const TAG_RISCV_WHOLE_FILE: u64 = 1;
+    // Indicates the stack alignment requirement in bytes (ULEB128).
+    pub const TAG_RISCV_STACK_ALIGN: u64 = 4;
+    // Indicates the target architecture of this object (NTBS).
+    pub const TAG_RISCV_ARCH: u64 = 5;
+    // Indicates whether to impose unaligned memory accesses in code generation (ULEB128).
+    pub const TAG_RISCV_UNALIGNED_ACCESS: u64 = 6;
+    // Indicates the major version of the privileged specification (ULEB128, deprecated).
+    pub const TAG_RISCV_PRIV_SPEC: u64 = 8;
+    // Indicates the minor version of the privileged specification (ULEB128, deprecated).
+    pub const TAG_RISCV_PRIV_SPEC_MINOR: u64 = 10;
+    // Indicates the revision version of the privileged specification (ULEB128, deprecated).
+    pub const TAG_RISCV_PRIV_SPEC_REVISION: u64 = 12;
+    // Indicates which version of the atomics ABI is being used (ULEB128).
+    pub const TAG_RISCV_ATOMIC_ABI: u64 = 14;
+    // Indicates the usage definition of the X3 register (ULEB128).
+    pub const TAG_RISCV_X3_REG_USAGE: u64 = 16;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sign {
+    Signed,
+    Unsigned,
+}
+
+/// For additional information on ELF relocation types, see "ELF-64 Object File Format" -
+/// <https://uclibc.org/docs/elf-64-gen.pdf>. For information on the TLS related relocations, see "ELF
+/// Handling For Thread-Local Storage" - <https://www.uclibc.org/docs/tls.pdf>.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelocationKind {
+    /// The absolute address of a symbol or section.
+    Absolute,
+
+    /// The absolute address of a symbol or section related to EH section.
+    AbsoluteSet,
+
+    /// The 6 low bits of an absolute address of a symbol or section.
+    AbsoluteSetWord6,
+
+    /// Add the absolute address of a symbol or section at the place of the relocation
+    /// to the value at the place.
+    AbsoluteAddition,
+
+    /// Add the absolute address of a symbol or section at the place of the relocation
+    /// to the value at the place (use WORD6 type for the operation)
+    AbsoluteAdditionWord6,
+
+    /// Subtract the absolute address of a symbol or section at the place of the relocation
+    /// from the value at the place.
+    AbsoluteSubtraction,
+
+    /// Subtract the absolute address of a symbol or section at the place of the relocation
+    /// from the value at the place (use WORD6 type for the operation)
+    AbsoluteSubtractionWord6,
+
+    /// The absolute address of a symbol or section. We are going to extract only the offset
+    /// within a page, so dynamic relocation creation must be skipped. Used by both AArch64
+    /// and LoongArch64 targets.
+    AbsoluteLowPart,
+
+    /// Subtract addresses of two symbols and encode the value using ULEB128.
+    ///
+    /// Note: The assembler must allocate sufficient space to accommodate the final value for the
+    /// R_RISCV_SET_ULEB128 and R_RISCV_SUB_ULEB128 relocation pair and fill the space with a
+    /// single ULEB128-encoded value. This is achieved by prepending the redundant 0x80 byte as
+    /// necessary. The linker must not alter the length of the ULEB128-encoded value.
+    PairSubtractionULEB128(object::elf::RelocationType),
+
+    /// The address of the symbol, relative to the place of the relocation.
+    Relative,
+
+    /// The address of the symbol, relative to the place of the relocation
+    /// (using LoongArch64 high part encoding).
+    RelativeLoongArchHigh,
+
+    /// The address of the symbol, relative to the place of the relocation. The address of the
+    /// relocation points to an instruction for which the R_RISCV_PCREL_HI20 relocation is used
+    /// and that is the place we make this relocation relative to.
+    RelativeRiscVLow12,
+
+    /// The address of the symbol, relative to the base address of the GOT.
+    SymRelGotBase,
+
+    /// The offset of the symbol's GOT entry, relative to the start of the GOT.
+    GotRelGotBase,
+
+    /// The address of the symbol's GOT entry.
+    Got,
+
+    /// The address of the symbol's PLT entry, relative to the base address of the GOT.
+    PltRelGotBase,
+
+    /// The address of the symbol's PLT entry, relative to the place of relocation.
+    PltRelative,
+
+    /// The address of the symbol's GOT entry, relative to the place of the relocation.
+    GotRelative,
+
+    /// The address of the symbol's GOT entry, relative to the place of the relocation
+    /// (using LoongArch64 high part encoding).
+    GotRelativeLoongArch64,
+
+    /// The address of a TLSGD structure, relative to the place of the relocation. A TLSGD
+    /// (thread-local storage general dynamic) structure is a pair of values containing a module ID
+    /// and the offset within that module's TLS storage.
+    TlsGd,
+
+    /// The address of the symbol's TLSGD GOT entry.
+    TlsGdGot,
+
+    /// The address of the symbol's TLSGD GOT entry, relative to the start of the GOT.
+    TlsGdGotBase,
+
+    /// The address of the TLS module ID for the shared object that we're writing, relative to the
+    /// place of the relocation. This is used when a TLS variable is defined and used within the
+    /// same shared object.
+    TlsLd,
+
+    /// The address of the TLS module ID for the shared object that we're writing.
+    TlsLdGot,
+
+    /// The address of the TLS module ID for the shared object that we're writing,
+    /// relative to the start of the GOT.
+    TlsLdGotBase,
+
+    /// The offset of a thread-local within the TLS storage of DSO that defines that thread-local.
+    DtpOff,
+
+    /// The address of a GOT entry containing the offset of a TLS variable within the executable's
+    /// TLS storage, relative to the place of the relocation.
+    GotTpOff,
+
+    /// The address of a GOT entry containing the offset of a TLS variable within the executable's
+    /// TLS storage, relative to the place of the relocation.
+    /// (using LoongArch64 high part encoding).
+    GotTpOffLoongArch64,
+
+    /// The address of a GOT entry containing the offset of a TLS variable within the executable's
+    /// TLS storage.
+    GotTpOffGot,
+
+    /// The address of a GOT entry containing the offset of a TLS variable within the executable's
+    /// TLS storage, relative to the start of the GOT.
+    GotTpOffGotBase,
+
+    /// The offset of a TLS variable within the executable's TLS storage.
+    TpOff,
+
+    /// The address of a TLS descriptor structure, relative to the place of the relocation.
+    TlsDesc,
+
+    /// The address of a TLS descriptor structure, relative to the place of the relocation.
+    /// (using LoongArch64 high part encoding).
+    TlsDescLoongArch64,
+
+    /// The address of a TLS descriptor structure.
+    TlsDescGot,
+
+    /// The address of a TLS descriptor structure, relative to the start of the GOT.
+    TlsDescGotBase,
+
+    /// Call to the TLS descriptor trampoline. Used only as a placeholder for a linker relaxation
+    /// opportunity.
+    TlsDescCall,
+
+    /// No relocation needs to be applied. Produced when we eliminate a relocation due to an
+    /// optimisation.
+    None,
+
+    /// The address must fulfill the alignment requirement.
+    Alignment,
+}
+
+impl RelocationKind {
+    #[must_use]
+    pub fn is_tls(self) -> bool {
+        matches!(
+            self,
+            Self::DtpOff
+                | Self::GotTpOff
+                | Self::GotTpOffGotBase
+                | Self::TlsDesc
+                | Self::TlsDescCall
+                | Self::TlsDescGot
+                | Self::TlsDescGotBase
+                | Self::TlsGd
+                | Self::TlsGdGot
+                | Self::TlsGdGotBase
+                | Self::TlsLd
+                | Self::TlsLdGot
+                | Self::TlsLdGotBase
+                | Self::TpOff
+        )
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DynamicRelocationKind {
+    Copy,
+    Irelative,
+    DtpMod,
+    DtpOff,
+    TlsDesc,
+    TpOff,
+    Relative,
+    Absolute,
+    GotEntry,
+    JumpSlot,
+}
+
+impl DynamicRelocationKind {
+    #[must_use]
+    pub fn from_x86_64_r_type(r_type: object::elf::RelocationType) -> Option<Self> {
+        let kind = match r_type {
+            object::elf::R_X86_64_COPY => DynamicRelocationKind::Copy,
+            object::elf::R_X86_64_IRELATIVE => DynamicRelocationKind::Irelative,
+            object::elf::R_X86_64_DTPMOD64 => DynamicRelocationKind::DtpMod,
+            object::elf::R_X86_64_DTPOFF64 => DynamicRelocationKind::DtpOff,
+            object::elf::R_X86_64_TPOFF64 => DynamicRelocationKind::TpOff,
+            object::elf::R_X86_64_RELATIVE => DynamicRelocationKind::Relative,
+            object::elf::R_X86_64_GLOB_DAT => DynamicRelocationKind::GotEntry,
+            object::elf::R_X86_64_64 => DynamicRelocationKind::Absolute,
+            object::elf::R_X86_64_TLSDESC => DynamicRelocationKind::TlsDesc,
+            object::elf::R_X86_64_JUMP_SLOT => DynamicRelocationKind::JumpSlot,
+            _ => return None,
+        };
+
+        Some(kind)
+    }
+
+    #[must_use]
+    pub fn x86_64_r_type(self) -> object::elf::RelocationType {
+        match self {
+            DynamicRelocationKind::Copy => object::elf::R_X86_64_COPY,
+            DynamicRelocationKind::Irelative => object::elf::R_X86_64_IRELATIVE,
+            DynamicRelocationKind::DtpMod => object::elf::R_X86_64_DTPMOD64,
+            DynamicRelocationKind::DtpOff => object::elf::R_X86_64_DTPOFF64,
+            DynamicRelocationKind::TpOff => object::elf::R_X86_64_TPOFF64,
+            DynamicRelocationKind::Relative => object::elf::R_X86_64_RELATIVE,
+            DynamicRelocationKind::Absolute => object::elf::R_X86_64_64,
+            DynamicRelocationKind::GotEntry => object::elf::R_X86_64_GLOB_DAT,
+            DynamicRelocationKind::TlsDesc => object::elf::R_X86_64_TLSDESC,
+            DynamicRelocationKind::JumpSlot => object::elf::R_X86_64_JUMP_SLOT,
+        }
+    }
+
+    #[must_use]
+    pub fn from_aarch64_r_type(r_type: object::elf::RelocationType) -> Option<Self> {
+        let kind = match r_type {
+            object::elf::R_AARCH64_COPY => DynamicRelocationKind::Copy,
+            object::elf::R_AARCH64_IRELATIVE => DynamicRelocationKind::Irelative,
+            object::elf::R_AARCH64_TLS_DTPMOD => DynamicRelocationKind::DtpMod,
+            object::elf::R_AARCH64_TLS_DTPREL => DynamicRelocationKind::DtpOff,
+            object::elf::R_AARCH64_TLS_TPREL => DynamicRelocationKind::TpOff,
+            object::elf::R_AARCH64_RELATIVE => DynamicRelocationKind::Relative,
+            object::elf::R_AARCH64_ABS64 => DynamicRelocationKind::Absolute,
+            object::elf::R_AARCH64_GLOB_DAT => DynamicRelocationKind::GotEntry,
+            object::elf::R_AARCH64_TLSDESC => DynamicRelocationKind::TlsDesc,
+            object::elf::R_AARCH64_JUMP_SLOT => DynamicRelocationKind::JumpSlot,
+            _ => return None,
+        };
+
+        Some(kind)
+    }
+
+    #[must_use]
+    pub fn aarch64_r_type(&self) -> object::elf::RelocationType {
+        match self {
+            DynamicRelocationKind::Copy => object::elf::R_AARCH64_COPY,
+            DynamicRelocationKind::Irelative => object::elf::R_AARCH64_IRELATIVE,
+            DynamicRelocationKind::DtpMod => object::elf::R_AARCH64_TLS_DTPMOD,
+            DynamicRelocationKind::DtpOff => object::elf::R_AARCH64_TLS_DTPREL,
+            DynamicRelocationKind::TpOff => object::elf::R_AARCH64_TLS_TPREL,
+            DynamicRelocationKind::Relative => object::elf::R_AARCH64_RELATIVE,
+            DynamicRelocationKind::Absolute => object::elf::R_AARCH64_ABS64,
+            DynamicRelocationKind::GotEntry => object::elf::R_AARCH64_GLOB_DAT,
+            DynamicRelocationKind::TlsDesc => object::elf::R_AARCH64_TLSDESC,
+            DynamicRelocationKind::JumpSlot => object::elf::R_AARCH64_JUMP_SLOT,
+        }
+    }
+
+    #[must_use]
+    pub fn from_riscv64_r_type(r_type: object::elf::RelocationType) -> Option<Self> {
+        let kind = match r_type {
+            object::elf::R_RISCV_COPY => DynamicRelocationKind::Copy,
+            object::elf::R_RISCV_IRELATIVE => DynamicRelocationKind::Irelative,
+            object::elf::R_RISCV_TLS_DTPMOD64 => DynamicRelocationKind::DtpMod,
+            object::elf::R_RISCV_TLS_DTPREL64 => DynamicRelocationKind::DtpOff,
+            object::elf::R_RISCV_TLS_TPREL64 => DynamicRelocationKind::TpOff,
+            object::elf::R_RISCV_RELATIVE => DynamicRelocationKind::Relative,
+            object::elf::R_RISCV_64 => DynamicRelocationKind::Absolute,
+            object::elf::R_RISCV_TLSDESC => DynamicRelocationKind::TlsDesc,
+            object::elf::R_RISCV_JUMP_SLOT => DynamicRelocationKind::JumpSlot,
+            _ => return None,
+        };
+        Some(kind)
+    }
+
+    #[must_use]
+    pub fn riscv64_r_type(&self) -> object::elf::RelocationType {
+        match self {
+            DynamicRelocationKind::Copy => object::elf::R_RISCV_COPY,
+            DynamicRelocationKind::Irelative => object::elf::R_RISCV_IRELATIVE,
+            DynamicRelocationKind::DtpMod => object::elf::R_RISCV_TLS_DTPMOD64,
+            DynamicRelocationKind::DtpOff => object::elf::R_RISCV_TLS_DTPREL64,
+            DynamicRelocationKind::TpOff => object::elf::R_RISCV_TLS_TPREL64,
+            DynamicRelocationKind::Relative => object::elf::R_RISCV_RELATIVE,
+            DynamicRelocationKind::Absolute => object::elf::R_RISCV_64,
+            DynamicRelocationKind::GotEntry => object::elf::R_RISCV_64,
+            DynamicRelocationKind::TlsDesc => object::elf::R_RISCV_TLSDESC,
+            DynamicRelocationKind::JumpSlot => object::elf::R_RISCV_JUMP_SLOT,
+        }
+    }
+
+    #[must_use]
+    pub fn from_loongarch64_r_type(r_type: object::elf::RelocationType) -> Option<Self> {
+        let kind = match r_type {
+            object::elf::R_LARCH_COPY => DynamicRelocationKind::Copy,
+            object::elf::R_LARCH_IRELATIVE => DynamicRelocationKind::Irelative,
+            object::elf::R_LARCH_TLS_DTPMOD64 => DynamicRelocationKind::DtpMod,
+            object::elf::R_LARCH_TLS_DTPREL64 => DynamicRelocationKind::DtpOff,
+            object::elf::R_LARCH_TLS_TPREL64 => DynamicRelocationKind::TpOff,
+            object::elf::R_LARCH_RELATIVE => DynamicRelocationKind::Relative,
+            object::elf::R_LARCH_64 => DynamicRelocationKind::Absolute,
+            object::elf::R_LARCH_TLS_DESC64 => DynamicRelocationKind::TlsDesc,
+            object::elf::R_LARCH_JUMP_SLOT => DynamicRelocationKind::JumpSlot,
+            _ => return None,
+        };
+        Some(kind)
+    }
+
+    #[must_use]
+    pub fn loongarch64_r_type(&self) -> object::elf::RelocationType {
+        match self {
+            DynamicRelocationKind::Copy => object::elf::R_LARCH_COPY,
+            DynamicRelocationKind::Irelative => object::elf::R_LARCH_IRELATIVE,
+            DynamicRelocationKind::DtpMod => object::elf::R_LARCH_TLS_DTPMOD64,
+            DynamicRelocationKind::DtpOff => object::elf::R_LARCH_TLS_DTPREL64,
+            DynamicRelocationKind::TpOff => object::elf::R_LARCH_TLS_TPREL64,
+            DynamicRelocationKind::Relative => object::elf::R_LARCH_RELATIVE,
+            DynamicRelocationKind::Absolute => object::elf::R_LARCH_64,
+            DynamicRelocationKind::GotEntry => object::elf::R_LARCH_64,
+            DynamicRelocationKind::TlsDesc => object::elf::R_LARCH_TLS_DESC64,
+            DynamicRelocationKind::JumpSlot => object::elf::R_LARCH_JUMP_SLOT,
+        }
+    }
+
+    #[must_use]
+    pub fn ppc64_r_type(&self) -> object::elf::RelocationType {
+        match self {
+            DynamicRelocationKind::Copy => object::elf::R_PPC64_COPY,
+            DynamicRelocationKind::Irelative => object::elf::R_PPC64_IRELATIVE,
+            DynamicRelocationKind::DtpMod => object::elf::R_PPC64_DTPMOD64,
+            DynamicRelocationKind::DtpOff => object::elf::R_PPC64_DTPREL64,
+            DynamicRelocationKind::TpOff => object::elf::R_PPC64_TPREL64,
+            DynamicRelocationKind::Relative => object::elf::R_PPC64_RELATIVE,
+            DynamicRelocationKind::Absolute => object::elf::R_PPC64_ADDR64,
+            DynamicRelocationKind::GotEntry => object::elf::R_PPC64_GLOB_DAT,
+            // ppc64 uses the __tls_get_addr (GD/LD) model, not TLS descriptors.
+            DynamicRelocationKind::TlsDesc => unreachable!("ppc64 does not use TLS descriptors"),
+            DynamicRelocationKind::JumpSlot => object::elf::R_PPC64_JMP_SLOT,
+        }
+    }
+
+    #[must_use]
+    pub fn from_ppc64_r_type(r_type: object::elf::RelocationType) -> Option<Self> {
+        let kind = match r_type {
+            object::elf::R_PPC64_COPY => DynamicRelocationKind::Copy,
+            object::elf::R_PPC64_IRELATIVE => DynamicRelocationKind::Irelative,
+            object::elf::R_PPC64_DTPMOD64 => DynamicRelocationKind::DtpMod,
+            object::elf::R_PPC64_DTPREL64 => DynamicRelocationKind::DtpOff,
+            object::elf::R_PPC64_TPREL64 => DynamicRelocationKind::TpOff,
+            object::elf::R_PPC64_RELATIVE => DynamicRelocationKind::Relative,
+            object::elf::R_PPC64_ADDR64 => DynamicRelocationKind::Absolute,
+            object::elf::R_PPC64_GLOB_DAT => DynamicRelocationKind::GotEntry,
+            object::elf::R_PPC64_JMP_SLOT => DynamicRelocationKind::JumpSlot,
+            _ => return None,
+        };
+        Some(kind)
+    }
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum AArch64Instruction {
+    Adr,
+    Movkz,
+    Movnz,
+    Ldr,
+    LdrRegister,
+    Add,
+    LdSt,
+    TstBr,
+    Bcond,
+    JumpCall,
+    // Mach-O specific
+    MachOLow12,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum RiscVInstruction {
+    // The relocation encoding actually modifies the consecutive pair of instructions:
+    //   10:	00000097          	auipc	ra,0x0	10: R_RISCV_CALL_PLT	symbol_name
+    //   14:	000080e7          	jalr	ra # 10 <main+0x10>
+    //
+    // That makes the relocation pretty unusual as one would expect 2 relocations:
+    // https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc#procedure-calls
+    UiType,
+
+    // Encodes high 20 bits of 32-bit value and encodes the bits to upper part.
+    UType,
+
+    // Encodes low 12 bits of 32-bit value and encodes the bits to upper part.
+    IType,
+
+    // Encodes 12 bits of 32-bit value.
+    SType,
+
+    // The X-type instruction immediate encoding is defined here:
+    // https://riscv.github.io/riscv-isa-manual/snapshot/unprivileged/#_immediate_encoding_variants
+
+    // Specifies a field as the immediate field in a B-type (branch) instruction
+    BType,
+
+    // Specifies a field as the immediate field in a J-type (jump) instruction
+    JType,
+
+    // Specifies a field as the immediate field in a CB-type (compressed branch) instruction
+    // https://riscv.github.io/riscv-isa-manual/snapshot/unprivileged/#_control_transfer_instructions_2
+    CbType,
+
+    // Specifies a field as the immediate field in a CJ-type (compressed jump) instruction
+    CjType,
+
+    // Encodes the immediate field of a C.LUI instruction (CI-type, 2 bytes).
+    CluiType,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum LoongArch64Instruction {
+    Shift5,
+    Shift10,
+    Branch21,
+    Branch26,
+    Call30,
+    Call36,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum Ppc64Instruction {
+    /// D-form: 16-bit field in instruction bits [15:0] (e.g. `addi`, `addis`, `lwz`).
+    D,
+    /// DS-form: 14-bit field in instruction bits [15:2]; the low two bits are part of the opcode
+    /// and are preserved (e.g. `ld`, `std`).
+    Ds,
+    /// B-form conditional branch (`bc`): 14-bit displacement field in instruction bits [15:2].
+    Branch14,
+    /// I-form branch (`b`/`bl`): 24-bit displacement field in instruction bits [25:2].
+    Branch24,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum RelocationInstruction {
+    AArch64(AArch64Instruction),
+    RiscV(RiscVInstruction),
+    LoongArch64(LoongArch64Instruction),
+    Ppc64(Ppc64Instruction),
+}
+
+impl RelocationInstruction {
+    #[must_use]
+    pub fn bit_mask(&self, range: BitRange) -> [u8; 4] {
+        let mut mask = [0; 4];
+
+        // To figure out which bits are part of the relocation, we write a value with
+        // all ones into a buffer that initially contains zeros.
+        let all_ones = (1 << (range.end - range.start)) - 1;
+        self.write_to_value(all_ones, false, &mut mask);
+
+        // Wherever we get a 1 is part of the relocation, so invert all bits.
+        for b in &mut mask {
+            *b = !*b;
+        }
+
+        mask
+    }
+
+    pub fn write_to_value(self, extracted_value: u64, negative: bool, dest: &mut [u8]) {
+        match self {
+            Self::AArch64(insn) => insn.write_to_value(extracted_value, negative, dest),
+            Self::RiscV(insn) => insn.write_to_value(extracted_value, negative, dest),
+            Self::LoongArch64(insn) => insn.write_to_value(extracted_value, negative, dest),
+            Self::Ppc64(insn) => insn.write_to_value(extracted_value, negative, dest),
+        }
+    }
+
+    /// The inverse of `write_to_value`. Returns `(extracted_value, negative)`. Supplied `bytes`
+    /// must be at least 4 bytes, otherwise we panic.
+    #[must_use]
+    pub fn read_value(self, bytes: &[u8]) -> (u64, bool) {
+        match self {
+            Self::AArch64(insn) => insn.read_value(bytes),
+            Self::RiscV(insn) => insn.read_value(bytes),
+            Self::LoongArch64(insn) => insn.read_value(bytes),
+            Self::Ppc64(insn) => insn.read_value(bytes),
+        }
+    }
+
+    /// The number of bytes the relocation actually can modify in the output data.
+    #[must_use]
+    pub fn write_windows_size(self) -> usize {
+        match self {
+            Self::AArch64(..) => 4,
+            Self::RiscV(..) => 4,
+            Self::LoongArch64(..) => 4,
+            Self::Ppc64(..) => 4,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum RelocationSize {
+    ByteSize(usize),
+    BitMasking(BitMask),
+}
+
+impl fmt::Display for RelocationSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ByteSize(bytes) => f.write_fmt(format_args!("{bytes}B")),
+            Self::BitMasking(mask) => {
+                f.write_fmt(format_args!("{}..{}", mask.range.start, mask.range.end))
+            }
+        }
+    }
+}
+
+impl RelocationSize {
+    #[must_use]
+    pub const fn bit_mask_aarch64(
+        bit_start: u32,
+        bit_end: u32,
+        instruction: AArch64Instruction,
+    ) -> RelocationSize {
+        Self::BitMasking(BitMask::new(
+            RelocationInstruction::AArch64(instruction),
+            bit_start,
+            bit_end,
+        ))
+    }
+
+    #[must_use]
+    pub const fn bit_mask_riscv(
+        bit_start: u32,
+        bit_end: u32,
+        instruction: RiscVInstruction,
+    ) -> RelocationSize {
+        Self::BitMasking(BitMask::new(
+            RelocationInstruction::RiscV(instruction),
+            bit_start,
+            bit_end,
+        ))
+    }
+
+    #[must_use]
+    pub const fn bit_mask_loongarch64(
+        bit_start: u32,
+        bit_end: u32,
+        instruction: LoongArch64Instruction,
+    ) -> RelocationSize {
+        Self::BitMasking(BitMask::new(
+            RelocationInstruction::LoongArch64(instruction),
+            bit_start,
+            bit_end,
+        ))
+    }
+
+    #[must_use]
+    pub const fn bit_mask_ppc64(
+        bit_start: u32,
+        bit_end: u32,
+        instruction: Ppc64Instruction,
+    ) -> RelocationSize {
+        Self::BitMasking(BitMask::new(
+            RelocationInstruction::Ppc64(instruction),
+            bit_start,
+            bit_end,
+        ))
+    }
+
+    /// Returns whether this relocation writes a ppc64 branch instruction, i.e. a call/branch site
+    /// that may need a local-entry-point adjustment. False for every non-ppc64 relocation.
+    #[must_use]
+    pub fn is_ppc64_branch(&self) -> bool {
+        matches!(
+            self,
+            RelocationSize::BitMasking(BitMask {
+                instruction: RelocationInstruction::Ppc64(
+                    Ppc64Instruction::Branch14 | Ppc64Instruction::Branch24
+                ),
+                ..
+            })
+        )
+    }
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub struct BitMask {
+    pub instruction: RelocationInstruction,
+    pub range: BitRange,
+}
+
+pub const SIZE_2KB: u64 = 1 << 11;
+pub const SIZE_4KB: u64 = 1 << 12;
+pub const SIZE_2GB: u64 = 1 << 31;
+pub const SIZE_4GB: u64 = 1 << 32;
+
+pub const PAGE_MASK_4KB: u64 = SIZE_4KB - 1;
+pub const PAGE_MASK_4GB: u64 = SIZE_4GB - 1;
+
+#[derive(Debug, Clone, Copy)]
+pub enum PageMask {
+    SymbolPlusAddendAndPosition(u64),
+    GotEntryAndPosition(u64),
+    GotBase(u64),
+    Position(u64),
+}
+
+// Allow range (half-open) of a computed value of a relocation
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub struct AllowedRange {
+    pub min: i64,
+    pub max: i64,
+}
+
+impl AllowedRange {
+    #[must_use]
+    pub const fn new(min: i64, max: i64) -> Self {
+        Self { min, max }
+    }
+
+    #[must_use]
+    pub const fn no_check() -> Self {
+        Self::new(i64::MIN, i64::MAX)
+    }
+
+    #[must_use]
+    /// Note: for the 64-bit size, we actually do signed checks regardless of the `sign` argument
+    /// because the `min` and `max` are `i64` type
+    pub const fn from_bit_size(n_bits: usize, sign: Sign) -> Self {
+        match n_bits {
+            0 | 64 => Self::no_check(),
+            63 if matches!(sign, Sign::Unsigned) => panic!("2^63 cannot be represented as i64"),
+            1..64 => {
+                let n_bits = n_bits as u32;
+                match sign {
+                    Sign::Unsigned => Self::new(0, 2i64.pow(n_bits)),
+                    Sign::Signed => Self::new(-2i64.pow(n_bits - 1), 2i64.pow(n_bits - 1)),
+                }
+            }
+            _ => panic!("Only sizes up to 8 bytes are supported"),
+        }
+    }
+
+    #[must_use]
+    /// Note: for the 8-byte size, we actually do signed checks regardless of the `sign` argument
+    /// because the `min` and `max` are `i64` type
+    pub const fn from_byte_size(n_bytes: usize, sign: Sign) -> Self {
+        Self::from_bit_size(8 * n_bytes, sign)
+    }
+
+    #[must_use]
+    /// Return true if the value is present in the allowed range.
+    pub fn contains(&self, value: i64) -> bool {
+        self.min <= value && value < self.max
+    }
+
+    /// Returns how far we're outside the allowed range.
+    #[must_use]
+    pub fn overrun(&self, value: i64) -> i64 {
+        if value < self.min {
+            value - self.min
+        } else if value > self.max {
+            value - self.max
+        } else {
+            0
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct RelocationKindInfo {
+    pub kind: RelocationKind,
+    pub size: RelocationSize,
+    pub mask: Option<PageMask>,
+    pub range: AllowedRange,
+    pub alignment: usize,
+    pub bias: u64,
+    /// Whether this relocation type supports range-extension thunks.
+    pub thunkable: bool,
+}
+
+impl RelocationKindInfo {
+    #[inline(always)]
+    fn verify(&self, value: i64) -> Result<()> {
+        anyhow::ensure!(
+            (value as usize).is_multiple_of(self.alignment),
+            "Relocation {value} not aligned to {} bytes",
+            self.alignment
+        );
+        anyhow::ensure!(
+            self.range.contains(value),
+            format!(
+                "Relocation {value} outside of bounds [{}, {})",
+                self.range.min, self.range.max
+            )
+        );
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn write_to_buffer(self, value: u64, output: &mut [u8]) -> Result<()> {
+        self.verify(value as i64)?;
+
+        if matches!(self.kind, RelocationKind::PairSubtractionULEB128(..)) {
+            let mut writer = Cursor::new([0u8; u64::BITS.div_ceil(7) as usize]);
+            let n = leb128::write::unsigned(&mut writer, value).expect("Must fit into the buffer");
+            anyhow::ensure!(
+                output.len() >= n,
+                "cannot write encoded ULEB128 value of {n} bytes"
+            );
+            output[..n].copy_from_slice(&writer.into_inner()[..n]);
+        } else {
+            match self.size {
+                RelocationSize::ByteSize(byte_size) => {
+                    anyhow::ensure!(
+                        byte_size <= output.len(),
+                        "Relocation outside of bounds of section"
+                    );
+                    let value_bytes = value.to_le_bytes();
+                    output[..byte_size].copy_from_slice(&value_bytes[..byte_size]);
+                }
+                RelocationSize::BitMasking(BitMask {
+                    range,
+                    instruction: insn,
+                }) => {
+                    let extracted_value = value.extract_bit_range(range.start..range.end);
+                    let negative = (value as i64).is_negative();
+                    let output_len = output.len();
+                    insn.write_to_value(extracted_value, negative, &mut output[..output_len]);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl BitMask {
+    #[must_use]
+    pub const fn new(instruction: RelocationInstruction, bit_start: u32, bit_end: u32) -> Self {
+        Self {
+            instruction,
+            range: BitRange {
+                start: bit_start,
+                end: bit_end,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object::elf::*;
+
+    #[test]
+    fn test_rel_type_to_string() {
+        assert_eq!(
+            &x86_64_rel_type_to_string(R_X86_64_32),
+            stringify!(R_X86_64_32)
+        );
+        assert_eq!(
+            &x86_64_rel_type_to_string(R_X86_64_GOTPC32_TLSDESC),
+            stringify!(R_X86_64_GOTPC32_TLSDESC)
+        );
+        assert_eq!(
+            &x86_64_rel_type_to_string(object::elf::RelocationType(64)),
+            "Unknown x86_64 relocation type 0x40"
+        );
+
+        assert_eq!(
+            &aarch64_rel_type_to_string(object::elf::RelocationType(64)),
+            "Unknown aarch64 relocation type 0x40"
+        );
+    }
+
+    #[test]
+    fn test_range_from_byte_size() {
+        assert_eq!(
+            AllowedRange::from_byte_size(0, Sign::Signed),
+            AllowedRange::no_check(),
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(0, Sign::Unsigned),
+            AllowedRange::no_check(),
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(1, Sign::Signed),
+            AllowedRange::new(-128, 128)
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(1, Sign::Signed),
+            AllowedRange::new(-128, 128)
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(1, Sign::Unsigned),
+            AllowedRange::new(0, 256)
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(4, Sign::Signed),
+            AllowedRange::new(i64::from(i32::MIN), i64::from(i32::MAX) + 1)
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(4, Sign::Unsigned),
+            AllowedRange::new(i64::from(u32::MIN), i64::from(u32::MAX) + 1)
+        );
+        assert_eq!(
+            AllowedRange::from_byte_size(8, Sign::Signed),
+            AllowedRange::no_check()
+        );
+        // 8-byte unsigned is also no check because the range cannot be represented in i64
+        assert_eq!(
+            AllowedRange::from_byte_size(8, Sign::Unsigned),
+            AllowedRange::no_check()
+        );
+
+        assert_eq!(
+            AllowedRange::from_bit_size(1, Sign::Signed),
+            AllowedRange::new(-1, 1),
+        );
+        assert_eq!(
+            AllowedRange::from_bit_size(10, Sign::Signed),
+            AllowedRange::new(-512, 512),
+        );
+        assert_eq!(
+            AllowedRange::from_bit_size(10, Sign::Unsigned),
+            AllowedRange::new(0, 1024),
+        );
+
+        let r_riscv_branch_range = AllowedRange::new(-(2i64.pow(12)), 2i64.pow(12) - 1);
+        assert!(r_riscv_branch_range.contains(-4096));
+        assert!(r_riscv_branch_range.contains(4094));
+        assert!(!r_riscv_branch_range.contains(4095));
+
+        let r_riscv_rvc_branch_range = AllowedRange::new(-(2i64.pow(8)), 2i64.pow(8) - 1);
+        assert!(r_riscv_rvc_branch_range.contains(-256));
+        assert!(r_riscv_rvc_branch_range.contains(254));
+        assert!(!r_riscv_rvc_branch_range.contains(255));
+    }
+}

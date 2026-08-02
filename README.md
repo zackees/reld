@@ -2,33 +2,34 @@
 
 *relink. reweld. reload.*
 
-**A successor to the [`wild`](https://github.com/wild-linker/wild) linker** — with Windows,
+**A fork of the [`wild`](https://github.com/wild-linker/wild) linker** — with Windows,
 Linux, and macOS as co-equal targets, incremental linking as the architecture, and a mandate to
 beat `wild` in every measured category.
 
-> **Status: design / exploration. No implementation yet.**
-> Every performance number below is a **target**, not a measurement. Nothing has been
-> benchmarked because there is nothing to benchmark. See [DESIGN.md](DESIGN.md).
+> **Status: ELF/Linux linking works today, inherited from wild.** Windows/COFF and macOS/Mach-O
+> are not implemented. Every performance number below remains a **target**, not a measurement.
+> See [DESIGN.md](DESIGN.md).
 
 <!-- BENCHMARK:BEGIN -->
 [![Latest reld link benchmark](https://raw.githubusercontent.com/zackees/reld/benchmark-stats/benchmark-link.jpg)](https://github.com/zackees/reld/tree/benchmark-stats)
 
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
-alongside `latest.json` and `history.jsonl`. The `reld` column reads `n/a` until there is a
-linker to measure — the column is published empty rather than omitted, so the gap is visible
-rather than implied. Reproduce locally with `cargo run --release --bin reld-bench`.*
+alongside `latest.json` and `history.jsonl`. The `reld` column remains `n/a` until Phase 2's
+CI-generated measurement lands; Phase 0 does not publish unmeasured results. With
+[`soldr`](https://github.com/zackees/soldr) installed, reproduce locally with
+`soldr cargo run --release --bin reld-bench`.*
 <!-- BENCHMARK:END -->
 
 ## What it is
 
-`wild` is the best-architected fast linker in existence — the only one that paid the cost of a
-real format abstraction instead of hardcoding ELF. `reld` starts from that and changes the
-scope:
+`reld` is a source fork of `wild` at commit
+`5793935f1d8b05b9a978ce2089e16e718072e9a9`. The inherited ELF linker works now; the scope then
+expands toward native Windows and macOS backends and incremental linking:
 
 | | `wild` | `reld` |
 |---|---|---|
-| Platforms | Linux / ELF | **Windows, Linux, macOS — co-equal** |
+| Platforms | Linux / ELF | Linux / ELF now; **Windows and macOS planned** |
 | Incremental linking | on the roadmap | **the architecture** |
 | Optimizes for | the final link | the **edit → link → run** loop |
 | Release-quality output | required | **explicit non-goal** |
@@ -91,9 +92,24 @@ Recorded up front rather than discovered later — see [DESIGN.md §5](DESIGN.md
   code. `reld` bets that Rust's monomorphized traits change this calculus, and scopes the
   abstraction narrowly on that basis.
 
+## Development and acceptance
+
+P0–P2 acceptance runs inside the vendored Linux development container, not directly on the
+Windows host:
+
+```bash
+docker build -t reld-ci -f docker/ci/ubuntu.Dockerfile .
+docker run --rm -v "$PWD:/src" -w /src reld-ci \
+  bash -lc 'RELD_TEST_CONFIG=test-config-ci.toml rustup run --install 1.94.1 cargo test --workspace'
+```
+
+See [UPSTREAM.md](UPSTREAM.md) for the tracked source delta.
+
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+The code derived from wild is dual-licensed MIT OR Apache-2.0; see [LICENSE-MIT](LICENSE-MIT),
+[LICENSE-APACHE](LICENSE-APACHE), and [NOTICE](NOTICE). The repository's original reld components
+remain BSD 3-Clause under [LICENSE](LICENSE).
 
 ## Related
 

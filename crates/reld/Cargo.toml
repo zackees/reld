@@ -1,17 +1,76 @@
 [package]
 name = "reld"
-description = "An incremental linker for the inner dev loop. Not yet implemented."
-publish = false
+description = "A very fast linker for Linux"
 version.workspace = true
-edition.workspace = true
 license.workspace = true
 repository.workspace = true
-authors.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+autotests = false
 
 [[bin]]
 name = "reld"
 path = "src/main.rs"
 
+[[bin]]
+name = "reld-link"
+path = "src/bin/reld-link.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+harness = false
+
 [dependencies]
-anyhow.workspace = true
-clap.workspace = true
+reld-core = { path = "../reld-core", version = "0.0.0", default-features = false }
+
+# This is off by default, since it doesn't appear to help. However, if you're linking against musl
+# libc, which has a comparatively slow allocator, then enabling this does help. To enable this,
+# build with `--features mimalloc`.
+mimalloc = { workspace = true, optional = true }
+
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+ar.workspace = true
+bitflags.workspace = true
+blake3.workspace = true
+diff.workspace = true
+itertools.workspace = true
+foldhash.workspace = true
+gimli.workspace = true
+hex.workspace = true
+reld-diff.path = "../reld-diff"
+reld-layout-schema.path = "../reld-layout-schema"
+libloading.workspace = true
+libtest-mimic = { workspace = true }
+object.workspace = true
+os_info.workspace = true
+rand.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde-keyvalue = { workspace = true }
+strum.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+which.workspace = true
+
+[target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
+wait-timeout.workspace = true
+
+[features]
+default = ["fork", "plugins", "zstd"]
+
+fork = ["reld-core/fork"]
+
+zstd = ["reld-core/zstd"]
+
+plugins = ["reld-core/plugins"]
+
+perfetto = ["reld-core/perfetto"]
+
+macho = ["reld-core/macho"]
+
+# external tests
+external_tests = ["mold_tests"]
+mold_tests = []

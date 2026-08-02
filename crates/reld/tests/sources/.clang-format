@@ -1,0 +1,3 @@
+BasedOnStyle: Google
+CommentPragmas: '^#'
+ColumnLimit: 100

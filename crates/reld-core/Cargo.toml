@@ -1,0 +1,95 @@
+[package]
+name = "reld-core"
+description = "A library that provides a fast Linux linker"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reld-layout-schema = { path = "../reld-layout-schema", version = "0.0.0" }
+reld-trace = { path = "../reld-trace", version = "0.0.0" }
+reld-reloc = { path = "../reld-reloc", version = "0.0.0" }
+anyhow.workspace = true
+atomic-take.workspace = true
+bitflags.workspace = true
+blake3.workspace = true
+bumpalo-herd.workspace = true
+bytesize.workspace = true
+colored.workspace = true
+colosseum.workspace = true
+crossbeam-queue.workspace = true
+crossbeam-utils.workspace = true
+derive_more.workspace = true
+flate2.workspace = true
+foldhash.workspace = true
+gimli.workspace = true
+glob.workspace = true
+hashbrown.workspace = true
+hex.workspace = true
+indexmap.workspace = true
+itertools.workspace = true
+jobserver.workspace = true
+leb128.workspace = true
+libc.workspace = true
+libloading = { workspace = true, optional = true }
+memchr.workspace = true
+memmap2.workspace = true
+object.workspace = true
+perfetto-recorder.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+sharded-offset-map.workspace = true
+sharded-vec-writer.workspace = true
+smallvec.workspace = true
+symbolic-common.workspace = true
+symbolic-demangle.workspace = true
+thread_local.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+winnow.workspace = true
+zerocopy.workspace = true
+zlib-rs.workspace = true
+zstd = { workspace = true, optional = true }
+
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+perf-event.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[dev-dependencies]
+ar.workspace = true
+object = { workspace = true, features = ["write_std"] }
+tempfile.workspace = true
+
+[features]
+default = ["zstd"]
+
+# Support for running the linker as a subprocess.
+fork = []
+
+# Support for linker-plugins.
+plugins = ["libloading"]
+
+# Enable support for emitting a perfetto trace.
+perfetto = ["perfetto-recorder/enable", "tracing/release_max_level_info"]
+
+# Enable work-in-progress features
+wip = []
+
+# Experimental support for linking Mach-O. Currently incomplete.
+macho = []
+
+# Support for zstd compression and decompression of sections.
+zstd = ["dep:zstd"]
+
+[lints]
+workspace = true

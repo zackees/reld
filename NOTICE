@@ -1,0 +1,8 @@
+reld includes software derived from the wild linker by David Lattimore and contributors.
+
+Upstream: https://github.com/wild-linker/wild
+Vendored commit: 5793935f1d8b05b9a978ce2089e16e718072e9a9
+
+The derived wild code is available under the MIT License or the Apache License, Version 2.0,
+at your option. See LICENSE-MIT and LICENSE-APACHE. The repository's pre-existing reld code
+remains covered by LICENSE where its source headers or package metadata do not say otherwise.

@@ -1,0 +1,80 @@
+use crate::error::Result;
+use crate::output_section_id::OutputSectionId;
+
+/// A map from output section IDs to something.
+#[derive(Debug, Clone)]
+pub(crate) struct OutputSectionMap<T> {
+    // TODO: Consider only storing frequently used segment IDs in an array and storing less
+    // frequently used IDs in an on-demand sorted Vec or smallvec.
+    values: Vec<T>,
+}
+
+impl<T: Default> OutputSectionMap<T> {
+    pub(crate) fn with_size(len: usize) -> Self {
+        let mut values = Vec::new();
+        values.resize_with(len, T::default);
+        Self { values }
+    }
+
+    pub(crate) fn values_iter(&self) -> impl Iterator<Item = &T> {
+        self.values.iter()
+    }
+}
+
+impl<T> OutputSectionMap<T> {
+    pub(crate) fn add_new(&mut self, value: T) -> OutputSectionId {
+        let id = OutputSectionId::from_usize(self.values.len());
+        self.values.push(value);
+        id
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (OutputSectionId, &T)> {
+        self.values
+            .iter()
+            .enumerate()
+            .map(|(raw, info)| (OutputSectionId::from_usize(raw), info))
+    }
+
+    pub(crate) fn from_values(values: Vec<T>) -> Self {
+        Self { values }
+    }
+
+    pub(crate) fn get_mut(&mut self, id: OutputSectionId) -> &mut T {
+        &mut self.values[id.as_usize()]
+    }
+
+    pub(crate) fn get(&self, id: OutputSectionId) -> &T {
+        &self.values[id.as_usize()]
+    }
+
+    pub(crate) fn for_each(&self, mut cb: impl FnMut(OutputSectionId, &T)) {
+        self.values
+            .iter()
+            .enumerate()
+            .for_each(|(k, v)| cb(OutputSectionId::from_usize(k), v));
+    }
+
+    pub(crate) fn for_each_mut(&mut self, mut cb: impl FnMut(OutputSectionId, &mut T)) {
+        self.values
+            .iter_mut()
+            .enumerate()
+            .for_each(|(k, v)| cb(OutputSectionId::from_usize(k), v));
+    }
+
+    pub(crate) fn try_for_each(&self, mut cb: impl FnMut(OutputSectionId, &T) -> Result) -> Result {
+        self.values
+            .iter()
+            .enumerate()
+            .try_for_each(|(k, v)| cb(OutputSectionId::from_usize(k), v))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub(crate) fn into_map<U>(self, cb: impl FnMut(T) -> U) -> OutputSectionMap<U> {
+        OutputSectionMap {
+            values: self.values.into_iter().map(cb).collect(),
+        }
+    }
+}
