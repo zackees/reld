@@ -1,6 +1,6 @@
 name: Sanitizers
 
-# ASAN / LSAN / UBSAN and Miri.
+# ASAN / LSAN and Miri.
 #
 # These jobs cover the reld-owned workload generator. The inherited linker has its full
 # Linux-only acceptance suite in ci.yml's development container.
@@ -50,8 +50,8 @@ jobs:
             -p reld-testkit \
             --target x86_64-unknown-linux-gnu
 
-  ubsan:
-    name: UndefinedBehaviorSanitizer
+  lsan:
+    name: LeakSanitizer
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -60,10 +60,10 @@ jobs:
         with:
           components: rust-src
       - run: sudo apt-get update && sudo apt-get install -y clang lld
-      - name: cargo test under UBSAN
+      - name: cargo test under LSAN
         env:
-          RUSTFLAGS: "-Zsanitizer=undefined -Cdebuginfo=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+          RUSTFLAGS: "-Zsanitizer=leak -Cdebuginfo=1"
+          LSAN_OPTIONS: "verbosity=1:log_threads=1:exitcode=23"
         run: |
           cargo +nightly test \
             -Zbuild-std \
