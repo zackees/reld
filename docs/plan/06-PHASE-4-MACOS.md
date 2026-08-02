@@ -36,6 +36,30 @@ once P4-T1 lands, matching the COFF decision in P3-T5.
 
 `Acceptance:` `cargo build` (no feature flags) produces a binary that accepts `-flavor darwin`.
 
+## P4-T2b — Kernel- and dyld-enforced invariants ⚠️ added by review (R39)
+
+Verified against xnu `bsd/kern/mach_loader.c` and dyld source. Each is a hard failure, not a
+degradation, and none appeared in the original plan:
+
+- **`MH_PIE` is mandatory on arm64.** `pie_required()` returns TRUE for `CPU_TYPE_ARM64`;
+  otherwise `LOAD_FAILURE`.
+- **`__PAGEZERO` must be exactly `vmsize = 0x100000000`, `initprot = 0`** — the "hard page zero"
+  check, else `LOAD_BADMACHO`. `__TEXT` therefore starts at `0x100000000`.
+- **`MH_DYLDLINK` is mandatory.** An arm64 `MH_EXECUTE` without it is `LOAD_FAILURE` on a release
+  kernel — **static arm64 executables do not run.** Hello world must be dynamic.
+- **`LC_MAIN`, not `LC_UNIXTHREAD`.** The pre-`LC_MAIN` path is compiled out except on x86_64
+  macOS; an arm64 `LC_UNIXTHREAD` binary maps, fixes up, then `halt("main executable is missing
+  LC_MAIN")`. `entryoff = VA(entry) - 0x100000000`.
+- **`LC_DYLD_CHAINED_FIXUPS` must point at a valid header even with zero fixups** — `datasize=0`
+  is not acceptable, unlike the export trie which may legitimately be empty.
+- **`LC_ID_DYLIB` in an executable is a hard error**; missing `LC_LOAD_DYLIB` is a hard error.
+- **Dylib ordinals have three incompatible encodings.** `BIND_SPECIAL_DYLIB_*` are
+  `SELF=0, MAIN_EXECUTABLE=-1, FLAT_LOOKUP=-2, WEAK_LOOKUP=-3`, but chained fixups use an 8-bit
+  field sign-extended only *above 0xF0* (encode `0xFF`/`0xFE`/`0xFD`), and nlist `n_desc` uses
+  `EXECUTABLE_ORDINAL=0xFF`, `DYNAMIC_LOOKUP_ORDINAL=0xFE` — unrelated to the signed values.
+
+`Acceptance:` `cargo test --test acceptance -- macho/loader-invariants`
+
 ## P4-T3 — Load commands and segment layout
 
 `__PAGEZERO`, `__TEXT`, `__DATA_CONST`, `__DATA`, `__LINKEDIT`. `LC_SEGMENT_64`,
@@ -60,10 +84,46 @@ Branch islands for images exceeding ±128 MB: wild's `thunks.rs` is already form
 
 ## P4-T5 — Chained fixups
 
-`LC_DYLD_CHAINED_FIXUPS` is the modern format and the only one worth implementing. Classic
-rebase/bind opcode streams are legacy; emit chained fixups and reject the classic path.
+`LC_DYLD_CHAINED_FIXUPS` is the modern format. Use **`DYLD_CHAINED_PTR_64_OFFSET` (6)**
+exclusively — all `ARM64E` pointer formats carry auth bitfields and a 4-byte stride, and arm64e
+is not available to third-party macOS apps.
+
+⚠️ **"Reject the classic path" is unresolved and must be settled by measurement** (R42). Chained
+fixups are the *default* only above a deployment-target threshold, and sources disagree on
+whether ld64's threshold is macOS 11 or 12. rustc's default `aarch64-apple-darwin` deployment
+target may fall below it, in which case rejecting the legacy path breaks `cargo build`.
+
+**Resolve empirically on the pinned reference toolchain** — `otool -l` on a real `cargo build`
+output — before committing. This contradicts P4-T7's platform-version handling if left
+unresolved.
 
 `Acceptance:` `dyld_info -fixups` on the output; the binary runs on macOS 13+.
+
+## P4-T5b — `__unwind_info` construction ⚠️ added by review (R38) — was missing entirely
+
+Compact unwind is **not** `.eh_frame`, and this is not a passthrough. The linker consumes
+`__compact_unwind` input sections and **builds** `__unwind_info`, a two-level compressed table.
+Without it, C++ exceptions do not unwind — yet the original plan mentioned `__unwind_info` only
+in the incremental document.
+
+Hard structural constraints: **511 regular / 1021 compressed entries per second-level page**, a
+**3-personality cap**, a required trailing sentinel entry, and a rule that LSDA-bearing entries
+cannot be folded with their neighbours. The linker must also copy `__eh_frame` into
+`__TEXT,__eh_frame` so entries can carry the MODE_DWARF hint.
+
+This is a substantial subsystem, comparable to P4-T5, not a detail of it.
+
+`Acceptance:` a C++ fixture throwing across a translation-unit boundary returns 42, and
+`unwinddump` reports a well-formed table.
+
+## P4-T5c — Static initializers
+
+Dispatch is by **section type, not a header flag** — `MH_HAS_INIT_OFFSETS` does not exist
+(R40). Use `S_MOD_INIT_FUNC_POINTERS` (0x09); `S_INIT_FUNC_OFFSETS` (0x16) is the newer
+chained-fixups-era form. `__mod_init_func` is the more compatible choice for a from-scratch
+linker. Rust hello-world emits no initializer section at all, so this is C++-driven.
+
+`Acceptance:` a C++ fixture with a global constructor observes it having run.
 
 ## P4-T6 — `.tbd` stub dylibs
 
@@ -95,6 +155,21 @@ reserved during layout before its contents can be computed.
 `Acceptance:` `codesign -v` accepts the binary and it executes on a clean Apple Silicon machine
 with Gatekeeper at defaults.
 
+## P4-T8b — Accept the flags rustc actually passes
+
+Measured from rustc's `aarch64-apple-darwin` link line, and absent from the original plan:
+
+- **`-dead_strip` is passed on every default `cargo build`** (`GccLinker::gc_sections`:
+  `if is_like_darwin { self.link_arg("-dead_strip") }`). clang does *not* add it. **Ignoring it
+  is correct** — keeping everything is always a valid superset — but it must be accepted, and
+  implementing it *badly* is the real hazard.
+- `-arch arm64`, `-platform_version macos <min> <sdk>`, `-syslibroot <sdk>`, `-pie`,
+  `-rpath @loader_path/...`, `-force_load`, `-exported_symbols_list`.
+- Note rustc links through `cc` by default (`LinkerFlavor::Darwin(Cc::Yes, Lld::No)`), passing
+  `-arch arm64 -mmacosx-version-min=<target>` and `SDKROOT` in the *environment*.
+
+`Acceptance:` `cargo test --test acceptance -- macho/rustc-flags`
+
 ## P4-T9 — Deferred, recorded as scoped gaps
 
 Do not implement in Phase 4; each must error clearly:
@@ -106,9 +181,16 @@ Objective-C metadata sections, Swift metadata, universal/fat output binaries, `-
 On the `macos-14` runner:
 
 1. C hello-world runs, exit code 42.
-2. Rust hello-world via `-Clink-arg=-fuse-ld=` runs on a clean machine, Gatekeeper default.
-3. C++ exception across translation units.
-4. Differential oracle green against `ld64.lld` over the Mach-O fixture set.
-5. `reld-difftest --seeds 500` green.
+2. Rust hello-world via the **`-B<fakedir>`** mechanism (not `-fuse-ld=`) executes — i.e. **AMFI
+   accepts it**. Note Gatekeeper and AMFI are different mechanisms: `spctl` would reject an
+   ad-hoc-signed binary that nonetheless runs fine, and ad-hoc signing does not satisfy
+   Gatekeeper. The gate tests execution, which is what a locally-built dev binary faces.
+3. C++ exception across translation units (exercises P4-T5b `__unwind_info`).
+4. C++ global constructor observed to have run (P4-T5c).
+5. `.tbd` stub resolution against the SDK `libSystem` (P4-T6).
+6. `codesign -v` accepts the output (P4-T8).
+7. Differential oracle green against `ld64.lld`, **with `--coverage` meeting its floor and at
+   least one Mach-O `RELD_MALFUNCTION` site proving the oracle looks** (D17).
+8. `reld-difftest --seeds 500` green.
 
 `Acceptance:` `ci/gate-macos.sh` exits 0.

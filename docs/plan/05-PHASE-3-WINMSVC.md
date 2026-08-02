@@ -1,15 +1,79 @@
-# Phase 3 — PE/COFF backend, MinGW (windows-gnu) ABI
+# Phase 3 — PE/COFF core + MSVC ABI (`x86_64-pc-windows-msvc`)
 
-The largest phase. Target: `x86_64-pc-windows-gnu`.
+> **RESTRUCTURED after adversarial review.** This was originally "Phase 3 — MinGW." D3 is
+> revised to put **msvc first**; MinGW moved to `07-PHASE-5-WINGNU.md`. Debug info is deferred
+> per D5 — **accepted cost: no debugger on Windows until D5 is resolved.**
 
-Why gnu before msvc: DWARF debug info requires only section concatenation plus two relocation
-kinds, whereas MSVC requires PDB — a ~20k-line subsystem in radlink, larger than its entire
-linking core. This ordering buys a debuggable Windows binary for a fraction of the cost.
+The largest phase. It delivers the **COFF core shared by both Windows ABIs**, plus the MSVC
+argument dialect and CRT conventions.
+
+Why msvc first: radlink is a 19.7k-LOC in-tree reference targeting exactly this, carrying
+COMDAT, weak externals, base relocations, `.rsrc`, TLS, imports/exports and `.drectve`
+case-for-case. Every MinGW-specific requirement the review surfaced — auto-import,
+default-linker-script emulation, `.CRT$X*`-plus-`.ctors` — falls in the region where radlink
+gives **zero** help. Doing msvc first drives the net-new-without-reference surface to near zero.
 
 Reference: `.extern-repos/raddebugger/src/linker/` (radlink, MIT). Its **algorithms** may be
-studied and reimplemented freely. Note two limits: radlink is **MSVC-only** and its relocation
-patcher is **x64-only** (`lnk.c:4510` is `lnk_not_implemented` for other machines). For anything
-MinGW- or DWARF-specific, radlink gives zero help.
+studied and reimplemented freely. One limit: its relocation patcher is **x64-only**
+(`lnk.c:4510` is `lnk_not_implemented` for other machines).
+
+## Task split between the two Windows phases
+
+**Stays here (COFF core + MSVC):** T1 relocation vocabulary · T2 file-kind sniffing · T4
+`ObjectFile` · T5 `Platform` impl · T6 COMDAT · T7 weak externals · T8 grouped-section `$`
+ordering · T9 PE headers · T10 relocation application · T11 base relocations · T12
+`.pdata`/`.xdata` · T13 imports/IAT · T14 exports/DLL · T16 TLS · T18 `--gc-sections` ·
+`coff_writer.rs` · COFF `linker-diff` · `.rsrc` · `.drectve` · `link.exe` dialect · MSVC CRT and
+`.CRT$X*` ordering.
+
+**Moves to `07-PHASE-5-WINGNU.md`:** GNU arg dialect and the `Args::new()` pre-scan · auto-import
+and runtime pseudo-relocs · default `i386pep` script emulation · `.ctors`/`.dtors` · MinGW entry
+points · DWARF-in-COFF (T15) · long-form `.idata$N` import libraries.
+
+## Tasks added by review — none were in the original plan
+
+- **`coff_writer.rs`** (R7). The output-writing module appears in no task, yet by precedent it is
+  1,334–6,154 LOC. T9/T11/T13/T14 describe its contents without registering the module.
+- **COFF `linker-diff` instantiation** (R8, R30). ~1,500–2,500 new LOC, and a phase-exit gate per
+  D17. Note `object` reports `implicit_addend: true` for COFF, with `addend` holding only the
+  fixed PC bias; `asm_diff` treats `rel.addend()` as the complete symbolic offset at six sites,
+  so a naive port makes **every recovered referent wrong**.
+- **`IMAGE_SCN_LNK_NRELOC_OVFL`** (R4) — belongs in T4. Measured: plain `gcc -c` on a
+  70,000-pointer array emits it. Reading `NumberOfRelocations` literally applies 65,535 of
+  70,001 relocations and yields a binary that links, runs, and is **wrong**. radlink has zero
+  handling, and the oracle will not catch it if it only samples relocations the reader found.
+- **Section alignment from `IMAGE_SCN_ALIGN_*` characteristics** — ELF carries alignment in a
+  dedicated field; COFF encodes it in section flags. Exactly the gap an ELF port produces.
+- **`object` crate features** — the root `Cargo.toml` enables `elf` and `macho` but **not `coff`
+  or `pe`**, which D4's premise requires.
+- **`input_data.rs`** (R7) — 15 format-specific references covering archive-member handling and
+  per-kind routing, where import libraries land. Named in no task.
+- **`Architecture` handling** (R22) — `platform.rs:1567` defaults `architecture()` to
+  `Unsupported` and `layout.rs:5884` silently coerces it to `X86_64`. A COFF platform that
+  forgets to override is silently treated as ELF x86-64 for layout rather than erroring.
+- **Archive member ordering / repeated groups** — link lines list library groups twice to resolve
+  cycles; a single-pass resolver fails on them.
+- **`PlatformKind::host()` → `Coff` on Windows** moves here from P0 (R13).
+
+## Ordering fix (R15)
+
+Group A/B acceptance criteria required binaries that *link and run*, but the writer, relocation
+application, imports and entry point are all Group C — so T6–T12 were blocked under global rule
+1. **Restate T6–T8's acceptance against the `.layout` sidecar and symbol-resolution assertions;
+move every "links and runs" criterion to the phase gate.**
+
+## Correction (R9)
+
+T1 was called "the single most invasive change in this phase." It is not — wild **already**
+reuses the ELF relocation vocabulary unchanged across Mach-O and Wasm, and `RelocationKindInfo`
+carries no ELF-only fields. Realistically **4–8 files, 150–300 LOC, 1–3 days**. Two caveats
+survive: `RelocationKind::PairSubtractionULEB128` carries a raw ELF `r_type` payload, and adding
+COFF variants breaks exhaustive matches at `layout.rs:3013`, `elf_writer.rs:3061` and `:3481`.
+
+Also measured: `IMAGE_REL_AMD64_SECTION` was **never observed** in GCC output across `crt2.o`,
+`g++ -g` output and all 189 members of `libstdc++.a` — D7's "`SectionIndex` is mandatory" is
+overstated. Implement it (it is trivial), but it is not load-bearing. Census: `ADDR32NB` 9,715 ·
+`REL32` 18,903 · `ADDR64` 3,061 · `SECREL` 532.
 
 ---
 

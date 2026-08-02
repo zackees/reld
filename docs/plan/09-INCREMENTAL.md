@@ -209,6 +209,21 @@ Triggers 17–21 are detected by one mechanism: a hash over the sorted set of
 `(symbol name, defining input id, value flags)` bindings, plus the archive-member selection set
 and the undefined set. If it changes, the cascade Ueyama describes has occurred → full link.
 
+⚠️ **The fingerprint as originally specified has blind spots** (R26, R27). It must additionally
+cover:
+
+- **Merged-string content.** It is structurally blind to `SHF_MERGE|SHF_STRINGS` offset shifts:
+  an edit changing only string content changes no symbol binding, so the gate says "safe to
+  patch" while every merged offset downstream has moved. This is the same subsystem that IX-T0
+  identifies as ~66% of link time — it is simultaneously the largest performance term and a
+  correctness hole in the safety gate.
+- **Section content hashes and alignment** — contents can change with no symbol change.
+- **COMDAT leader identity** where the winner keeps the same name *and* file.
+- **Symbol size**, not just address and binding.
+- **Anonymous data** referenced only via section-relative relocations, which has no stable name
+  to key on. (wild's published design hits the same problem and proposes matching such sections
+  "by looking at what references them.")
+
 This converts his unanswerable case into a cheap detection problem. **We do not fix it up. We
 notice and bail.**
 
@@ -228,13 +243,43 @@ that `reld log` names the correct trigger number.
 
 ---
 
-## I2 — Daemon + warm full link (the first shippable win, zero patching)
+## IX-T0 — Measure before designing ⚠️ gates everything below
 
-A resident process holds parsed inputs and the symbol table hot. On relink: revalidate inputs,
-re-parse only changed ones, then redo layout and write **completely from scratch**.
+**The original I2 was refuted by review.** It specified a daemon holding *parsed inputs* hot,
+then relinking from scratch. Published phase data for lld on a clang RelWithDebInfo link:
 
-No patching at all. This captures the input-parsing cost with no correctness risk beyond
-staleness, and per §0.4 it is the phase that actually buys the order of magnitude. Ship it alone.
+| Phase | Share |
+|---|---|
+| Input parsing | **5.04%** |
+| Merge / finalize input sections (string merging) | **66.54%** |
+
+**That design skips the 5% and repeats the 66%.** Corroborated independently by wild's own
+benchmark page: *"link time here is dominated by how quickly we can deduplicate strings"* — on
+exactly the debug-heavy builds reld targets.
+
+So, before any daemon design is committed (D16):
+
+1. Run `mold --perf`, `lld --time-trace` and wild's timing instrumentation over the P2-T3 corpus
+   and the `reld-testkit` workloads.
+2. Publish the per-phase split to the `benchmark-stats` branch — **a split that undermines the
+   plan is still published**, same policy as the benchmarks.
+3. Derive the phase's scope from that measurement; record it as D16a.
+
+If parsing is ~5% on our workloads, **the parse-caching daemon is not built at all.**
+
+The likely real target is **caching the merged string table and its dedup index**. That is both
+the dominant cost and a far harder invalidation problem — see the soundness hole below. Note the
+precedent: mold's `design.md` describes string interning in its preload stage, i.e. mold **built
+this mechanism, shipped it as `--preload`, and deleted it in 1.3.0** with no published number
+justifying either decision. Find out why before repeating it.
+
+`Acceptance:` a published per-phase breakdown for reld, mold, lld and wild over the corpus.
+
+## IX — Daemon + warm link (scope set by IX-T0)
+
+A resident process holds hot state across links; on relink it revalidates inputs and reuses
+whatever IX-T0 identified as the dominant reusable cost. **Still zero patching** — layout and
+write are redone. That keeps correctness risk to staleness alone, which I0-T2 handles.
 
 Design constraints from the prior art:
 

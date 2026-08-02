@@ -202,9 +202,56 @@ has not reached it in two years because the base linker consumed the time.
 Revised: the first incremental phase lands **immediately after P2 (Linux proven)**, on ELF
 alone, before Windows and macOS.
 
-⚠️ **But its content is not what the plan originally specified.** See review finding R25 — the
-phase must be re-derived from measurement before it is scheduled. Caching parsed inputs targets
-~5% of link time; string merging is ~66%. This is an open item, not a settled design.
+⚠️ **But its content is not what the plan originally specified.** See D16.
+
+## D16 — IX content. **Locked: measure before designing. No daemon is built on assumption.**
+
+The original I2 ("daemon caches parsed inputs, then relinks from scratch") targets ~5.04% of
+link time. String merging is ~66.54%. See `REVIEW-02.md` R25 for the sources and for the
+provenance caveats.
+
+**IX-T0 gates the entire incremental workstream.** Before any daemon design is committed:
+
+1. Run `mold --perf`, `lld --time-trace`, and wild's own timing instrumentation over reld's
+   corpus (P2-T3) and over the seeded workloads from `reld-testkit`.
+2. Publish the per-phase split to the `benchmark-stats` branch alongside the existing artifacts,
+   under the same honesty policy — **a phase split that undermines the plan is still published.**
+3. Derive IX's scope from that measurement and record it here as D16a.
+
+Constraints on whatever D16a turns out to be:
+
+- If parsing is ~5% on our workloads, **the parse-caching daemon is not built at all.**
+- The likely target is **caching the merged string table and its dedup index**, which is both
+  the dominant cost and a much harder invalidation problem: one changed object can perturb
+  global merge offsets, and the merged table is exactly what the I1 fingerprint cannot verify
+  (R26). Any such design needs its correctness story *before* it is called a win.
+- Note the precedent: mold's `design.md` describes string interning in its preload stage —
+  mold **built this mechanism, shipped it as `--preload`, and deleted it in 1.3.0**, with no
+  published number justifying either decision. Find out why before repeating it.
+
+Cost of IX-T0: days. Cost of skipping it: building the wrong daemon.
+
+## D17 — Oracle validation. **Locked: coverage floor + one malfunction site per format.**
+
+`reld-diff`'s non-ELF failure mode is *silently green* — `header_diff.rs` matches
+`object::File::Elf64` and falls through `_ => {}`, so empty compares to empty and the test
+passes (R30). Even on ELF, measured coverage of relocations actually diffed is **~50–70%** for C
+and worse for C++/Rust (R31).
+
+Two gates, both phase-exit conditions:
+
+1. **Coverage floor.** `linker-diff` already has a `--coverage` flag precisely because upstream
+   knows about this. Measure it, publish it per format, and fail CI below an agreed floor.
+   Ratchet the floor upward; never downward without a recorded decision.
+2. **At least one `RELD_MALFUNCTION` injection site per format**, exercised by a fixture that
+   *requires* the differ to report it. Without this, "the differ found nothing" and "the differ
+   never looked" are indistinguishable — which is the entire justification for having mutation
+   testing, applied with maximum force to exactly the formats upstream never covered.
+
+Note two traps: the machinery is `cfg!(debug_assertions)`-gated, so a release-profile CI job
+silently compiles it out — **the CI matrix must state its profile**; and upstream has **no
+injection site in relocation application** (four of five are relaxation-suppression), so there
+is no exemplar to copy for the site that matters most.
 
 ## D11 — Identical Code Folding and `--gc-sections`.
 

@@ -10,15 +10,16 @@ as a miscompiled binary three months later, not as a failing test today.
 | Doc | Contents |
 |---|---|
 | `00-OVERVIEW.md` | This file. Phase map, global rules, definition of done. |
-| `01-DECISIONS.md` | Locked decisions (D1–D13) with rationale. Do not relitigate. |
-| `02-PHASE-0-FORK.md` | Fork wild, licensing, rename, argv[0] dispatch. |
+| `01-DECISIONS.md` | Locked decisions (D1–D17) with rationale. Do not relitigate. |
+| `02-PHASE-0-FORK.md` | Fork wild, licensing, rename, delete Wasm, argv[0] dispatch. |
 | `03-PHASE-1-HARNESS.md` | Acceptance-test infrastructure. Built **before** new format code. |
 | `04-PHASE-2-LINUX.md` | Prove inherited ELF works under reld's name and CI. |
-| `05-PHASE-3-WINGNU.md` | PE/COFF backend, MinGW ABI. The largest phase. |
+| `05-PHASE-3-WINMSVC.md` | **PE/COFF core + MSVC ABI.** The largest phase. |
 | `06-PHASE-4-MACOS.md` | Mach-O arm64. |
-| `07-PHASE-5-WINMSVC.md` | MSVC ABI + the PDB decision. |
+| `07-PHASE-5-WINGNU.md` | **MinGW ABI** — additive on the Phase 3 COFF core. |
 | `08-ACCEPTANCE.md` | Per-platform acceptance criteria and the CI matrix. |
-| `09-INCREMENTAL.md` | Phases I0–I5. Do not start before Phase 4 is green. |
+| `09-INCREMENTAL.md` | IX-T0 (measure first) and phases I0–I7. |
+| `REVIEW-01.md`, `REVIEW-02.md` | Adversarial review findings R1–R44. **Read before starting any phase.** |
 
 ## Phase map
 
@@ -61,10 +62,12 @@ Retrofitting any of them is far more expensive than maintaining them.
 1. **Never widen scope inside a task.** One task, one commit, one acceptance command.
 2. **Every task below has an `Acceptance:` line that is a literal shell command.** A task is
    done when that command exits 0 on CI, not when the code looks finished.
-3. **No `todo!()` / `unimplemented!()` in merged code.** If a path is unsupported, it must
-   `bail!()` with a message naming the feature and the input file. wild's Mach-O backend is a
-   40-`todo!()` skeleton and is the anti-pattern here: it compiles, reports success, and panics
-   at runtime on real input.
+3. **No *new* `todo!()` / `unimplemented!()`.** If a path is unsupported, it must `bail!()` with
+   a message naming the feature and the input file. wild's Mach-O backend is a 40-`todo!()`
+   skeleton and is the anti-pattern: it compiles, reports success, and panics at runtime.
+   *Inherited* sites (54 in the vendored tree — 40 Mach-O, 5 `platform.rs`, 9 Wasm) are
+   inventoried in `UPSTREAM.md` with a phase assigned to each; the Wasm ones vanish with D14.
+   A repo-wide grep gate enforces the allowlist.
 4. **Determinism is mandatory from day one.** Every parallel step is followed by a deterministic
    ordering step, keyed on `(archive index, object index, symbol index)`. Retrofitting
    determinism is far harder than maintaining it. (This is radlink's `lnk_obj_is_before`
@@ -78,13 +81,14 @@ Retrofitting any of them is far more expensive than maintaining them.
 
 | Phase | Done when |
 |---|---|
-| P0 | `cargo test --workspace` green; `reld --version` works; wild's own suite passes under the new crate names. |
-| P1 | Harness runs on all four platform targets in CI; differential oracle validated against `ld.bfd`; mutation-injection tests prove the oracle catches deliberate bugs. |
-| P2 | reld self-hosts on Linux; real-world corpus pass-rate published; benchmark `reld` column populated. |
-| P3 | `cargo build --target x86_64-pc-windows-gnu` linked by reld produces a running binary; gdb breakpoint hits. |
-| P4 | Rust hello-world runs on clean Apple Silicon with Gatekeeper at defaults. |
-| P5 | MSVC-ABI binary runs; debug story resolved per D5. |
-| I* | See `09-INCREMENTAL.md` — each incremental phase is gated on a correctness oracle, not a speed number. |
+| P0 | `cargo test --workspace` green **in the Linux dev container** (P0-T0); Wasm deleted; `ld.reld`/`reld-link`/`ld64.reld` all print a version; existing workflows reconciled. |
+| P1 | Harness runs in CI; differential oracle validated against `ld.bfd` **with `--coverage` published**; mutation-injection proves the oracle catches deliberate bugs. The three non-ELF jobs exist and are green with an expected-minimum trial count that ratchets up in P3/P4/P5. |
+| P2 | reld self-hosts on Linux; corpus pass-rate published; benchmark `reld` column populated. |
+| IX | Per-phase timing split published (IX-T0); daemon scope derived from it and recorded as D16a. |
+| P3 | `cargo build --target x86_64-pc-windows-msvc` linked by reld produces a running binary; COFF oracle coverage at floor with a COFF malfunction site. |
+| P4 | Rust hello-world **executes** on Apple Silicon (AMFI, not Gatekeeper); C++ unwinds through `__unwind_info`. |
+| P5 | `cargo build --target x86_64-pc-windows-gnu` produces a running binary; gdb breakpoint hits. |
+| I1+ | See `09-INCREMENTAL.md` — every incremental phase is gated on a correctness oracle, not a speed number. |
 
 ## What we inherit vs. what we build
 
@@ -96,10 +100,15 @@ Measured from the wild tree at `.extern-repos/wild`:
 | `Platform` / `Arch` traits (`libwild/src/platform.rs`, 1573 LOC) | **Real and load-bearing**, but a 163-member interface extracted from ELF. Expect friction. |
 | GNU ld argument parser (`libwild/src/args/elf.rs`, 108 declarations) | **Production.** Handles `--push-state`, single-dash long options. |
 | argv[0] multi-call dispatch (`args.rs:251`) | **Exists.** `ld`→ELF, `ld64`→Mach-O. `"link"` currently `bail!`s at `args.rs:242`. |
-| Mach-O backend | **Skeleton.** 40 `todo!()`, arm64-only, feature-gated off, links trivial programs only. |
+| Mach-O backend | **Skeleton.** 40 `todo!()`, arm64-only, feature-gated off, links trivial programs only. Missing `__unwind_info` construction entirely. |
+| **Wasm backend** | **~6,650 LOC + 2 CI jobs — inherited, and deleted in P0 (D14).** The original plan was unaware it existed. |
 | PE/COFF backend | **Nothing.** |
-| Incremental linking | **Nothing.** Not even a design sketch; `DESIGN.md` does not mention it. The phase-ordered immutable-borrow architecture is actively hostile to it. |
-| Test harness (`wild/tests/integration_tests.rs` 7k LOC + `linker-diff` 10k LOC) | **Excellent, and ELF-only by construction.** |
+| Incremental linking | **Nothing implemented.** wild has a *published design* (Nov 2024) that is still unimplemented as of 0.9.0 — read it before I0. wild's phase-ordered immutable-borrow architecture is hostile to it. |
+| Test harness (`integration_tests.rs` 7k LOC + `linker-diff` 10k LOC) | **Excellent, ELF-only by construction, and its non-ELF failure mode is *silently green*** (R30). |
 
 Honest read: the fork buys Linux, the arg parser, and — most valuable — a differential test
 methodology. It does not buy Mach-O, and Windows is a greenfield backend.
+
+**Note on "wild's `DESIGN.md`" vs "reld's `DESIGN.md`."** These are different documents and the
+plan cites both. Every bare reference in the phase docs means **reld's**, in the repo root,
+unless it explicitly says otherwise.

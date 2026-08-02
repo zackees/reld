@@ -47,17 +47,22 @@ broken" look identical.
 
 Reference linker versions are **pinned** and recorded in published results, per `DESIGN.md` §6.
 
-### Toolchain-integration test (all four)
+### Toolchain-integration test — **per platform, not one mechanism** (R34)
 
-The mechanism that proves reld is usable, not just correct. Use mold's proven approach — a
-directory containing a binary named `ld` (or `ld.lld` / `link.exe`) symlinked to reld, with the
-compiler invoked as `$CC -B<dir>`. This works across gcc, clang, and rustc without depending on
-`-fuse-ld=` accepting arbitrary names.
+The original text claimed one mechanism worked "across all four." It works on one.
 
-```
-cargo build --target <triple> --config \
-  'target.<triple>.rustflags=["-Clink-arg=-B/path/to/fakedir"]'
-```
+| Target | Mechanism |
+|---|---|
+| linux-gnu, windows-gnu | `$CC -B<dir>` with a **wrapper script** named `ld` (`#!/bin/bash\nexec <reld> "$@"`). Not a symlink — wild's own comment: *"lld requires that it's invoked as `ld.lld` to work properly."* |
+| macos | `$CC -B<dir>` with a wrapper named `ld` |
+| windows-msvc | **`-B` does not exist for `cl.exe`.** `link.exe` is selected via the `LINK` environment variable or `/LINKER:`; rustc uses `-Clinker=`. |
+
+`-fuse-ld=<path>` is **not** usable: measured, GCC accepts only `bfd|gold|lld|mold` and errors on
+a path (absolute paths are a clang-only extension). MinGW's driver is GCC. Any phase doc using
+`-fuse-ld=` is wrong.
+
+Note rustc's windows-gnu line invokes `x86_64-w64-mingw32-gcc`, not `gcc`, so the shim directory
+must be reachable from that driver.
 
 ---
 
@@ -126,6 +131,27 @@ A link-success table is more persuasive at this stage than any speed chart, and 
 publishing long before the speed column has content.
 
 ---
+
+## 4b. Gaps the review found in this document (R37) — all required
+
+- **Self-determinism.** D12 rules out *cross-linker* byte reproducibility. It does **not** rule
+  out: same reld, same inputs, N runs, `--threads 1` vs `--threads 16` → identical bytes.
+  Upstream carries a dozen "tie-break for determinism" comments (`elf.rs:863`, `:4700`,
+  `gdb_index.rs:498`, `layout.rs:1239`…), each a latent race with no regression guard. For a
+  *parallel incremental* linker this is the highest-probability class of shipped bug and **no
+  layer L1–L5 fires on it.** Do not let D12's wording block this test — it is a different
+  property.
+- **Performance and RSS regression gate.** For a linker whose pitch is the dev loop, a 3×
+  link-time regression currently passes every gate in this document. `reld-bench` and the
+  benchmark-stats pipeline already exist; wire a threshold.
+- **"No output on failure."** A linker that writes a truncated binary and *then* exits nonzero
+  passes every gate here, and `make` will treat the target as up to date. Assert `!out.exists()`
+  on every `ExpectError` path. One line.
+- **Scale.** Nothing specifies workload *size*. The bugs that ship are threshold bugs: >64K
+  sections (COFF `NumberOfSections` is `u16`), >2 GB output, >64K relocations in one COFF
+  section (`IMAGE_SCN_LNK_NRELOC_OVFL`). None appear in a 100-seed synthetic run.
+- **Re-link over an existing output.** Especially relevant given the product is incremental and
+  mold's measured 300 ms win comes from overwriting rather than recreating.
 
 ## 5. What we deliberately do NOT do in v0
 

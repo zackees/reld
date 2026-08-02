@@ -8,6 +8,21 @@ v0.9.0, commit `5793935`).
 
 ---
 
+## P0-T0 — Linux dev container ⚠️ added by review (R12) — do this first
+
+**Development happens on Windows 10, and every P0–P2 acceptance command is Linux-only.** wild's
+test suite shells out to `gcc`, `clang`, `ld.lld`, `ar`, `objcopy`, `bash`, `getconf`, `qemu-*`;
+there is exactly **one** `#[cfg(unix)]` gate in 7,092 lines, so on Windows the tests compile and
+fail at runtime rather than skipping. wild's own CI never runs the suite on Windows — its
+windows job is `cargo build` only — and does not run it on bare `ubuntu-latest` either, but
+inside SHA-pinned prebuilt containers.
+
+Vendor wild's `docker/` directory and `test-config-ci.toml`. State explicitly in the README that
+P0–P2 acceptance is run in that container, not on the host.
+
+`Acceptance:` `docker build -f docker/ci/ubuntu.Dockerfile .` succeeds and the container runs
+`cargo test --workspace`.
+
 ## P0-T1 — Vendor wild into the workspace
 
 Copy wild's crates into `crates/`, preserving structure:
@@ -23,8 +38,20 @@ Copy wild's crates into `crates/`, preserving structure:
 
 Keep `crates/reld-testkit/` as-is — it is ours and already useful.
 
-Do **not** attempt to preserve wild's git history via subtree or submodule. A flat vendored copy
-with a recorded upstream SHA is easier to diff and easier to rebase by hand.
+**Root support files must be vendored too** (R12) — the original table omitted them and P0's
+acceptance depends on them: `fakes/` (the wrapper-script dir the `-B` mechanism uses), the root
+`ld` shim, `test-config-ci.toml`, `deny.toml` (which `cargo deny check licenses` needs),
+`rustfmt.toml`, `taplo.toml`, `cackle.toml`, `docker/`, and the two git submodules
+(`external_test_suites/mold`, `wild/tests/bins`) pinned explicitly. Note git symlinks do not
+materialize on a default Windows checkout — use wrapper scripts.
+
+**Edition and MSRV must be reconciled in this same commit** (R12): vendored wild is
+`edition = "2024"` with `rust-version = "1.94"`; this workspace is `edition = "2021"` with an
+unpinned `stable` toolchain. Bump the workspace edition, set `rust-version`, and pin
+`rust-toolchain.toml` to a specific ≥1.94 stable.
+
+Do **not** attempt to preserve wild's git history via subtree. A flat vendored copy with a
+recorded upstream SHA is easier to diff and easier to rebase by hand.
 
 `Acceptance:` `cargo build --workspace --all-targets`
 
@@ -72,14 +99,60 @@ Edit points, exact:
 1. `crates/reld-core/src/args.rs:223` — add `PlatformKind::Coff` to the enum.
 2. `crates/reld-core/src/args.rs:238` `from_flavor` — replace the `"link" => bail!(...)` at
    line 242 with `"link" => PlatformKind::Coff`.
-3. `crates/reld-core/src/args.rs:251` `from_executable_name` — add `"reld-link" => Coff`. Note
-   MinGW invokes a GNU-syntax `ld`, so the COFF-with-GNU-dialect combination is selected by
-   emulation (`-m i386pep`), not by binary name (see D2).
-4. `crates/reld-core/src/args.rs:230` `PlatformKind::host()` — `windows => Coff`.
-5. `crates/reld-core/src/lib.rs:267` — add the `Args::Coff(..)` arm, `bail!` for now.
+3. `crates/reld-core/src/args.rs:251` `from_executable_name` — add `"reld-link" => Coff`.
+4. `crates/reld-core/src/lib.rs:267` — add the `Args::Coff(..)` arm, `bail!` for now.
+
+⚠️ **Do NOT change `PlatformKind::host()` here** (R13). The original plan set `windows => Coff`
+in P0. Since every COFF arm `bail!`s until Phase 3, that would make a bare `reld` on the dev
+machine — and every Windows CI job — hit the bail for three phases. Defer the `host()` change to
+P3.
+
+⚠️ **`-m i386pep` cannot select the COFF platform** (R2). The original D2/P3-T3 text assumed it
+could. wild picks the `Args` variant in `Args::new()` (`args.rs:113-149`) from argv[0], a
+literal `-flavor` at argv[1], or the host — **before any parsing**. `-m` is a sub-option inside
+the ELF parser whose closures take `&mut ElfArgs` and cannot change which variant exists.
+Resolving this needs either a pre-scan of argv before `Args::new()`, or a `CoffArgs` that hosts
+the whole GNU dialect — unbudgeted work that lands in the windows-gnu phase, not here.
 
 `Acceptance:` `reld -flavor link --version` prints a version, and `reld -flavor link -o x a.o`
 exits non-zero with a message containing "not implemented until Phase 3".
+
+## P0-T5b — Delete the Wasm backend (D14)
+
+The fork inherits a **fourth** platform: `wasm.rs` (5766) + `wasm_writer.rs` (482) +
+`args/wasm.rs` (305) + `wasm_wasm32.rs` (105) ≈ 6,650 LOC, plus two CI jobs requiring wasmtime,
+wabt, wasi-libc and wasm-tools. Remove `PlatformKind::Wasm` and every arm, drop the CI jobs and
+the wasm fixtures, and record the removal in `UPSTREAM.md` as an intentional divergence.
+
+Do this **before** P0-T5's edits so the "add an arm" counts are correct at three platforms.
+
+`Acceptance:` `grep -ri wasm crates/ .github/` returns nothing.
+
+## P0-T7 — Multi-call driver binaries
+
+`ld.reld`, `reld-link` and `ld64.reld` are required by four acceptance commands across the plan
+and were created by no task (R17). P0-T1 produces one binary named `reld`, and wild's mechanism
+is symlinks, which do not survive a Windows checkout.
+
+Emit them as `[[bin]]` shims or as an install step that copies/hardlinks `reld`.
+
+`Acceptance:` `ld.reld --version && reld-link --version && ld64.reld --version`
+
+## P0-T8 — Reconcile the four existing workflows
+
+P0 breaks all of them (R18). `ci.yml:39-49` runs `cargo run --bin reld -- --targets` and asserts
+the binary **exits non-zero by design** — a contract P0 deliberately invalidates. `ci.yml:31-34`
+runs `cargo fmt --check` and `clippy -D warnings` over ~30k LOC of vendored upstream code.
+`stress.yml` and `sanitizers.yml` trigger on `paths: crates/**`, so every vendored-code PR fires
+them.
+
+Drop the smoke assertions, adopt wild's `rustfmt.toml`, narrow the path filters to
+`crates/reld-testkit/**`, and reconcile runner pinning (`ubuntu-24.04` vs `ubuntu-latest`).
+
+**State the CI profile explicitly** — `RELD_MALFUNCTION` is `debug_assertions`-gated and
+silently vanishes in a release job (D17).
+
+`Acceptance:` `.github/workflows/ci.yml` green on the P0 commit.
 
 ## P0-T6 — Preserve the placeholder's honesty
 
