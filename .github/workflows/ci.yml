@@ -17,6 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_COMMAND: cargo
   RUST_VERSION: 1.94.1
+  NIGHTLY_TOOLCHAIN: nightly-2026-08-01
   LLD_VERSION: 18.1.8
   MOLD_VERSION: 2.41.0
   WILD_VERSION: 0.9.0
@@ -94,6 +95,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install Linux fixture Rust toolchain
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install "${NIGHTLY_TOOLCHAIN}" \
+            --profile minimal \
+            --target x86_64-unknown-linux-musl \
+            --component rustc-codegen-cranelift-preview
+          rustup toolchain list | grep -q "^${NIGHTLY_TOOLCHAIN}-x86_64-unknown-linux-gnu"
+          printf 'fn main() {}\n' > "${RUNNER_TEMP}/nightly-smoke.rs"
+          rustup run "${NIGHTLY_TOOLCHAIN}" rustc \
+            -Zcodegen-backend=cranelift \
+            --target x86_64-unknown-linux-musl \
+            "${RUNNER_TEMP}/nightly-smoke.rs" \
+            -o "${RUNNER_TEMP}/nightly-smoke"
+          "${RUNNER_TEMP}/nightly-smoke"
 
       - name: Install host test tooling
         uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # taplo-cli
@@ -216,12 +235,26 @@ jobs:
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --test external-runner 2>&1 | tee -a platform-tests.log
 
+      - name: Linux relocation malfunction oracle
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+          RELD_TEST_NIGHTLY_TOOLCHAIN: ${{ env.NIGHTLY_TOOLCHAIN }}
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND test -p reld --test acceptance -- \
+            malfunction-elf-relocation-target-plus-one \
+            --test-threads=1 2>&1 | tee malfunction-tests.log
+
       - name: Linux acceptance tests
         if: matrix.kind == 'linux-gnu'
         shell: bash
         env:
           RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
           RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+          RELD_TEST_NIGHTLY_TOOLCHAIN: ${{ env.NIGHTLY_TOOLCHAIN }}
         run: |
           set -euxo pipefail
           $CARGO_COMMAND test -p reld --test acceptance 2>&1 | tee acceptance-tests.log

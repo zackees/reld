@@ -87,7 +87,7 @@ fn kill_process_tree(child: &mut std::process::Child) -> io::Result<()> {
 
 #[cfg(unix)]
 fn kill_process_group(id: u32) -> io::Result<()> {
-    let process_group = -(id.cast_signed());
+    let process_group = -id.cast_signed();
     // SAFETY: `kill` does not dereference pointers. The negative PID deliberately addresses the
     // private process group established above, not an unrelated process.
     if unsafe { libc::kill(process_group, libc::SIGKILL) } == 0 {

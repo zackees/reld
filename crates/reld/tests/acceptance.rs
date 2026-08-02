@@ -1103,6 +1103,8 @@ enum RustcChannel {
     Nightly,
 }
 
+const NIGHTLY_TOOLCHAIN_VAR: &str = "RELD_TEST_NIGHTLY_TOOLCHAIN";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString, Default)]
 #[strum(serialize_all = "snake_case")]
 enum Mode {
@@ -3332,11 +3334,14 @@ fn add_cross_args(
 }
 
 impl RustcChannel {
-    fn as_arg(&self) -> Option<&'static str> {
+    fn as_arg(&self) -> Option<String> {
         match self {
-            RustcChannel::Stable => Some("+stable"),
-            RustcChannel::Beta => Some("+beta"),
-            RustcChannel::Nightly => Some("+nightly"),
+            RustcChannel::Stable => Some("+stable".to_owned()),
+            RustcChannel::Beta => Some("+beta".to_owned()),
+            RustcChannel::Nightly => Some(format!(
+                "+{}",
+                std::env::var(NIGHTLY_TOOLCHAIN_VAR).unwrap_or_else(|_| "nightly".to_owned())
+            )),
             RustcChannel::Default => None,
         }
     }
