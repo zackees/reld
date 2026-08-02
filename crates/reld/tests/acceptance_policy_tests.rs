@@ -34,12 +34,12 @@ fn ignore_is_ratcheted_across_all_reports_for_a_fixture() {
             "shared-object-only".to_owned(),
         ])
         .unwrap();
-    let error = validation.verify(&["stale".to_owned()]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("ignore `stale` is no longer needed")
-    );
+    let error = validation
+        .verify(&["stale-one".to_owned(), "stale-two".to_owned()])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("ignore `stale-one` is no longer needed"));
+    assert!(error.contains("ignore `stale-two` is no longer needed"));
 }
 
 #[test]

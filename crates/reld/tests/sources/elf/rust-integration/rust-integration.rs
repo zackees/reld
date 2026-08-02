@@ -1,8 +1,7 @@
 //#AbstractConfig:default
-// Non-plugin configurations include more archive members than their reference linkers (#162).
-// Keep this scoped away from linker-plugin-lto, where matching LLVMgold output does not need it.
-// TODO: RISC-V BFD linker keeps multiple .dynsym symbols
-//#DiffIgnore:dynsym.*
+// Non-plugin configurations include more archive members than their reference linkers (#162),
+// and RISC-V BFD keeps multiple .dynsym symbols. Scope those ignores on each configuration so
+// linker-plugin-lto, where matching LLVMgold output does not need them, does not inherit them.
 
 //#Config:linker-plugin-lto:default
 //#CompArgs:-Clinker-plugin-lto -Clinker=clang -Clink-arg=-flto
@@ -13,12 +12,14 @@
 //#RequiresRustMusl: true
 //#Arch: x86_64
 //#DiffIgnore:debug_info.missing_unit
+//#DiffIgnore:dynsym.*
 
 //#Config:llvm-static-aarch64:default
 //#CompArgs:--target aarch64-unknown-linux-musl -C relocation-model=static -C target-feature=+crt-static -C debuginfo=2
 //#RequiresRustMusl: true
 //#Arch: aarch64
 //#DiffIgnore:debug_info.missing_unit
+//#DiffIgnore:dynsym.*
 
 //#Config:cranelift-static:default
 //#CompArgs:-Zcodegen-backend=cranelift --target x86_64-unknown-linux-musl -C relocation-model=static -C target-feature=+crt-static -C debuginfo=2 --cfg cranelift
@@ -26,6 +27,7 @@
 //#RequiresRustMusl: true
 //#Arch: x86_64
 //#DiffIgnore:debug_info.missing_unit
+//#DiffIgnore:dynsym.*
 // GNU ld clears these flags and sets entsize to 0. It's not clear why.
 //#DiffIgnore:section.debug_str.flags
 //#DiffIgnore:section.debug_str.entsize
@@ -36,6 +38,7 @@
 //#RequiresNightlyRustc: true
 //#Arch: aarch64
 //#DiffIgnore:debug_info.missing_unit
+//#DiffIgnore:dynsym.*
 //#DiffIgnore:section.debug_str.flags
 //#DiffIgnore:section.debug_str.entsize
 
@@ -43,6 +46,7 @@
 //#SkipArch: ppc64le
 //#CompArgs:-C debuginfo=2
 //#DiffIgnore:debug_info.missing_unit
+//#DiffIgnore:dynsym.*
 //#DiffIgnore:.dynamic.DT_JMPREL
 //#DiffIgnore:.dynamic.DT_PLTGOT
 //#DiffIgnore:.dynamic.DT_PLTREL

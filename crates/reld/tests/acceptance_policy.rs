@@ -22,12 +22,14 @@ impl FixtureOracleValidation {
         if self.report_count == 0 {
             return Ok(());
         }
-        for pattern in configured_ignores {
-            ensure!(
-                self.used_ignores.contains(pattern),
-                "ignore `{pattern}` is no longer needed; remove it from the fixture"
-            );
-        }
+        let stale = configured_ignores
+            .iter()
+            .filter(|pattern| !self.used_ignores.contains(*pattern))
+            .map(|pattern| {
+                format!("ignore `{pattern}` is no longer needed; remove it from the fixture")
+            })
+            .collect::<Vec<_>>();
+        ensure!(stale.is_empty(), "{}", stale.join("\n"));
         Ok(())
     }
 }
