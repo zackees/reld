@@ -27,3 +27,4 @@ R_AARCH64_TLSLE_MOVW_TPREL_G0_NC MovkX0
 R_AARCH64_NONE ReplaceWithNop
 R_AARCH64_NONE ReplaceWithNop
 ld   foo
+

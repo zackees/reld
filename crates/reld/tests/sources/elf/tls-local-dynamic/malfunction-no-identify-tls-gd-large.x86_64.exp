@@ -13,3 +13,4 @@ reld TRACE: relocation applied flags=DYNAMIC | FUNCTION | GOT | PLT | HAS_NON_IR
 reld TRACE: rel_kind=PltRelGotBase,
 R_X86_64_TPOFF32 TlsGdToLocalExecLarge
 ld   foo
+

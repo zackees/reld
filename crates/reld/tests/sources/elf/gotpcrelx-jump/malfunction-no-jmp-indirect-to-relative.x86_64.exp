@@ -10,3 +10,4 @@ reld TRACE: relocation applied flags=NON_INTERPOSABLE | DIRECT | GOT,
 reld TRACE: rel_kind=GotRelative,
 R_X86_64_PC32 JmpIndirectToRelative
 ld   target
+

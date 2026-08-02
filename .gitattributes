@@ -1,0 +1,2 @@
+# Malfunction snapshots are byte-exact test data and may contain significant trailing whitespace.
+*.exp -text -whitespace
