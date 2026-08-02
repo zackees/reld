@@ -85,5 +85,5 @@ jobs:
           # compiler) is excluded. Miri's job here is the pure data structures —
           # symbol tables, arenas, section graphs — which is exactly where it is
           # strongest and where ASAN is weakest.
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-disable-isolation"
         run: cargo +nightly miri test -p reld-testkit --lib
