@@ -5,7 +5,6 @@
 
 //#Config:gcc:default
 //#SkipArch: ppc64le
-//#DiffIgnore:section.data.alignment #13
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
 //#DiffIgnore:section.rodata #13
 
@@ -42,14 +41,12 @@
 //#Config:clang:default
 //#SkipArch: ppc64le
 //#Compiler: clang
-//#DiffIgnore:section.data.alignment #13
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
 //#DiffIgnore:section.rodata #13
 
 //#Config:gcc-indirect-external:default
 //#CompArgs:-fPIE -mno-direct-extern-access
 //#RequiresCompilerFlags:-mno-direct-extern-access
-//#DiffIgnore:section.data.alignment #13
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
 //#DiffIgnore:section.rodata #13
 

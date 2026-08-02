@@ -24,6 +24,8 @@
 //#SkipArch: ppc64le
 //#Shared:shlib-undefined-2.c
 //#LinkArgs:--no-allow-shlib-undefined
+// TODO(#13): Reld records NOW in DT_FLAGS_1 while LLD leaves it unset for the executable.
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
 
 // Disallow linking against shared object with undefined symbols. In this variant, the shared object
 // (2) that we depend on has all of its dependencies (3) also loaded.

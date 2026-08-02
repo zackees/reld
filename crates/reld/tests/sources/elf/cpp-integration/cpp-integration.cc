@@ -62,7 +62,6 @@
 //#LinkerDriver:clang++
 //#LinkArgs:-Wl,-z,now
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:section.rodata.alignment #13
 // TODO(#13): Reld omits the empty .rodata section emitted by both reference linkers.
 //#DiffIgnore:section.rodata #13
 //#Arch: x86_64
