@@ -135,9 +135,11 @@ jobs:
           ld.lld --version | grep -q "${LLD_VERSION}"
           mold --version | grep -q "${MOLD_VERSION}"
           ld.wild --version | grep -q "${WILD_VERSION}"
-          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/smoke.c"
-          for linker in bfd lld mold wild; do
-            clang "${RUNNER_TEMP}/smoke.c" "-fuse-ld=${linker}" -o "${RUNNER_TEMP}/smoke-${linker}"
+          printf '.global _start\n.text\n_start:\n  mov $60, %%rax\n  xor %%rdi, %%rdi\n  syscall\n' > "${RUNNER_TEMP}/smoke.S"
+          clang -c "${RUNNER_TEMP}/smoke.S" -o "${RUNNER_TEMP}/smoke.o"
+          for linker in ld.bfd ld.lld mold ld.wild; do
+            "${linker}" -e _start "${RUNNER_TEMP}/smoke.o" -o "${RUNNER_TEMP}/smoke-${linker}"
+            test -s "${RUNNER_TEMP}/smoke-${linker}"
             "${RUNNER_TEMP}/smoke-${linker}"
           done
 
@@ -180,7 +182,9 @@ jobs:
       - name: Install macOS LLVM reference linker
         if: matrix.kind == 'macos-arm64'
         shell: bash
-        run: brew install llvm@18
+        run: |
+          brew install llvm@18
+          echo "$(brew --prefix llvm@18)/bin" >> "${GITHUB_PATH}"
 
       - name: Verify and smoke macOS reference linkers
         if: matrix.kind == 'macos-arm64'
