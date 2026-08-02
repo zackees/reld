@@ -9,6 +9,5 @@
 //#CompArgs:-flto
 //#LinkArgs:-flto -Wl,--as-needed,-znow
 //#DiffIgnore:section.rodata
-//#DiffIgnore:eh_frame
 
 int main() { return 42; }
