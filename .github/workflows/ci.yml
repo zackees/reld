@@ -272,15 +272,19 @@ jobs:
           RELD_TEST_NIGHTLY_TOOLCHAIN: ${{ env.NIGHTLY_TOOLCHAIN }}
         run: |
           set -euxo pipefail
-          for test_name in \
-            elf/x86_64/wrap-lto/clang \
-            elf/x86_64/lto-integration/clang \
-            elf/x86_64/rust-integration-dynamic/lto \
-            elf/x86_64/rust-integration/linker-plugin-lto
-          do
-            $CARGO_COMMAND test -p reld --test acceptance -- \
-              "${test_name}" --exact --test-threads=1
-          done 2>&1 | tee lto-tests.log
+          {
+            result=0
+            for test_name in \
+              elf/x86_64/wrap-lto/clang \
+              elf/x86_64/lto-integration/clang \
+              elf/x86_64/rust-integration-dynamic/lto \
+              elf/x86_64/rust-integration/linker-plugin-lto
+            do
+              $CARGO_COMMAND test -p reld --test acceptance -- \
+                "${test_name}" --exact --test-threads=1 || result=1
+            done
+            exit "${result}"
+          } 2>&1 | tee lto-tests.log
 
       - name: Linux acceptance tests
         if: matrix.kind == 'linux-gnu'
