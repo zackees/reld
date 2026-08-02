@@ -1,6 +1,6 @@
 //#AbstractConfig:default
 //#CompArgs:-ffunction-sections
-//#DiffIgnore:section.relro_padding
+//#DiffIgnore:section.relro_padding #13
 //#ReferenceLinkers:bfd,lld
 
 //#Config:regular:default
@@ -23,7 +23,7 @@
 //#Object:archive_activation1.c
 //#Object:runtime.c
 //#Object:empty.a
-//#DiffIgnore:segment.GNU_STACK.alignment
+//#DiffIgnore:segment.GNU_STACK.alignment #13
 
 //#Config:bsd:default
 //#ReferenceLinkers:lld
@@ -47,7 +47,7 @@
 //#Archive:archive_activation1.c
 //#Archive:runtime.c
 //#Archive:empty.a
-//#DiffIgnore:section.got
+//#DiffIgnore:section.got #13
 
 //#Config:lto-clang:lto
 //#SkipArch: ppc64le

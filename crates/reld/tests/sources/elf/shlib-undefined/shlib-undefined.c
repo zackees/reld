@@ -5,12 +5,11 @@
 //#Object:runtime.c
 //#Mode:dynamic
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 // Ignore a few things that lld does differently.
-//#DiffIgnore:section.got.plt.entsize
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
+//#DiffIgnore:section.got.plt.entsize #13
 
 // Allow linking against shared object with undefined symbols. We don't run this because the runtime
 // linker would error due to the undefined symbol.
@@ -39,9 +38,6 @@
 //#Shared:shlib-undefined-2.c
 //#LinkArgs:-z now -shared
 //#RunEnabled:false
-// TODO: GNU ld sets the entry to _start even though we're writing a shared
-// object. We probably should too.
-//#DiffIgnore:file-header.entry
 
 #include "../common/runtime.h"
 

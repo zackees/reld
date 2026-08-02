@@ -1,7 +1,7 @@
 //#AbstractConfig:default
 //#Object:runtime.c
-//#DiffIgnore:section.data
-//#DiffIgnore:section.rodata.alignment
+//#DiffIgnore:section.data #13
+//#DiffIgnore:section.rodata.alignment #13
 
 //#Config:64k:default
 //#LinkArgs:-z max-page-size=65536 -z now

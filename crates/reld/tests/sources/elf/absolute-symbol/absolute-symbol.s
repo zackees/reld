@@ -5,11 +5,11 @@
 //#ExpectDynSym:abs_sym address=0xCAFECAFE
 
 // TODO: checkout those differences later
-//#DiffIgnore:segment.RISCV_ATTRIBUTES.alignment
-//#DiffIgnore:segment.RISCV_ATTRIBUTES.flags
-//#DiffIgnore:riscv_attributes..riscv.attributes
-//#DiffIgnore:riscv_attributes.arch
-//#DiffIgnore:riscv_attributes.stack_align
+//#DiffIgnore:segment.RISCV_ATTRIBUTES.alignment #13
+//#DiffIgnore:segment.RISCV_ATTRIBUTES.flags #13
+//#DiffIgnore:riscv_attributes..riscv.attributes #13
+//#DiffIgnore:riscv_attributes.arch #13
+//#DiffIgnore:riscv_attributes.stack_align #13
 */
 
 .global abs_sym

@@ -1,15 +1,13 @@
 //#AbstractConfig:default
 //#LinkArgs:-Wl,-z,now
-//#DiffIgnore:section.rodata
-//#DiffIgnore:dynsym._ZTIi.section
+//#DiffIgnore:section.rodata #13
 // TODO: Fix this. Note, it only shows up on openSUSE aarch64
-//#DiffIgnore:rel.missing-copy-relocation.R_AARCH64_ABS64
-// Reld doesn't output this symbol.
-//#DiffIgnore:version._ZSt21ios_base_library_initv
+//#DiffIgnore:rel.missing-copy-relocation.R_AARCH64_ABS64 #13
 
 //#Config:gcc:default
 //#SkipArch: ppc64le
 //#LinkerDriver:g++
+//#DiffIgnore:dynsym._ZTIi.section #13
 
 //#Config:clang:default
 //#SkipArch: ppc64le

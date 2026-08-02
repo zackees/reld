@@ -10,7 +10,7 @@
 //#LinkerDriver:gcc
 //#CompArgs:-flto
 //#LinkArgs:-flto -nostdlib -znow
-//#DiffIgnore:section.got
+//#DiffIgnore:section.got #13
 
 #include "../common/runtime.h"
 

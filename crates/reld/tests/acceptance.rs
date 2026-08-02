@@ -99,7 +99,8 @@
 //! Mode:{mode} Set linking mode to static (default), dynamic or unspecified. Cannot be used
 //! together with LinkerDriver.
 //!
-//! DiffIgnore:{diff-key} Add an extra linker-diff ignore directive.
+//! DiffIgnore:{diff-key} #{issue} [arch={arch1}[,{arch2}...]] Add a tracked linker-diff ignore.
+//! Architecture scope is optional; architecture-specific diff keys are also scoped automatically.
 //!
 //! DiffEnabled:{bool} Defaults to true. Set to false to disable diffing of output files with
 //! linker-diff.
@@ -1027,7 +1028,7 @@ struct Config {
     reld_extra_linker_args: ArgumentSet,
     compiler_args: ArgumentSet,
     compiler_so_args: ArgumentSet,
-    diff_ignore: Vec<String>,
+    diff_ignore: Vec<acceptance_policy::TrackedIgnore>,
     reference_linkers: Option<Vec<String>>,
     skip_linkers: HashSet<String>,
     enabled_linkers: HashSet<String>,
@@ -1081,7 +1082,7 @@ struct TestConfig {
     /// Extra ignore directives. This can be handy if you're running on a system with say an older
     /// version of GNU ld that doesn't perform certain optimisations.
     #[serde(default)]
-    diff_ignore: Vec<String>,
+    diff_ignore: Vec<acceptance_policy::TrackedIgnore>,
 
     /// Run the diffing component of each test. By default, diffs are skipped.
     /// Enable this to verify that reld produces output matching other linkers.
@@ -2131,7 +2132,9 @@ fn process_directive(
                 config.support_architectures.clear();
             }
         }
-        "DiffIgnore" => config.diff_ignore.push(arg.to_owned()),
+        "DiffIgnore" => config
+            .diff_ignore
+            .push(acceptance_policy::TrackedIgnore::parse_directive(arg)?),
         "DiffEnabled" => {
             config.should_diff = arg.parse().context("Invalid bool for DiffEnabled")?
         }
@@ -5987,10 +5990,16 @@ fn create_diff_config(config: &Config, files: Vec<PathBuf>) -> Result<reld_diff:
     diff_config.coverage_floor = None;
     diff_config
         .ignore
-        .extend(config.diff_ignore.iter().cloned());
+        .extend(acceptance_policy::ignore_patterns_for_arch(
+            &config.diff_ignore,
+            &config.arch.to_string(),
+        )?);
     diff_config
         .ignore
-        .extend(config.test_config.diff_ignore.iter().cloned());
+        .extend(acceptance_policy::ignore_patterns_for_arch(
+            &config.test_config.diff_ignore,
+            &config.arch.to_string(),
+        )?);
     diff_config
         .equiv
         .extend(config.section_equiv.iter().cloned());
@@ -6280,7 +6289,11 @@ fn run_with_config(
         let mut validation = acceptance_policy::FixtureOracleValidation::default();
         diff_shared_objects(config, &programs, &mut validation)?;
         diff_executables(config, &programs, &mut validation)?;
-        validation.verify(&config.diff_ignore)?;
+        let configured_ignores = acceptance_policy::ignore_patterns_for_arch(
+            &config.diff_ignore,
+            &config.arch.to_string(),
+        )?;
+        validation.verify(&configured_ignores)?;
     }
 
     if should_print_timing() {
@@ -6706,6 +6719,8 @@ fn read_test_config() -> Result<TestConfig> {
     if let Some(qemu_arch_from_env) = get_reld_test_cross()? {
         config.qemu_arch = qemu_arch_from_env;
     }
+
+    acceptance_policy::validate_test_config_ignores(config.run_all_diffs, &config.diff_ignore)?;
 
     Ok(config)
 }

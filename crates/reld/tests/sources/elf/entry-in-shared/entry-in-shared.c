@@ -4,7 +4,7 @@
 //#LinkArgs:-shared -z now
 //#RunEnabled:false
 //#Object:runtime.c
-//#DiffIgnore:.dynamic.DT_RELA*
+//#DiffIgnore:.dynamic.DT_RELA* #13
 //#Mode:dynamic
 
 #include "../common/runtime.h"

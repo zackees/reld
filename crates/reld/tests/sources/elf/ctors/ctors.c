@@ -1,6 +1,6 @@
 //#SkipArch: ppc64le
 //#LinkerDriver:gcc
-//#DiffIgnore:section.rodata
+//#DiffIgnore:section.rodata #13
 
 static int ctors_init_val = 0;
 

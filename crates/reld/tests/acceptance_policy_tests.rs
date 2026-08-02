@@ -3,7 +3,10 @@ mod acceptance_policy;
 use acceptance_policy::AggregateOracleCoverage;
 use acceptance_policy::FixtureOracleValidation;
 use acceptance_policy::OracleFormat;
+use acceptance_policy::TrackedIgnore;
+use acceptance_policy::ignore_patterns_for_arch;
 use acceptance_policy::should_enforce_aggregate_coverage;
+use acceptance_policy::validate_test_config_ignores;
 
 #[test]
 fn aggregate_gate_only_runs_for_a_full_execution() {
@@ -40,6 +43,77 @@ fn ignore_is_ratcheted_across_all_reports_for_a_fixture() {
         .to_string();
     assert!(error.contains("ignore `stale-one` is no longer needed"));
     assert!(error.contains("ignore `stale-two` is no longer needed"));
+}
+
+#[test]
+fn tracked_ignore_requires_a_positive_issue_on_the_same_line() {
+    let tracked = TrackedIgnore::parse_directive("section.data #13").unwrap();
+    assert_eq!(
+        ignore_patterns_for_arch(&[tracked], "x86_64").unwrap(),
+        ["section.data"]
+    );
+
+    for invalid in [
+        "section.data",
+        "section.data #nope",
+        "section.data #0",
+        "section.data #13 nope",
+        "section.data #13 arch=unknown",
+        "section.data #13 #14",
+        "section.data #nope #13",
+    ] {
+        assert!(
+            TrackedIgnore::parse_directive(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn tracked_ignores_are_scoped_by_architecture_markers() {
+    let ignores = [
+        TrackedIgnore::parse_directive("rel.R_AARCH64_ABS64 #13").unwrap(),
+        TrackedIgnore::parse_directive("segment.RISCV_ATTRIBUTES.* #13").unwrap(),
+        TrackedIgnore::parse_directive("riscv_attributes.arch #13").unwrap(),
+        TrackedIgnore::parse_directive("dynsym.__global_pointer$.section #13").unwrap(),
+        TrackedIgnore::parse_directive("section.data #13").unwrap(),
+    ];
+
+    assert_eq!(
+        ignore_patterns_for_arch(&ignores, "x86_64").unwrap(),
+        ["section.data"]
+    );
+    assert_eq!(
+        ignore_patterns_for_arch(&ignores, "riscv64").unwrap(),
+        [
+            "segment.RISCV_ATTRIBUTES.*",
+            "riscv_attributes.arch",
+            "dynsym.__global_pointer$.section",
+            "section.data",
+        ]
+    );
+}
+
+#[test]
+fn tracked_ignore_can_scope_a_generic_key_to_architectures() {
+    let tracked = TrackedIgnore::parse_directive("section.got #13 arch=aarch64,riscv64").unwrap();
+
+    assert!(
+        ignore_patterns_for_arch(std::slice::from_ref(&tracked), "x86_64")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        ignore_patterns_for_arch(&[tracked], "aarch64").unwrap(),
+        ["section.got"]
+    );
+}
+
+#[test]
+fn full_diff_config_rejects_unratcheted_suite_global_ignores() {
+    let tracked = TrackedIgnore::parse_directive("section.data #13").unwrap();
+    validate_test_config_ignores(false, std::slice::from_ref(&tracked)).unwrap();
+    assert!(validate_test_config_ignores(true, &[tracked]).is_err());
 }
 
 #[test]

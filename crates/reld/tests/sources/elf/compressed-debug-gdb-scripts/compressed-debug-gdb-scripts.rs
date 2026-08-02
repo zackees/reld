@@ -1,6 +1,6 @@
 //#AbstractConfig:default
 //#ExpectSection:.debug_gdb_scripts
-//#DiffIgnore:section.debug_*
+//#DiffIgnore:section.debug_* #13
 //#SkipArch: ppc64le
 
 //#Config:zlib:default

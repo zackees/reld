@@ -2,9 +2,8 @@
 //#LinkerDriver:gcc
 //#LinkArgs:-Wl,-z,now -Wl,--section-start=.foo=0x1000000 -no-pie
 //#ExpectSym:foo address=0x1000000
-//#DiffIgnore:section.rodata.alignment
-//#DiffIgnore:section.data
-//#DiffIgnore:section.sdata
+//#DiffIgnore:section.rodata.alignment #13
+//#DiffIgnore:section.data #13
 //#SkipArch:loongarch64,ppc64le
 
 /* BFD rejects the code on loongarch: relocation truncated to fit: R_LARCH_B26

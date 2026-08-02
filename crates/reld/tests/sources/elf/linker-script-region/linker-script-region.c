@@ -2,7 +2,7 @@
 //#RunEnabled:false
 //#LinkArgs:-shared
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
 
 //#Config:regions:default
 //#LinkerScript:linker-script-region.ld

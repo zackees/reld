@@ -5,7 +5,6 @@
 //#CompArgs:-fPIC -ftls-model=global-dynamic
 //#LinkArgs:-shared -z now
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_RELA
 
 // We use a large alignment here so that it's almost certain that padding will need to be added
 // before our TLS segment, which could cause us to compute incorrect offsets if we used the address

@@ -7,12 +7,12 @@
 //#RunDynSym:entry
 
 //#Config:ld:default
-//#DiffIgnore:.dynamic.DT_RELA*
+//#DiffIgnore:.dynamic.DT_RELA* #13
 
 //#Config:lld:default
 //#ReferenceLinkers:lld
-//#DiffIgnore:section.got.plt.entsize
-//#DiffIgnore:.dynamic.DT_RELA*
+//#DiffIgnore:section.got.plt.entsize #13
+//#DiffIgnore:.dynamic.DT_RELA* #13
 
 int compute_value32(void);
 int non_ifunc(void);

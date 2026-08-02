@@ -1,8 +1,6 @@
 //#Config:default
 //#SkipArch: ppc64le
-//#DiffIgnore:.dynamic.*
-// TODO: RISC-V BFD linker keeps multiple .dynsym symbols
-//#DiffIgnore:dynsym.*
+//#DiffIgnore:.dynamic.* #13
 //#CompArgs:-C debuginfo=2
 //#Shared:rdyn1.rs
 

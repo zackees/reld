@@ -14,11 +14,7 @@
 //#Mode:dynamic
 //#Shared:force-dynamic-linking.c
 //#LinkArgs:--export-dynamic-symbol s1w -z now
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic
-//#DiffIgnore:dynsym.s1w.section
-//#DiffIgnore:segment.PT_DYNAMIC.*
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 #include "../common/runtime.h"
 

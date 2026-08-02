@@ -24,7 +24,7 @@
 //#Object:runtime.c
 //#Shared:empty.c
 //#Mode:dynamic
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 // With GNU ld non-loaded DSO has no effect on output kind, but LLD's approach
 // simplifies code a lot.

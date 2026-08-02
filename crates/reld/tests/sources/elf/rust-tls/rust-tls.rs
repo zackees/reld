@@ -1,8 +1,8 @@
 //#AbstractConfig:default
 //#RequiresNightlyRustc:true
 // TODO: Investigate the following differences, which show up on risc-v
-//#DiffIgnore:.dynamic.DT_FLAGS.TEXTREL
-//#DiffIgnore:.dynamic.DT_TEXTREL
+//#DiffIgnore:.dynamic.DT_FLAGS.TEXTREL #13 arch=riscv64
+//#DiffIgnore:.dynamic.DT_TEXTREL #13 arch=riscv64
 
 //#Config:global-dynamic:default
 //#SkipArch: ppc64le

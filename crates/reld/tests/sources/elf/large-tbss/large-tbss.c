@@ -1,6 +1,6 @@
 //#LinkerDriver:gcc
 //#SkipArch:ppc64le
-//#DiffIgnore:section.rodata
+//#DiffIgnore:section.rodata #13
 
 static __thread volatile unsigned char tls_zeros[0x22000];
 

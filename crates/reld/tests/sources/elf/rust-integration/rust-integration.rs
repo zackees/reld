@@ -1,7 +1,5 @@
 //#AbstractConfig:default
-// Non-plugin configurations include more archive members than their reference linkers (#162),
-// and RISC-V BFD keeps multiple .dynsym symbols. Scope those ignores on each configuration so
-// linker-plugin-lto, where matching LLVMgold output does not need them, does not inherit them.
+// Some non-plugin configurations include more archive members than their reference linkers (#162).
 
 //#Config:linker-plugin-lto:default
 //#CompArgs:-Clinker-plugin-lto -Clinker=clang -Clink-arg=-flto
@@ -11,45 +9,42 @@
 //#CompArgs:--target x86_64-unknown-linux-musl -C relocation-model=static -C target-feature=+crt-static -C debuginfo=2
 //#RequiresRustMusl: true
 //#Arch: x86_64
-//#DiffIgnore:debug_info.missing_unit
-//#DiffIgnore:dynsym.*
+//#DiffIgnore:debug_info.missing_unit #13
 
 //#Config:llvm-static-aarch64:default
 //#CompArgs:--target aarch64-unknown-linux-musl -C relocation-model=static -C target-feature=+crt-static -C debuginfo=2
 //#RequiresRustMusl: true
 //#Arch: aarch64
-//#DiffIgnore:debug_info.missing_unit
-//#DiffIgnore:dynsym.*
+//#DiffIgnore:debug_info.missing_unit #13
 
 //#Config:cranelift-static:default
 //#CompArgs:-Zcodegen-backend=cranelift --target x86_64-unknown-linux-musl -C relocation-model=static -C target-feature=+crt-static -C debuginfo=2 --cfg cranelift
 //#RequiresNightlyRustc: true
 //#RequiresRustMusl: true
 //#Arch: x86_64
-//#DiffIgnore:debug_info.missing_unit
-//#DiffIgnore:dynsym.*
+//#DiffIgnore:debug_info.missing_unit #13
 // GNU ld clears these flags and sets entsize to 0. It's not clear why.
-//#DiffIgnore:section.debug_str.flags
-//#DiffIgnore:section.debug_str.entsize
+//#DiffIgnore:section.debug_str.flags #13
+//#DiffIgnore:section.debug_str.entsize #13
 
 //#Config:cranelift-static-aarch64:default
 //#CompArgs:-Zcodegen-backend=cranelift --target aarch64-unknown-linux-musl -C relocation-model=static -C target-feature=+crt-static -C debuginfo=2 --cfg cranelift
 //#RequiresRustMusl: true
 //#RequiresNightlyRustc: true
 //#Arch: aarch64
-//#DiffIgnore:debug_info.missing_unit
-//#DiffIgnore:dynsym.*
-//#DiffIgnore:section.debug_str.flags
-//#DiffIgnore:section.debug_str.entsize
+//#DiffIgnore:debug_info.missing_unit #13
+//#DiffIgnore:section.debug_str.flags #13
+//#DiffIgnore:section.debug_str.entsize #13
 
 //#Config:llvm-dynamic:default
 //#SkipArch: ppc64le
 //#CompArgs:-C debuginfo=2
-//#DiffIgnore:debug_info.missing_unit
-//#DiffIgnore:dynsym.*
-//#DiffIgnore:.dynamic.DT_JMPREL
-//#DiffIgnore:.dynamic.DT_PLTGOT
-//#DiffIgnore:.dynamic.DT_PLTREL
+//#DiffIgnore:debug_info.missing_unit #13 arch=aarch64,riscv64,loongarch64
+// RISC-V BFD keeps multiple .dynsym symbols.
+//#DiffIgnore:dynsym.* #13 arch=riscv64
+//#DiffIgnore:.dynamic.DT_JMPREL #13
+//#DiffIgnore:.dynamic.DT_PLTGOT #13 arch=aarch64,riscv64,loongarch64
+//#DiffIgnore:.dynamic.DT_PLTREL #13
 
 fn foo() {
     panic!("Make sure unwinding works");

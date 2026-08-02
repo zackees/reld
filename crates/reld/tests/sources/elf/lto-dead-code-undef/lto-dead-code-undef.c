@@ -10,7 +10,6 @@
 //#LinkerDriver:gcc
 //#Object:lto-dead-code-undef-1.c
 //#LinkArgs:-flto -O1 -nostdlib -Wl,-z,now
-//#DiffIgnore:section.got
 
 #include "../common/runtime.h"
 

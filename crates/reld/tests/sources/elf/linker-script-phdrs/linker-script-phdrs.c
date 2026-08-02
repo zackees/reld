@@ -2,9 +2,9 @@
 //#Mode:dynamic
 //#RunEnabled:false
 //#CompArgs:-fPIE -fPIC
-//#DiffIgnore:section.got
+//#DiffIgnore:section.got #13
 // Skip the .custom section, since it is forcefully excluded from any segments.
-//#DiffIgnore:section-diff-failed..custom
+//#DiffIgnore:section-diff-failed..custom #13
 
 //#Config:nophdrs:default
 //#LinkArgs:-shared -z now -T ./linker-script-phdrs.ld --defsym=is_riscv=0

@@ -23,13 +23,13 @@
 //#Arch:aarch64
 // We only test with lld, since GNU ld doesn't seem to be able to create thunks for ifuncs.
 //#ReferenceLinkers:lld
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.got.plt.entsize
-//#DiffIgnore:section.iplt
-//#DiffIgnore:section.gnu.version_r.alignment
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:section.got.plt.entsize #13
+//#DiffIgnore:section.iplt #13
+//#DiffIgnore:section.gnu.version_r.alignment #13
 // On Ubuntu 24.04, lld ends up setting the INFO flag for .rela.dyn.
-//#DiffIgnore:section.rela.dyn.flags
-//#DiffIgnore:section.data
+//#DiffIgnore:section.rela.dyn.flags #13
+//#DiffIgnore:section.data #13
 //#CompArgs:-fPIC
 //#LinkArgs:-shared -znow
 //#RunDynSym:entry

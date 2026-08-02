@@ -1,7 +1,7 @@
 //#AbstractConfig:default
 //#CompArgs:-g
 //#Object:runtime.c
-//#ExpectSym:_start line=55
+//#ExpectSym:_start line=54
 
 //#Config:zlib:default
 //#LinkArgs:--compress-debug-sections=zlib

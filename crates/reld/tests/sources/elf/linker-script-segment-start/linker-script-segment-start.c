@@ -7,11 +7,11 @@
 //#SkipArch:riscv64
 // ld merges all sections into a single segment when no PHDRS are specified,
 // while reld uses separate RO/RX/RW segments.
-//#DiffIgnore:segment.LOAD.RWX.alignment
-//#DiffIgnore:segment.LOAD.RX.alignment
+//#DiffIgnore:segment.LOAD.RWX.alignment #13
+//#DiffIgnore:segment.LOAD.RX.alignment #13
 // Reld uses alignment 1 for .text when the linker script doesn't specify it;
 // GNU ld uses the architecture's natural instruction alignment (4 on aarch64).
-//#DiffIgnore:section.text.alignment
+//#DiffIgnore:section.text.alignment #13
 
 // Config 1: no -T flags — SEGMENT_START returns the linker script defaults.
 // Defaults are 0x10/0x11/0x12/0x13 — distinct from actual section addresses

@@ -4,9 +4,9 @@
 //#LinkerDriver:gcc
 //#LinkArgs:-Wl,-znow -pie
 //#ReferenceLinkers:lld
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.got.plt.entsize
-//#DiffIgnore:section.gnu.version_r.alignment
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:section.got.plt.entsize #13
+//#DiffIgnore:section.gnu.version_r.alignment #13
 
 #include "../common/ptr_black_box.h"
 

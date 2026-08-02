@@ -2,7 +2,7 @@
 //#Object:linker-script-filename-match-startup.c
 //#Archive:linker-script-filename-match-app.c
 //#Object:runtime.c
-//#DiffIgnore:segment.LOAD.RW.alignment
+//#DiffIgnore:segment.LOAD.RW.alignment #13
 //#SkipArch:riscv64
 //#ExpectSym:startup_code section=".text.startup"
 //#ExpectSym:app_code section=".text.app"

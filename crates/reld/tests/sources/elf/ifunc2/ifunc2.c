@@ -1,7 +1,5 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.data.alignment
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.rodata.alignment
+//#DiffIgnore:section.rodata #13
 //#RequiresGlibc:true
 
 //#Config:pie:default

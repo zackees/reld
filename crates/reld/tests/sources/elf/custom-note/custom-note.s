@@ -3,9 +3,9 @@
 //#RunEnabled:false
 //#Contains:FOOBAR
 //#Contains:HELLO_WORLD
-//#DiffIgnore:segment.RISCV_ATTRIBUTES.*
+//#DiffIgnore:segment.RISCV_ATTRIBUTES.* #13
 // Reld emits `.riscv.attributes`, but GNU ld does not
-//#DiffIgnore:riscv_attributes.*
+//#DiffIgnore:riscv_attributes.* #13
 */
 
 .section .note.foo,"a",@note

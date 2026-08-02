@@ -2,13 +2,13 @@
 //#Object:ifunc1.c
 //#Object:ifunc_init.c
 //#Object:runtime.c
-//#DiffIgnore:section.rela.plt.link
+//#DiffIgnore:section.rela.plt.link #13
 //#RequiresGlibc:true
 //#Arch: x86_64
 
 //#Config:pie:default
 //#CompArgs:-fpie -ffunction-sections
-//#DiffIgnore:rel.extra-got-plt-got
+//#DiffIgnore:rel.extra-got-plt-got #13
 // This can be in any test that's x86_64 only.
 //#ExpectSym:_GLOBAL_OFFSET_TABLE_
 

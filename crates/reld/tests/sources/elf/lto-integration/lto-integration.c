@@ -8,6 +8,6 @@
 //#Compiler:clang
 //#CompArgs:-flto
 //#LinkArgs:-flto -Wl,--as-needed,-znow
-//#DiffIgnore:section.rodata
+//#DiffIgnore:section.rodata #13
 
 int main() { return 42; }

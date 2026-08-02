@@ -3,8 +3,6 @@
 //#RunEnabled:false
 //#ReferenceLinkers:lld
 //#LinkArgs:-shared -z now
-//#DiffIgnore:segment.LOAD.RX.alignment
-//#DiffIgnore:segment.LOAD.RWX.alignment
 
 //#Config:fillexpr:default
 //#LinkerScript:linker-script-fill.ld

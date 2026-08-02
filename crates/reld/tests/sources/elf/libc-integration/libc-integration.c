@@ -1,14 +1,14 @@
 // This test links against libc and checks that various things work as expected.
 
 //#AbstractConfig:default
-//#DiffIgnore:.got.plt
-//#DiffIgnore:.dynamic.DT_PLTGOT
-//#DiffIgnore:.dynamic.DT_JMPREL
-//#DiffIgnore:.dynamic.DT_PLTREL
+//#DiffIgnore:.got.plt #13
+//#DiffIgnore:.dynamic.DT_PLTGOT #13
+//#DiffIgnore:.dynamic.DT_JMPREL #13
+//#DiffIgnore:.dynamic.DT_PLTREL #13
 // This is only an issue on openSUSE
-//#DiffIgnore:section.rela.plt.link
-//#DiffIgnore:section.data.alignment
-//#DiffIgnore:section.rela.dyn
+//#DiffIgnore:section.rela.plt.link #13
+//#DiffIgnore:section.data.alignment #13
+//#DiffIgnore:section.rela.dyn #13
 //#CompArgs:-g -ftls-model=global-dynamic
 //#RequiresGlibc:true
 //#DiffMatchAny:true
@@ -19,7 +19,7 @@
 //#TestUpdateInPlace:true
 // Each binary links against shared objects created by that linker. So different
 // names are expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 //#Config:clang-static:default
 //#SkipArch: ppc64le
@@ -29,7 +29,7 @@
 //#Object:libc-integration-1.c
 //#ReferenceLinkers:bfd,lld
 //#Cross: false
-//#DiffIgnore:rel.extra-got-plt-got
+//#DiffIgnore:rel.extra-got-plt-got #13
 
 //#Config:clang-static-pie:default
 //#SkipArch: ppc64le
@@ -50,7 +50,7 @@
 //#ReferenceLinkers:bfd,lld
 // Seems lld linked binary crashes under QEMU.
 //#SkipArch: loongarch64,riscv64,ppc64le
-//#DiffIgnore:rel.extra-got-plt-got
+//#DiffIgnore:rel.extra-got-plt-got #13
 
 //#Config:gcc-static-pie:default
 //#CompArgs:-fPIE
@@ -70,7 +70,7 @@
 //#LinkArgs:-fPIC -dynamic -Wl,--strip-debug -Wl,--gc-sections -Wl,-rpath,$ORIGIN -Wl,-z,now
 //#ReferenceLinkers:bfd,lld
 //#Cross: false
-//#DiffIgnore:section.relro_padding
+//#DiffIgnore:section.relro_padding #13
 
 //#Config:clang-global-dynamic:shared
 //#SkipArch: ppc64le
@@ -80,7 +80,7 @@
 //#LinkArgs:-fPIC -dynamic -Wl,--strip-debug -Wl,--gc-sections -Wl,-rpath,$ORIGIN -Wl,-z,now
 //#ReferenceLinkers:bfd,lld
 //#Cross: false
-//#DiffIgnore:section.relro_padding
+//#DiffIgnore:section.relro_padding #13
 
 // In addition to testing gcc-dynamic-pie, this also checks -L with a path that does not exist. It's
 // necessary to test this on a test with a linker driver, so that we test that the savedir mechanism
@@ -137,9 +137,9 @@
 //#ReferenceLinkers:lld
 //#NoSym:GLIBC_ABI_DT_RELR
 //#Contains:.relr.dyn
-//#DiffIgnore:section.gnu.version_r.alignment
-//#DiffIgnore:section.got.plt.entsize
-//#DiffIgnore:rel.missing-opt.*
+//#DiffIgnore:section.gnu.version_r.alignment #13
+//#DiffIgnore:section.got.plt.entsize #13
+//#DiffIgnore:rel.missing-opt.* #13
 // Glibc refuses to run binaries with RELR unless `GLIBC_ABI_DT_RELR` version is
 // imported.
 //#RunEnabled:false

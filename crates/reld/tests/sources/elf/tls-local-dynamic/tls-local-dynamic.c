@@ -1,6 +1,6 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.rodata
-//#DiffIgnore:dynsym.foo.section
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:dynsym.foo.section #13 arch=riscv64
 
 //#Config:gcc:default
 //#SkipArch: ppc64le

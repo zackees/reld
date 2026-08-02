@@ -1,6 +1,6 @@
 //#AbstractConfig:default
 //#Object:runtime.c
-//#DiffIgnore:section.__unwind_info
+//#DiffIgnore:section.__unwind_info #13
 // TODO: Add support for fat objects to reld-diff.
 //#DiffEnabled:false
 

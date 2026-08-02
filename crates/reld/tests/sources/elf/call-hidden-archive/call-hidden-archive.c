@@ -9,7 +9,7 @@
 //#Shared:call-hidden-archive-lib.c
 //#Archive:call-hidden-archive-archive.c
 //#SoSingleLinker:ld
-//#DiffIgnore:.dynamic.DT_RELA*
+//#DiffIgnore:.dynamic.DT_RELA* #13
 
 #include "../common/runtime.h"
 

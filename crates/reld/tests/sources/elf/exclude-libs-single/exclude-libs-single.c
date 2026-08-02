@@ -4,8 +4,8 @@
 //#RunEnabled:false
 //#Archive:exclude-libs-single-1.c
 //#ExpectDynSym:foo
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 
 extern int foo(void);
 

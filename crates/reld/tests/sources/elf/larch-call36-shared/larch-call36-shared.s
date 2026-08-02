@@ -3,8 +3,8 @@
 //#Arch:loongarch64
 //#Mode:dynamic
 //#LinkArgs:-shared -z now
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 //#RunEnabled:false
 */
 

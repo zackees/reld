@@ -8,7 +8,7 @@ dynamic relocation is produced.
 //#CompArgs:-fPIC
 //#LinkArgs:-shared -z now -z text
 //#RunEnabled:false
-//#DiffIgnore:section.got
+//#DiffIgnore:section.got #13
 //#ExpectWarningReld:-z text is not yet supported
 */
 

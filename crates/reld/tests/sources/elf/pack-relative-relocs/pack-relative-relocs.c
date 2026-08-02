@@ -8,9 +8,9 @@
 // LLD doesn't allow simultaneous `-pie` and `-shared`, so disable PIE for deps.
 //#LinkSoArgs:-no-pie
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:dynsym.__global_pointer$.section
-//#DiffIgnore:section.got.plt.entsize
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:dynsym.__global_pointer$.section #13
+//#DiffIgnore:section.got.plt.entsize #13
 //#Mode:dynamic
 //#Contains:.relr.dyn
 //#DoesNotContain:GLIBC_ABI_DT_RELR

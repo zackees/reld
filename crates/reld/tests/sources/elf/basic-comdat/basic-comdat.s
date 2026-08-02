@@ -3,8 +3,8 @@
 //#Mode:dynamic
 //#RunEnabled:false
 //#LinkArgs:-shared -z now
-//#DiffIgnore:segment.GNU_STACK.alignment
-//#DiffIgnore:segment.GNU_STACK.flags
+//#DiffIgnore:segment.GNU_STACK.alignment #13
+//#DiffIgnore:segment.GNU_STACK.flags #13
 */
 
 .section .data.foo1,"awG",@progbits,foobar,comdat

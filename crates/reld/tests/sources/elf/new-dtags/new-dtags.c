@@ -2,8 +2,8 @@
 //#Object:runtime.c
 //#Mode:dynamic
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 
 //#Config:new-dtags:default
 //#LinkArgs:-shared -rpath /test/path --enable-new-dtags -z now
@@ -20,8 +20,8 @@
 //#ExpectDynamic:DT_FLAGS_1
 //#NoDynamic:DT_RUNPATH
 //#NoDynamic:DT_FLAGS
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
-//#DiffIgnore:.dynamic.DT_RPATH
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
+//#DiffIgnore:.dynamic.DT_RPATH #13
 
 int foo(void);
 

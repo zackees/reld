@@ -1,6 +1,6 @@
 //#Object:eh_frame_end.c
 //#Object:runtime.c
-//#DiffIgnore: segment.LOAD.RW.alignment
+//#DiffIgnore: segment.LOAD.RW.alignment #13
 //#ExpectSym:_start section=".text"
 //#TestUpdateInPlace:true
 

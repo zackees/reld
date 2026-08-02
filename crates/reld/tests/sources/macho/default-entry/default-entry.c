@@ -1,7 +1,7 @@
 //#Config:default
 //#Object:runtime.c
 //#ExpectEntry:_main
-//#DiffIgnore:section.__unwind_info
+//#DiffIgnore:section.__unwind_info #13
 
 #include "../common/runtime.h"
 
