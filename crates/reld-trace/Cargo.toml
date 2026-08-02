@@ -1,0 +1,16 @@
+[package]
+name = "reld-trace"
+description = "Data structures for storing trace outputs from the Reld linker"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+postcard.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

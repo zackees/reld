@@ -1,0 +1,246 @@
+[skipped_groups.unsupported_options]
+reason = "These tests use unsupported options"
+tests = [
+  "audit.sh",
+  "color-diagnostics.sh",
+  "compress-debug-sections-zlib-level.sh", # --compress-debug-sections=zlib:$level
+  "compress-debug-sections-zstd-level.sh", # --compress-debug-sections=zstd:$level
+  "default-symver-version-script.sh",
+  "default-symver.sh",
+  "depaudit.sh",
+  "depaudit2.sh",
+  "dynamic-list-data.sh",
+  "emit-relocs-cpp.sh",
+  "emit-relocs-dead-sections.sh",
+  "emit-relocs.sh",
+  "execute-only.sh",
+  "fatal-warnings.sh",                     # `-warn-common` and `-fatal-warnings`
+  "filter.sh",
+  "global-offset-table.sh",                # `-defsym=foo=_GLOBAL_OFFSET_TABLE_`
+  "icf-gcc-except-table.sh",               # `--icf`
+  "icf.sh",                                # `--icf`
+  "image-base.sh",
+  "init-in-dso.sh",
+  "init.sh",
+  "library.sh",
+  "oformat-binary.sh",
+  "omagic.sh",
+  "no-warnings.sh",
+  "pack-dyn-relocs-android.sh",            # `--pack-dyn-relocs=android`
+  "package-metadata.sh",
+  "relocatable-merge-sections.sh",
+  "repro.sh",                              # Note in this test's second half that it uses a custom environment variable called `MOLD_REPRO`. While Reld currently doesn't support `--repro`, it will eventually be moved to the "ignore" group once support is added.
+  "require-defined.sh",
+  "response-file-quoting.sh",
+  "retain-symbols-file.sh",
+  "run.sh",
+  "section-align.sh",                      # `--section-alignment`
+  "sort-debug-info-compressed.sh",         # `-Map`
+  "sort-debug-info-merged.sh",             # `-Map`
+  "sort-debug-info.sh",                    # `-Map`
+  "spare-program-headers.sh",
+  "static-archive.sh",                     # error: Undefined symbol main, passes with GNU ld
+  "synthetic-symbols.sh",                  # `--image-base`
+  "thin-archive.sh",                       # error: Undefined symbol main, passes with GNU ld
+  "trace-symbol-symver.sh",
+  "trace-symbol.sh",
+  "undefined-glob-gc-sections.sh",
+  "undefined-glob.sh",
+  "warn-common.sh",
+  "warn-once.sh",
+]
+
+[skipped_groups.version_script]
+reason = "Version script support"
+tests = ["version-script15.sh"]
+
+[skipped_groups.z_options]
+reason = "Related to -z"
+tests = [
+  "z-cet-report.sh",
+  "z-dynamic-undefined-weak-exe.sh",
+  "z-dynamic-undefined-weak.sh",
+  "z-nodefaultlib.sh",
+  "z-nodump.sh",
+  "z-rodynamic.sh",
+  "z-sectionheader.sh",
+  "z-start-stop-visibility.sh",
+]
+
+[skipped_groups.arch_x86_64]
+reason = "x86_64 specific tests"
+tests = [
+  "arch-x86_64-address-equality.sh",
+  "arch-x86_64-empty-mergeable-section.sh",
+  "arch-x86_64-execstack-if-needed.sh",
+  "arch-x86_64-gnu-linkonce.sh",
+  "arch-x86_64-gotpcrelx.sh",
+  "arch-x86_64-init-array-readonly.sh",
+  "arch-x86_64-mergeable-strings-nonalloc.sh",
+  "arch-x86_64-relax.sh",
+  "arch-x86_64-reloc.sh",
+  "arch-x86_64-section-name.sh",
+  "arch-x86_64-tbss-only.sh",
+  "arch-x86_64-unique.sh",
+  "arch-x86_64-warn-execstack.sh",
+  "arch-x86_64-warn-shared-textrel.sh",
+  "arch-x86_64-warn-textrel.sh",
+  "arch-x86_64-z-dynamic-undefined-weak.sh",
+  "arch-x86_64-z-ibt.sh",
+  "arch-x86_64-z-rewrite-endbr.sh",
+  "arch-x86_64-z-rewrite-endbr2.sh",
+  "arch-x86_64-z-shstk.sh",
+  "arch-x86_64-z-text.sh",
+]
+
+[skipped_groups.arch_aarch64]
+reason = "Aarch64 specific tests"
+tests = [
+  "arch-aarch64-long-thunk.sh",
+  "arch-aarch64-range-extension-thunk-disassembly.sh",
+]
+
+[skipped_groups.arch_riscv64]
+reason = "RISC-V specific tests"
+tests = ["arch-riscv64-relax-got.sh", "arch-riscv64-reloc-overflow.sh"]
+
+[skipped_groups.arch_loongarch64]
+reason = "LoongArch64 specific tests"
+tests = [
+  "arch-loongarch64-relax-call36.sh",
+  "arch-loongarch64-relax-got-load.sh",
+  "arch-loongarch64-relax-pcala-addi.sh",
+  "arch-loongarch64-relax-tlsdesc.sh",
+]
+
+[skipped_groups.arch_ppc64le]
+reason = "ppc64le specific tests"
+tests = ["arch-ppc64le-save-restore-gprs.sh"]
+
+[skipped_groups.tls]
+reason = "Related to TLS"
+tests = ["tls-common.sh", "tls-le-error.sh"]
+
+[skipped_groups.ignore]
+reason = "We ignore these tests for some reasons"
+tests = [
+  "arch-riscv64-global-pointer.sh", # GNU ld and lld do not export `__global_pointer$` to `.dynsym`.
+  "arch-riscv64-obj-compatible.sh", # Different message formats
+  "arch-riscv64-relax-j.sh",        # Passes when `--no-gc-sections` is passed.
+  "arch-x86_64-empty-arg.sh",       # Different message formats
+  "arch-x86_64-note.sh",            # The order of sections is different.
+  "arch-x86_64-note2.sh",           # The order of sections is different.
+  "arch-x86_64-plt.sh",             # We use `.got.plt`, not `.plt.got`.
+  "arch-x86_64-reloc-overflow.sh",  # Different message formats
+  "as-needed-weak.sh",              # Mold-specific behaviour: GNU ld and lld do not activate --as-needed libs for weak refs
+  "auxiliary.sh",                   # Different message format
+  "build-id.sh",                    # Different build ID data size
+  "cmdline.sh",                     # Different message formats for unknown options.
+  "comment.sh",                     # We store a different string in the comment section than mold.
+  "copyrel-alignment.sh",           # We put copy relocation info to `.bss`
+  "copyrel-norelro.sh",             # We put copy relocation info to `.bss`
+  "copyrel-protected.sh",           # We put copy relocation info to `.bss`
+  "copyrel-relro.sh",               # We put copy relocation info to `.bss`
+  "copyrel-relro2.sh",              # We put copy relocation info to `.bss`
+  "demangle.sh",                    # Different message formats
+  "duplicate-error-archive.sh",     # Different message formats
+  "duplicate-error-gc-sections.sh", # Different message formats
+  "duplicate-error.sh",             # Different message formats
+  "empty-input.sh",                 # Different message formats
+  "gc-sections.sh",                 # Passes when `--no-gc-sections` is passed.
+  "hash-style.sh",                  # Reld doesn't support `--hash-style=none`.
+  "hidden-undef.sh",                # Reld correctly errors, but message format differs from mold's.
+  "help.sh",
+  "invalid-version-script.sh",      # Different message formats
+  "linker-script-error.sh",         # Different message formats
+  "many-output-sections.sh",        # Different message formats
+  "mold-wrapper.sh",
+  "mold-wrapper2.sh",
+  "nmagic.sh",                      # end is only emitted if .bss section exists. LLD also fails.
+  "no-allow-shlib-undefined.sh",    # Different message formats
+  "no-allow-shlib-undefined3.sh",   # Different message formats
+  "no-allow-shlib-undefined4.sh",   # GNU ld and LLD also fail
+  "plt-symbols.sh",                 # Reld currently doesn't create entries in the symbol table with the `$plt` suffix unless `--got-plt-syms` is specified
+  "run-clang.sh",                   # This test checks the comment section to verify if it's linked with mold.
+  "start-lib.sh",                   # Passes when `--no-gc-sections` is passed.
+  "stdout.sh",
+  "undefined.sh",                   # Passes when `--no-gc-sections` is passed.
+  "undefined2.sh",                  # Passes when `--no-gc-sections` is passed.
+  "unresolved-symbols.sh",          # Different message formats
+  "verbose.sh",
+  "version.sh",                     # The message of `--version` is different from mold's one.
+  "warn-unresolved-symbols.sh",     # Different message formats
+  "whole-archive.sh",               # Passes when `--no-gc-sections` is passed.
+  "z-defs.sh",                      # Different message formats
+]
+
+[skipped_groups.lto]
+reason = "Failing LTO tests."
+tests = [
+  "lto-no-plugin.sh",       # We don't currently support LTO without an explicit plugin
+  "lto-gcc.sh",             # We don't currently support LTO without an explicit plugin
+  "lto-llvm2.sh",           # -m llvm is not yet supported
+  "duplicate-error-lto.sh", # Reld deduplicates inputs
+  "lto-comdat.sh",          # We don't support COMDAT
+  "lto-archive4.sh",
+  "lto-mixed-gcc-fat.sh",
+]
+
+[skipped_groups.uncommon]
+reason = "These tests use uncommon features and are therefore likely not supported by Reld, at least for the time being."
+tests = [
+  "filler.sh",
+  "no-quick-exit.sh",
+  "physical-image-base.sh",
+  "print-dependencies.sh",
+  "reverse-sections.sh",
+  "section-order.sh",
+  "separate-debug-file-sort.sh",
+  "separate-debug-file.sh",
+  "shuffle-sections-seed.sh",
+  "shuffle-sections.sh",
+  "start-stop.sh",
+  "zero-to-bss.sh",
+]
+
+[skipped_groups.misc]
+reason = "Not grouped yet"
+tests = [
+  "bno-symbolic.sh",
+  "canonical-plt.sh",
+  "common-archive.sh",
+  "common-ref.sh",
+  "common-symbols.sh",
+  "defsym-missing-symbol.sh",
+  "demangle-cpp.sh",
+  "discard-section.sh",
+  "discard.sh",
+  "dynamic-linker.sh",
+  "glibc-2.22-bug.sh",
+  "initfirst.sh",
+  "mergeable-strings.sh",
+  "missing-error.sh",
+  "no-allow-shlib-undefined-circular.sh",
+  "no-allow-shlib-undefined-hidden.sh",
+  "no-undefined-version.sh",
+  "nocopyreloc.sh",
+  "noinhibit-exec.sh",
+  "rodata-name.sh",
+  "section-attributes.sh",
+  "strip.sh",
+  "stt-common.sh",
+  "symbol-version-as-needed.sh",
+  "symbol-version-multi.sh",
+  "symbol-version.sh",
+  "symbol-version2.sh",
+  "symtab-dso.sh",
+  "symtab-section-symbols.sh",
+  "symtab.sh",
+  "textrel2.sh",
+  "unknown-section-type.sh",
+  "versioned-undef.sh",
+  "warn-symbol-type.sh",
+  "weak-export-exe.sh",
+  "weak-undef2.sh",
+  "weak-undef5.sh",
+]

@@ -1,0 +1,33 @@
+[package]
+name = "reld-diff"
+description = "Diffs and validates ELF binaries"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reld-layout-schema = { path = "../reld-layout-schema", version = "0.0.0" }
+reld-trace = { path = "../reld-trace", version = "0.0.0" }
+reld-reloc = { path = "../reld-reloc", version = "0.0.0" }
+anstyle.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+gimli.workspace = true
+hashbrown.workspace = true
+iced-x86.workspace = true
+itertools.workspace = true
+memchr.workspace = true
+memmap2.workspace = true
+object.workspace = true
+symbolic-demangle.workspace = true
+tabled.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+which.workspace = true
+zerocopy.workspace = true
+
+[lints]
+workspace = true

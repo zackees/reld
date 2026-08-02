@@ -1,0 +1,552 @@
+use crate::ArchKind;
+use crate::arch::Arch;
+use crate::arch::Instruction;
+use crate::arch::Relaxation;
+use crate::arch::RelaxationByteRange;
+use crate::asm_diff::BasicValueKind;
+use crate::utils::decode_insn_with_objdump;
+use itertools::Itertools;
+use reld_reloc::aarch64::RelaxationKind;
+use reld_reloc::elf::AArch64Instruction;
+use reld_reloc::elf::BitMask;
+use reld_reloc::elf::DynamicRelocationKind;
+use reld_reloc::elf::PAGE_MASK_4KB;
+use reld_reloc::elf::PageMask;
+use reld_reloc::elf::RelocationInstruction;
+use reld_reloc::elf::RelocationKindInfo;
+use reld_reloc::elf::SIZE_4KB;
+use reld_reloc::elf::aarch64_rel_type_to_string;
+use reld_reloc::relaxation::RelocationModifier;
+use reld_reloc::utils::u32_from_slice;
+use reld_reloc::utils::u64_from_slice;
+use std::fmt::Display;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AArch64;
+
+impl Arch for AArch64 {
+    type RType = RType;
+
+    type RelaxationKind = RelaxationKind;
+
+    type RawInstruction = Option<String>;
+
+    const MAX_RELAX_MODIFY_BEFORE: u64 = 0;
+    const MAX_RELAX_MODIFY_AFTER: u64 = 4;
+
+    fn possible_relaxations_do(
+        r_type: Self::RType,
+        _section_kind: object::SectionKind,
+        mut cb: impl FnMut(crate::arch::Relaxation<Self>),
+    ) {
+        let mut relax = |relaxation_kind, new_r_type| {
+            cb(Relaxation {
+                relaxation_kind,
+                new_r_type: RType(new_r_type),
+                alt_r_type: None,
+            });
+        };
+
+        match r_type.0 {
+            object::elf::R_AARCH64_TLSDESC_ADR_PAGE21 => {
+                relax(
+                    RelaxationKind::MovzX0Lsl16,
+                    object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G1,
+                );
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_TLSDESC_LD64_LO12 => {
+                relax(
+                    RelaxationKind::MovkX0,
+                    object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G0_NC,
+                );
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_TLSDESC_ADD_LO12 => {
+                relax(
+                    RelaxationKind::MovzX0Lsl16,
+                    object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G1,
+                );
+                relax(
+                    RelaxationKind::AdrpX0,
+                    object::elf::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21,
+                );
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_TLSDESC_CALL => {
+                relax(
+                    RelaxationKind::MovkX0,
+                    object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G0_NC,
+                );
+                relax(
+                    RelaxationKind::LdrX0,
+                    object::elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
+                );
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 => {
+                relax(
+                    RelaxationKind::MovzXnLsl16,
+                    object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G1,
+                );
+            }
+            object::elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC => {
+                relax(
+                    RelaxationKind::MovkXn,
+                    object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G0_NC,
+                );
+            }
+            object::elf::R_AARCH64_CALL26 => {
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_JUMP26 => {
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_ADR_GOT_PAGE => {
+                relax(
+                    RelaxationKind::AdrpToAdr,
+                    object::elf::R_AARCH64_ADR_PREL_LO21,
+                );
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_ADR_PREL_PG_HI21 => {
+                relax(
+                    RelaxationKind::AdrpToAdr,
+                    object::elf::R_AARCH64_ADR_PREL_LO21,
+                );
+                relax(RelaxationKind::ReplaceWithNop, object::elf::R_AARCH64_NONE);
+            }
+            object::elf::R_AARCH64_LD64_GOT_LO12_NC => relax(
+                RelaxationKind::LdrToAdr,
+                object::elf::R_AARCH64_ADR_PREL_LO21,
+            ),
+            object::elf::R_AARCH64_ADD_ABS_LO12_NC => relax(
+                RelaxationKind::AddToAdr,
+                object::elf::R_AARCH64_ADR_PREL_LO21,
+            ),
+            _ => {}
+        }
+
+        relax(Self::RelaxationKind::NoOp, r_type.0);
+    }
+
+    fn relaxation_byte_range(_relaxation: Relaxation<Self>) -> RelaxationByteRange {
+        RelaxationByteRange {
+            offset_shift: 0,
+            num_bytes: 4,
+        }
+    }
+
+    fn apply_relaxation(
+        relaxation_kind: Self::RelaxationKind,
+        section_bytes: &mut [u8],
+        offset_in_section: &mut u64,
+        addend: &mut i64,
+    ) {
+        relaxation_kind.apply(section_bytes, offset_in_section, addend);
+    }
+
+    fn next_relocation_modifier(relaxation_kind: Self::RelaxationKind) -> RelocationModifier {
+        relaxation_kind.next_modifier()
+    }
+
+    fn instruction_to_string(instruction: &Instruction<Self>) -> String {
+        if let Some(str) = instruction.raw_instruction.as_ref() {
+            return str.to_owned();
+        }
+        String::new()
+    }
+
+    fn decode_instructions_in_range(
+        section_bytes: &[u8],
+        section_address: u64,
+        _function_offset_in_section: u64,
+        range: std::ops::Range<u64>,
+    ) -> Vec<crate::arch::Instruction<'_, Self>> {
+        let mut offset = range.start & !3;
+
+        let mut instructions = Vec::new();
+
+        while offset < range.end {
+            let bytes = &section_bytes[offset as usize..offset as usize + 4];
+            let address = section_address + offset;
+
+            let raw_instruction = decode_insn_with_objdump(bytes, address, ArchKind::Aarch64).ok();
+
+            instructions.push(crate::arch::Instruction {
+                raw_instruction,
+                address,
+                bytes,
+            });
+
+            offset += 4;
+        }
+
+        instructions
+    }
+
+    fn decode_plt_entry(
+        plt_entry: &[u8],
+        plt_base: u64,
+        plt_offset: u64,
+    ) -> Option<crate::arch::PltEntry> {
+        decode_plt_entry_template_1(plt_entry, plt_base, plt_offset)
+            .or_else(|| decode_plt_entry_template_2(plt_entry, plt_base, plt_offset))
+    }
+
+    fn decode_thunk(bytes: &[u8], address: u64) -> Option<u64> {
+        if bytes.len() >= 4 {
+            let insn0 = u32_from_slice(&bytes[0..4]);
+
+            // B <label> - a single unconditional branch used as a short-range thunk.
+            // Encoding: bits[31:26]=000101, bits[25:0]=imm26 (signed, <<2 = byte offset).
+            const B_MASK: u32 = 0xFC000000;
+            const B_OPCODE: u32 = 0x14000000;
+            if insn0 & B_MASK == B_OPCODE {
+                let (imm26_sext, _) = AArch64Instruction::JumpCall.read_value(&bytes[0..4]);
+                return Some((address as i64 + imm26_sext as i64 * 4) as u64);
+            }
+
+            // LDR x16, <pc_rel_literal> / BR x16.
+            // LDR Xt (literal): bits[31:30]=01(64-bit), bits[29:27]=011, bit[26]=V=0,
+            //   bits[25:5]=imm19 (PC-relative word offset), bits[4:0]=Rt=x16(=0b10000)
+            // The target absolute address is stored as a 64-bit literal at PC + imm19*4.
+            const LDR_X16_LITERAL_MASK: u32 = 0xFF00001F;
+            const LDR_X16_LITERAL: u32 = 0x58000010;
+            if bytes.len() >= 16 {
+                let insn1 = u32_from_slice(&bytes[4..8]);
+                if insn0 & LDR_X16_LITERAL_MASK == LDR_X16_LITERAL && insn1 == 0xD61F0200 {
+                    let (imm19_sext, _) = AArch64Instruction::Ldr.read_value(&bytes[0..4]);
+                    let byte_offset = imm19_sext as i64 * 4;
+                    if let Ok(buf_offset) = usize::try_from(byte_offset)
+                        && buf_offset + 8 <= bytes.len()
+                    {
+                        return Some(u64_from_slice(&bytes[buf_offset..buf_offset + 8]));
+                    }
+                }
+            }
+
+            // ADRP x16, <page> - page-relative address load
+            // ADD  x16, x16, #lo12
+            // BR   x16
+            if bytes.len() >= 12 {
+                const BR_X16: u32 = 0xD61F0200;
+
+                let insn1 = u32_from_slice(&bytes[4..8]);
+                let insn2 = u32_from_slice(&bytes[8..12]);
+
+                // Check ADRP x16 (Rd=16=0b10000): fixed bits [31]=1, [28:24]=10000, [4:0]=10000
+                const ADRP_MASK: u32 = 0x9F00001F;
+                const ADRP_X16: u32 = 0x90000010;
+                // Check ADD x16, x16, #imm (no shift): bits [31:29]=100, [28:24]=10001,
+                //   [23:22]=00, [9:5]=10000(Rn=x16), [4:0]=10000(Rd=x16)
+                const ADD_MASK: u32 = 0xFFC003FF;
+                const ADD_X16_X16: u32 = 0x91000210;
+
+                if insn0 & ADRP_MASK == ADRP_X16
+                    && insn1 & ADD_MASK == ADD_X16_X16
+                    && insn2 == BR_X16
+                {
+                    let (imm21_sext, _) = AArch64Instruction::Adr.read_value(&bytes[0..4]);
+                    let page_offset = (imm21_sext as i64) << 12;
+                    let page_base = (address & !0xFFF) as i64;
+                    let adrp_result = (page_base + page_offset) as u64;
+
+                    let (add_imm, _) = AArch64Instruction::Add.read_value(&bytes[4..8]);
+                    return Some(adrp_result + add_imm);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn should_chain_relocations(chain_prefix: &[Self::RType]) -> bool {
+        CHAINS
+            .iter()
+            .any(|full_chain| full_chain.starts_with(chain_prefix))
+    }
+
+    fn get_relocation_base_mask(relocation_info: &RelocationKindInfo) -> u64 {
+        match relocation_info.mask {
+            Some(
+                PageMask::SymbolPlusAddendAndPosition(mask)
+                | PageMask::GotEntryAndPosition(mask)
+                | PageMask::GotBase(mask),
+            ) => !mask,
+            _ => u64::MAX,
+        }
+    }
+
+    fn relocation_to_pc_offset(_relocation_info: &RelocationKindInfo) -> u64 {
+        // ARM PC-relative addressing is always relative to the instruction being executed, not the
+        // next instruction. Also, the relocations always point to the start of the instruction.
+        // These two facts combined mean that our offset here is always zero.
+        0
+    }
+
+    fn is_complete_chain(chain: impl Iterator<Item = Self::RType>) -> bool {
+        let chain = chain.collect_vec();
+        for candidate in CHAINS {
+            if candidate.starts_with(&chain) && *candidate != chain {
+                return false;
+            }
+        }
+
+        // All relocation types that have LO or HI in their name can't be used by themselves.
+        const NOT_IN_ISOLATION: &[RType] = &[
+            RType(object::elf::R_AARCH64_LD_PREL_LO19),
+            RType(object::elf::R_AARCH64_ADR_PREL_LO21),
+            RType(object::elf::R_AARCH64_ADR_PREL_PG_HI21),
+            RType(object::elf::R_AARCH64_ADR_PREL_PG_HI21_NC),
+            RType(object::elf::R_AARCH64_ADD_ABS_LO12_NC),
+            RType(object::elf::R_AARCH64_LDST8_ABS_LO12_NC),
+            RType(object::elf::R_AARCH64_LDST16_ABS_LO12_NC),
+            RType(object::elf::R_AARCH64_LDST32_ABS_LO12_NC),
+            RType(object::elf::R_AARCH64_LDST64_ABS_LO12_NC),
+            RType(object::elf::R_AARCH64_LDST128_ABS_LO12_NC),
+            RType(object::elf::R_AARCH64_LD64_GOTOFF_LO15),
+            RType(object::elf::R_AARCH64_LD64_GOT_LO12_NC),
+            RType(object::elf::R_AARCH64_LD64_GOTPAGE_LO15),
+            RType(object::elf::R_AARCH64_TLSGD_ADD_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_ADD_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_ADD_DTPREL_HI12),
+            RType(object::elf::R_AARCH64_TLSLD_ADD_DTPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_LDST8_DTPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLD_LDST8_DTPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_LDST16_DTPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_LDST32_DTPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_LDST64_DTPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLE_ADD_TPREL_HI12),
+            RType(object::elf::R_AARCH64_TLSLE_ADD_TPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_ADD_TPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLE_LDST8_TPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLE_LDST16_TPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLE_LDST32_TPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLE_LDST64_TPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSDESC_LD64_LO12),
+            RType(object::elf::R_AARCH64_TLSDESC_ADD_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_LDST128_TPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC),
+            RType(object::elf::R_AARCH64_TLSLD_LDST128_DTPREL_LO12),
+            RType(object::elf::R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC),
+        ];
+
+        match chain.as_slice() {
+            [r_type] => !NOT_IN_ISOLATION.contains(r_type),
+            _ => true,
+        }
+    }
+
+    fn get_basic_value_for_tp_offset() -> crate::asm_diff::BasicValueKind {
+        BasicValueKind::Aarch64TlsOffset
+    }
+}
+
+const CHAINS: &[&[RType]] = &[
+    &[
+        RType(object::elf::R_AARCH64_ADR_PREL_PG_HI21),
+        RType(object::elf::R_AARCH64_ADD_ABS_LO12_NC),
+    ],
+    &[
+        RType(object::elf::R_AARCH64_ADR_PREL_PG_HI21),
+        RType(object::elf::R_AARCH64_LDST64_ABS_LO12_NC),
+    ],
+    &[
+        RType(object::elf::R_AARCH64_TLSDESC_ADR_PAGE21),
+        RType(object::elf::R_AARCH64_TLSDESC_LD64_LO12),
+        RType(object::elf::R_AARCH64_TLSDESC_ADD_LO12),
+        RType(object::elf::R_AARCH64_TLSDESC_CALL),
+    ],
+    &[
+        RType(object::elf::R_AARCH64_ADR_GOT_PAGE),
+        RType(object::elf::R_AARCH64_LD64_GOT_LO12_NC),
+    ],
+    &[
+        RType(object::elf::R_AARCH64_TLSLE_ADD_TPREL_HI12),
+        RType(object::elf::R_AARCH64_TLSLE_ADD_TPREL_LO12_NC),
+    ],
+    &[
+        RType(object::elf::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21),
+        RType(object::elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC),
+    ],
+    &[
+        RType(object::elf::R_AARCH64_TLSGD_ADR_PAGE21),
+        RType(object::elf::R_AARCH64_TLSGD_ADD_LO12_NC),
+    ],
+];
+
+const REL_ADR_PAGE: BitMask = BitMask::new(
+    RelocationInstruction::AArch64(AArch64Instruction::Adr),
+    SIZE_4KB.trailing_zeros(),
+    SIZE_4KB.trailing_zeros() + 21,
+);
+
+const REL_LDR_OFFSET: BitMask = BitMask::new(
+    RelocationInstruction::AArch64(AArch64Instruction::LdrRegister),
+    3,
+    3 + 12,
+);
+
+const REL_ADD_LITERAL: BitMask = BitMask::new(
+    RelocationInstruction::AArch64(AArch64Instruction::Add),
+    0,
+    12,
+);
+
+fn decode_plt_entry_template_1(
+    plt_entry: &[u8],
+    plt_base: u64,
+    plt_offset: u64,
+) -> Option<crate::arch::PltEntry> {
+    const PLT_ENTRY_TEMPLATE: &[u8] = &[
+        0x10, 0x00, 0x00, 0x90, // adrp x16, page(&(.got.plt[n]))
+        0x11, 0x02, 0x40, 0xf9, // ldr x17, [x16, offset(&(.got.plt[n]))]
+        0x20, 0x02, 0x1f, 0xd6, // br x17
+        0x1f, 0x20, 0x03, 0xd5, // nop
+    ];
+
+    let values = extract_values_from_template(
+        plt_entry,
+        PLT_ENTRY_TEMPLATE,
+        &[(0, REL_ADR_PAGE), (4, REL_LDR_OFFSET)],
+    )?;
+
+    let entry_page_base = (plt_base + plt_offset) & !PAGE_MASK_4KB;
+
+    let got_address = entry_page_base.wrapping_add(values[0]) | values[1];
+
+    Some(crate::arch::PltEntry::DerefJmp(got_address))
+}
+
+fn decode_plt_entry_template_2(
+    plt_entry: &[u8],
+    plt_base: u64,
+    plt_offset: u64,
+) -> Option<crate::arch::PltEntry> {
+    const PLT_ENTRY_TEMPLATE: &[u8] = &[
+        0xf0, 0x02, 0x00, 0xb0, // adrp x16, page(&(.got.plt[n]))
+        0x11, 0x0e, 0x47, 0xf9, // ldr x17, [x16, offset(&(.got.plt[n]))]
+        0x10, 0x62, 0x38, 0x91, // add x16, x16, #0xe20
+        0x20, 0x02, 0x1f, 0xd6, // br x17
+    ];
+
+    let values = extract_values_from_template(
+        plt_entry,
+        PLT_ENTRY_TEMPLATE,
+        &[(0, REL_ADR_PAGE), (4, REL_LDR_OFFSET), (8, REL_ADD_LITERAL)],
+    )?;
+
+    let entry_page_base = (plt_base + plt_offset) & !PAGE_MASK_4KB;
+
+    // Note, we ignore the value of the third relocation - the one associated with the add
+    // instruction. It's only needed for lazy PLT entries, but some linkers have the add instruction
+    // even when -z now is passed.
+
+    let got_address = entry_page_base.wrapping_add(values[0]) | values[1];
+
+    Some(crate::arch::PltEntry::DerefJmp(got_address))
+}
+
+/// Extracts the relocation values from `plt_entry`, making sure that the non-relocation parts match
+/// `template`.
+fn extract_values_from_template(
+    plt_entry: &[u8],
+    template: &[u8],
+    relocations: &[(usize, BitMask)],
+) -> Option<Vec<u64>> {
+    if plt_entry.len() != template.len() {
+        return None;
+    }
+
+    let mut mask = vec![0; template.len()];
+
+    for (offset, rel) in relocations {
+        let num_bits = rel.range.end - rel.range.start;
+        rel.instruction
+            .write_to_value((1 << num_bits) - 1, false, &mut mask[*offset..offset + 4]);
+    }
+
+    for m in &mut mask {
+        *m = !*m;
+    }
+
+    if !equal_with_mask(plt_entry, template, &mask) {
+        return None;
+    }
+
+    Some(
+        relocations
+            .iter()
+            .map(|(offset, rel)| {
+                let raw_value = rel
+                    .instruction
+                    .read_value(&plt_entry[*offset..offset + 4])
+                    .0;
+                raw_value << rel.range.start
+            })
+            .collect(),
+    )
+}
+
+fn equal_with_mask(a: &[u8], b: &[u8], mask: &[u8]) -> bool {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), mask.len());
+    a.iter()
+        .zip(b)
+        .zip(mask)
+        .all(|((a, b), m)| (a & m) == (b & m))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RType(object::elf::RelocationType);
+
+impl crate::arch::RType for RType {
+    fn from_raw(raw: object::elf::RelocationType) -> Self {
+        RType(raw)
+    }
+
+    fn from_dynamic_relocation_kind(kind: DynamicRelocationKind) -> Self {
+        Self::from_raw(kind.aarch64_r_type())
+    }
+
+    fn opt_relocation_info(self) -> Option<RelocationKindInfo> {
+        reld_reloc::aarch64::relocation_type_from_raw(self.0)
+    }
+
+    fn dynamic_relocation_kind(self) -> Option<DynamicRelocationKind> {
+        DynamicRelocationKind::from_aarch64_r_type(self.0)
+    }
+
+    fn should_ignore_when_computing_referent(self) -> bool {
+        // This relocation is computing the address of the function to call. We should ideally be
+        // checking this as well, but for now we only check the that we're getting the right address
+        // for the TLSDESC struct.
+        self.0 == object::elf::R_AARCH64_TLSDESC_LD64_LO12
+    }
+}
+
+impl Display for RType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&aarch64_rel_type_to_string(self.0), f)
+    }
+}
+
+impl crate::arch::RelaxationKind for RelaxationKind {
+    fn is_no_op(self) -> bool {
+        matches!(self, RelaxationKind::NoOp)
+    }
+
+    fn is_replace_with_no_op(self) -> bool {
+        matches!(self, RelaxationKind::ReplaceWithNop)
+    }
+}

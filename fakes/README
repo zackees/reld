@@ -1,0 +1,2 @@
+Portable wrapper scripts used by compiler `-B` tests. They replace wild's Git symlinks, which do
+not materialize on a default Windows checkout.

@@ -1,0 +1,25 @@
+# Run inside a Nix shell.
+#
+# docker build --progress=plain -t reld-dev-nix . -f docker/nix.Dockerfile
+#
+# docker run -it reld-dev-nix
+
+FROM nixos/nix AS chef
+
+COPY docker/shell.nix shell.nix
+RUN nix-shell --run "rustup toolchain install nightly"
+
+WORKDIR /reld
+
+FROM chef AS planner
+COPY . .
+COPY docker/shell.nix shell.nix
+RUN nix-shell --run "cargo chef prepare --recipe-path recipe.json"
+
+FROM chef AS builder
+COPY --from=planner /reld/recipe.json recipe.json
+COPY docker/shell.nix shell.nix
+RUN nix-shell --run "cargo chef cook --all-targets --recipe-path recipe.json"
+COPY . .
+
+ENTRYPOINT ["nix-shell"]

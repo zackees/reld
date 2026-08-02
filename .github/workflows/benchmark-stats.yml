@@ -7,7 +7,7 @@ name: Benchmark Stats
 # While reld is private the README image will 404 — the pipeline still runs and the
 # artifacts are still uploaded, so nothing is lost by running it early.
 #
-# Linux-only by construction: wild emits ELF only, so it cannot be benchmarked on Windows
+# Linux-only by construction: the inherited linker emits ELF only, so it cannot be benchmarked on Windows
 # or macOS runners. Those platforms get lld and the system linker once reld has backends.
 
 on:
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
 
       - name: Install linkers
         run: |

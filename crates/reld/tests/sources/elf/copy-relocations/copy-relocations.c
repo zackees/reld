@@ -1,0 +1,116 @@
+//#SkipArch: ppc64le
+//#Object:runtime.c
+//#ReferenceLinkers:bfd,lld
+//#Mode:dynamic
+//#CompSoArgs:-fPIC
+//#LinkArgs:-z now
+//#Shared:copy-relocations-2.c
+//#Object:copy-relocations-3.c:-fPIC
+// We're linking different .so files, so this is expected.
+//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:dynsym.w2.section
+//#ExpectSym:_start section=".text"
+//#ExpectSym:w4
+//#DiffMatchAny:true
+
+#include "../common/runtime.h"
+
+// These two symbols are at the same address in the shared object, so references to both should
+// point to the same copy relocation and that location should be what `get_w` returns.
+extern int w1;
+extern int s1;
+int get_w1(void);
+int get_s1(void);
+
+// This time we only reference the non-weak symbol.
+extern int s2;
+int get_s2(void);
+int get_w2(void);
+
+// Here, we reference the weak symbol and not the strong one.
+extern int w3;
+int get_s3(void);
+int get_w3(void);
+
+// This time we strongly define w4, which overrides the weak alias w4 in the
+// shared object.
+extern int s4;
+int w4 = 24;
+int get_s4(void);
+int get_w4(void);
+
+// This is defined in a separate object file that is compiled with -fPIC.
+int get_s1_pic(void);
+
+extern int aligned_int;
+extern int aligned_int2;
+
+unsigned long long ptr_to_int(void* ptr);
+
+void _start(void) {
+  runtime_init();
+
+  // Reference both the weak and the strong versions of the symbol.
+  w1 = 10;
+  if (get_w1() != 10) {
+    exit_syscall(20);
+  }
+  if (get_s1() != 10) {
+    exit_syscall(21);
+  }
+  if (get_s1_pic() != 10) {
+    exit_syscall(22);
+  }
+  s1 = 11;
+  if (get_w1() != 11) {
+    exit_syscall(30);
+  }
+  if (get_s1() != 11) {
+    exit_syscall(31);
+  }
+  if (get_s1_pic() != 11) {
+    exit_syscall(32);
+  }
+
+  // Strong only. Note, we don't check get_w2 since linker behaviour differs in this case. GNU ld
+  // doesn't export the weak alias, lld and Reld do.
+  s2 = 12;
+  if (get_s2() != 12) {
+    exit_syscall(40);
+  }
+
+  // Weak only.
+  w3 = 13;
+  if (get_w3() != 13) {
+    exit_syscall(50);
+  }
+  if (get_s3() != 13) {
+    exit_syscall(51);
+  }
+
+  if (aligned_int != 700) {
+    exit_syscall(52);
+  }
+  if (aligned_int2 != 0) {
+    exit_syscall(53);
+  }
+  if (ptr_to_int(&aligned_int) & 0xff) {
+    exit_syscall(54);
+  }
+  if (ptr_to_int(&aligned_int2) & 0xff) {
+    exit_syscall(55);
+  }
+
+  if (get_s4() != 4) {
+    exit_syscall(56);
+  }
+  s4 = 14;
+  if (get_s4() != 14) {
+    exit_syscall(57);
+  }
+  if (get_w4() != 24) {
+    exit_syscall(58);
+  }
+
+  exit_syscall(42);
+}

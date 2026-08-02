@@ -1,15 +1,9 @@
 name: Sanitizers
 
-# ASAN / LSAN / UBSAN and Miri.
+# ASAN / LSAN and Miri.
 #
-# HONEST NOTE ON CURRENT VALUE: today this repo is safe Rust with no object parsing, so
-# these jobs find approximately nothing. They exist now, wired and green, because the
-# moment reld starts mapping object files it will be full of `unsafe` — pointer casts
-# over mmap'd, attacker-shaped-but-really-just-corrupt input is the single most
-# defect-dense part of any linker. Retrofitting sanitizers onto an existing pile of
-# unsafe code is how projects end up never doing it.
-#
-# When the parsers land, this file should not need to change.
+# These jobs cover the reld-owned workload generator. The inherited linker has its full
+# Linux-only acceptance suite in ci.yml's development container.
 
 on:
   workflow_dispatch:
@@ -17,7 +11,7 @@ on:
     - cron: "41 6 * * *"
   pull_request:
     paths:
-      - "crates/**"
+      - "crates/reld-testkit/**"
       - ".github/workflows/sanitizers.yml"
 
 concurrency:
@@ -53,11 +47,11 @@ jobs:
         run: |
           cargo +nightly test \
             -Zbuild-std \
-            --workspace \
+            -p reld-testkit \
             --target x86_64-unknown-linux-gnu
 
-  ubsan:
-    name: UndefinedBehaviorSanitizer
+  lsan:
+    name: LeakSanitizer
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -66,14 +60,14 @@ jobs:
         with:
           components: rust-src
       - run: sudo apt-get update && sudo apt-get install -y clang lld
-      - name: cargo test under UBSAN
+      - name: cargo test under LSAN
         env:
-          RUSTFLAGS: "-Zsanitizer=undefined -Cdebuginfo=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+          RUSTFLAGS: "-Zsanitizer=leak -Cdebuginfo=1"
+          LSAN_OPTIONS: "verbosity=1:log_threads=1:exitcode=23"
         run: |
           cargo +nightly test \
             -Zbuild-std \
-            --workspace \
+            -p reld-testkit \
             --target x86_64-unknown-linux-gnu
 
   miri:
@@ -91,5 +85,5 @@ jobs:
           # compiler) is excluded. Miri's job here is the pure data structures —
           # symbol tables, arenas, section graphs — which is exactly where it is
           # strongest and where ASAN is weakest.
-          MIRIFLAGS: "-Zmiri-strict-provenance"
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-disable-isolation"
         run: cargo +nightly miri test -p reld-testkit --lib

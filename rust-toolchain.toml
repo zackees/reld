@@ -6,5 +6,5 @@
 # `-Zsanitizer=address` and `-Zbuild-std` are nightly-only. Pinning the repo
 # to nightly to serve those two jobs would make every other contributor
 # build on nightly for no reason.
-channel = "stable"
+channel = "1.94.1"
 components = ["rustfmt", "clippy"]

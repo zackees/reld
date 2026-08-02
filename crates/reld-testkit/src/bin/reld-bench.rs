@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use reld_testkit::{generate, WorkloadSpec};
+use reld_testkit::{WorkloadSpec, generate};
 
 #[derive(Parser, Debug)]
 #[command(

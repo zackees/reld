@@ -1,0 +1,6 @@
+reld: elf/x86_64/linker-diff-trivial/malfunction-elf-incorrect-type/linker-diff-trivial.c.reld
+ld: elf/x86_64/linker-diff-trivial/malfunction-elf-incorrect-type/linker-diff-trivial.c.ld
+file-header.type
+reld 0x4
+ld 0x2
+
