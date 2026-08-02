@@ -4,7 +4,6 @@
 //#LinkerDriver:gcc
 //#CompArgs:-flto -O1
 //#LinkArgs:-flto -O1 -nostdlib -Wl,-z,now
-//#DiffIgnore:section.got
 
 #include "../common/runtime.h"
 

@@ -507,6 +507,7 @@ pub(crate) fn symtab_name_for_strtab(raw_name: &[u8]) -> &[u8] {
 }
 
 impl platform::Platform for Elf {
+    const BINARY_FORMAT: reld_layout_schema::BinaryFormat = reld_layout_schema::BinaryFormat::Elf;
     const NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
     const NUM_BUILT_IN_REGULAR_SECTIONS: usize = RegularSectionId::Count as usize;
 

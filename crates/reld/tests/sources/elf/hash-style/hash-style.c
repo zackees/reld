@@ -3,10 +3,10 @@
 //#Mode:dynamic
 //#ReferenceLinkers:lld
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:section.relro_padding
-//#DiffIgnore:section.got.plt.entsize
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:section.relro_padding #13
+//#DiffIgnore:section.got.plt.entsize #13
 
 //#Config:both-hashes:default
 //#LinkArgs:--hash-style=both -shared -z now

@@ -15,6 +15,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_COMMAND: cargo
+  RUST_VERSION: 1.94.1
+  NIGHTLY_TOOLCHAIN: nightly-2026-08-01
+  CLANG_VERSION: 22.1.8
+  CLANG_PACKAGE_VERSION: "1:22.1.8~++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80"
+  LLD_VERSION: 18.1.8
+  MOLD_VERSION: 2.41.0
+  WILD_VERSION: 0.9.0
+  MSYS2_BINUTILS_VERSION: 2.46.1-2
+  MSVC_LINK_VERSION: "14.44"
+  APPLE_LD_VERSION: "1053.12"
+  LIBTINFO5_VERSION: "6.3-2ubuntu0.2"
 
 jobs:
   hygiene:
@@ -22,59 +34,357 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
         with:
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@cargo-deny
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo deny check licenses
+      - uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # cargo-deny
+        with:
+          tool: cargo-deny
+      - run: $CARGO_COMMAND fmt --all -- --check
+      - run: $CARGO_COMMAND clippy --workspace --all-targets -- -D warnings
+      - run: $CARGO_COMMAND deny check licenses
 
-  host-build:
-    name: Host build ${{ matrix.os }}
+  phase1-native:
+    name: Phase 1 / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-14]
+        include:
+          - name: linux-gnu x86_64
+            kind: linux-gnu
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - name: windows-gnu x86_64
+            kind: windows-gnu
+            os: windows-2022
+            target: x86_64-pc-windows-gnu
+          - name: windows-msvc x86_64
+            kind: windows-msvc
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - name: macos arm64
+            kind: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@1.94.1
-      - run: cargo build --workspace --all-targets
 
-  linux-acceptance:
-    name: Linux container acceptance (debug profile)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
+      - if: matrix.kind == 'windows-gnu'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
-          submodules: recursive
-      - name: Build the vendored development container
-        run: docker build -t reld-ci -f docker/ci/ubuntu.Dockerfile .
-      - name: Run the full workspace test suite
-        # The default dev profile intentionally keeps debug assertions enabled, so the
-        # RELD_MALFUNCTION integration cases remain active instead of silently disappearing.
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-clang
+
+      - if: matrix.kind == 'windows-msvc'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          toolset: "14.44"
+
+      - if: matrix.kind != 'macos-arm64'
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
+        with:
+          version: 18.1.8
+
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux fixture Rust toolchain
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
         run: |
-          docker run --rm \
-            -v "${PWD}:/src" \
-            -w /src \
-            reld-ci \
-            bash -lc 'RELD_TEST_CONFIG=/src/test-config-ci.toml cargo test --workspace'
+          set -euxo pipefail
+          rustup toolchain install "${NIGHTLY_TOOLCHAIN}" \
+            --profile minimal \
+            --target x86_64-unknown-linux-musl \
+            --component rustc-codegen-cranelift-preview
+          rustup toolchain list | grep -q "^${NIGHTLY_TOOLCHAIN}-x86_64-unknown-linux-gnu"
+          printf 'fn main() {}\n' > "${RUNNER_TEMP}/nightly-smoke.rs"
+          rustup run "${NIGHTLY_TOOLCHAIN}" rustc \
+            -Zcodegen-backend=cranelift \
+            --target x86_64-unknown-linux-musl \
+            "${RUNNER_TEMP}/nightly-smoke.rs" \
+            -o "${RUNNER_TEMP}/nightly-smoke"
+          "${RUNNER_TEMP}/nightly-smoke"
+
+      - name: Install host test tooling
+        uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # taplo-cli
+        with:
+          tool: taplo-cli@0.10.0
+
+      - name: Install Linux reference linkers
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/llvm-snapshot.gpg.key" https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo '8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d  '${RUNNER_TEMP}'/llvm-snapshot.gpg.key' | sha256sum --check
+          gpg --dearmor < "${RUNNER_TEMP}/llvm-snapshot.gpg.key" > "${RUNNER_TEMP}/llvm-snapshot.gpg"
+          sudo install -m 644 "${RUNNER_TEMP}/llvm-snapshot.gpg" /usr/share/keyrings/llvm-snapshot.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/llvm-22.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            "clang-22=${CLANG_PACKAGE_VERSION}" \
+            "llvm-22-linker-tools=${CLANG_PACKAGE_VERSION}"
+          curl -fsSL -o "${RUNNER_TEMP}/libtinfo5.deb" "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_${LIBTINFO5_VERSION}_amd64.deb"
+          echo 'b9bb64e716a7d9de05b1b33992763142ca81bcae3a7f8ce7e29fa3c6fd32f1e8  '${RUNNER_TEMP}'/libtinfo5.deb' | sha256sum --check
+          sudo apt-get install -y "${RUNNER_TEMP}/libtinfo5.deb"
+          mkdir -p "${RUNNER_TEMP}/refs" "${RUNNER_TEMP}/ref-bin"
+          curl -fsSL -o "${RUNNER_TEMP}/mold.tar.gz" "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz"
+          echo 'a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d  '${RUNNER_TEMP}'/mold.tar.gz' | sha256sum --check
+          tar -xzf "${RUNNER_TEMP}/mold.tar.gz" -C "${RUNNER_TEMP}/refs"
+          curl -fsSL -o "${RUNNER_TEMP}/wild.tar.gz" "https://github.com/davidlattimore/wild/releases/download/${WILD_VERSION}/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo 'deb6ee0e5caec798053ec4aafaba042e20a8edf91f08cb4d36268571cc628d3b  '${RUNNER_TEMP}'/wild.tar.gz' | sha256sum --check
+          tar -xzf "${RUNNER_TEMP}/wild.tar.gz" -C "${RUNNER_TEMP}/refs"
+          cp "$(find "${RUNNER_TEMP}/refs" -type f -path '*/bin/mold' | head -1)" "${RUNNER_TEMP}/ref-bin/mold"
+          cp "$(find "${RUNNER_TEMP}/refs" -type f -name wild | head -1)" "${RUNNER_TEMP}/ref-bin/ld.wild"
+          ln -s /usr/bin/clang-22 "${RUNNER_TEMP}/ref-bin/clang"
+          ln -s /usr/bin/clang++-22 "${RUNNER_TEMP}/ref-bin/clang++"
+          chmod +x "${RUNNER_TEMP}/ref-bin/mold" "${RUNNER_TEMP}/ref-bin/ld.wild"
+          echo "${RUNNER_TEMP}/ref-bin" >> "${GITHUB_PATH}"
+
+      - name: Verify and smoke Linux reference linkers
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ld.bfd --version | head -1 | tee versions.txt
+          ld.lld --version | head -1 | tee -a versions.txt
+          mold --version | head -1 | tee -a versions.txt
+          ld.wild --version | head -1 | tee -a versions.txt
+          clang --version | head -1 | tee -a versions.txt
+          ld.bfd --version | grep -q '2.42'
+          ld.lld --version | grep -q "${LLD_VERSION}"
+          mold --version | grep -q "${MOLD_VERSION}"
+          ld.wild --version | grep -q "${WILD_VERSION}"
+          clang --version | grep -q "${CLANG_VERSION}"
+          printf 'int fixture(void) { return 0; }\n' | clang -shared -nostdlib -flto -x c - -fuse-ld=bfd -o "${RUNNER_TEMP}/plugin-smoke.so"
+          printf 'int fixture(void) { return 0; }\n' | clang -c -x c - -Wa,--crel,--allow-experimental-crel -o "${RUNNER_TEMP}/crel-smoke.o"
+          printf '.global _start\n.text\n_start:\n  mov $60, %%rax\n  xor %%rdi, %%rdi\n  syscall\n' > "${RUNNER_TEMP}/smoke.S"
+          clang -c "${RUNNER_TEMP}/smoke.S" -o "${RUNNER_TEMP}/smoke.o"
+          for linker in ld.bfd ld.lld mold ld.wild; do
+            "${linker}" -e _start "${RUNNER_TEMP}/smoke.o" -o "${RUNNER_TEMP}/smoke-${linker}"
+            test -s "${RUNNER_TEMP}/smoke-${linker}"
+            "${RUNNER_TEMP}/smoke-${linker}"
+          done
+
+      - name: Verify and smoke Windows GNU reference linkers
+        if: matrix.kind == 'windows-gnu'
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          llvm_bin="$(cygpath -u "${LLVM_PATH}")/bin"
+          install -m 755 "${llvm_bin}/ld.lld.exe" /ucrt64/bin/ld.lld.exe
+          curl -fsSL -o "${RUNNER_TEMP}/binutils.pkg.tar.zst" "https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-binutils-${MSYS2_BINUTILS_VERSION}-any.pkg.tar.zst"
+          echo '631ff3c6d043a4eeca151415c313bda713537d4a7c6807eb7a2d4e7a026df89b  '${RUNNER_TEMP}'/binutils.pkg.tar.zst' | sha256sum --check
+          pacman -U --noconfirm "${RUNNER_TEMP}/binutils.pkg.tar.zst"
+          ld --version | head -1 | tee versions.txt
+          ld.lld --version | head -1 | tee -a versions.txt
+          ld.lld --version | grep -q "${LLD_VERSION}"
+          pacman -Q mingw-w64-ucrt-x86_64-binutils | tee -a versions.txt
+          pacman -Q mingw-w64-ucrt-x86_64-binutils | grep -q "${MSYS2_BINUTILS_VERSION}"
+          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/smoke.c"
+          clang "${RUNNER_TEMP}/smoke.c" -fuse-ld=bfd -o "${RUNNER_TEMP}/smoke-bfd.exe"
+          clang "${RUNNER_TEMP}/smoke.c" -fuse-ld=lld -o "${RUNNER_TEMP}/smoke-lld.exe"
+          "${RUNNER_TEMP}/smoke-bfd.exe"
+          "${RUNNER_TEMP}/smoke-lld.exe"
+
+      - name: Verify and smoke Windows MSVC reference linkers
+        if: matrix.kind == 'windows-msvc'
+        shell: pwsh
+        run: |
+          (& link.exe 2>&1 | Select-Object -First 2) | Set-Content versions.txt
+          (& lld-link --version 2>&1 | Select-Object -First 1) | Add-Content versions.txt
+          $versions = Get-Content versions.txt -Raw
+          if (-not $versions.Contains($env:MSVC_LINK_VERSION)) { throw "link.exe version drift" }
+          if (-not $versions.Contains($env:LLD_VERSION)) { throw "lld-link version drift" }
+          'int main(void) { return 0; }' | Set-Content "$env:RUNNER_TEMP\smoke.c"
+          cl.exe /nologo "$env:RUNNER_TEMP\smoke.c" "/Fe:$env:RUNNER_TEMP\smoke-link.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          clang-cl.exe /nologo -fuse-ld=lld "$env:RUNNER_TEMP\smoke.c" "/Fe:$env:RUNNER_TEMP\smoke-lld.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install macOS LLVM reference linker
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          brew install llvm@18
+          echo "$(brew --prefix llvm@18)/bin" >> "${GITHUB_PATH}"
+
+      - name: Verify and smoke macOS reference linkers
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          xcrun ld -v 2>&1 | head -2 | tee versions.txt
+          "$(brew --prefix llvm@18)/bin/ld64.lld" --version | head -1 | tee -a versions.txt
+          xcrun ld -v 2>&1 | grep -q "${APPLE_LD_VERSION}"
+          "$(brew --prefix llvm@18)/bin/ld64.lld" --version | grep -q "${LLD_VERSION}"
+          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/smoke.c"
+          clang "${RUNNER_TEMP}/smoke.c" -o "${RUNNER_TEMP}/smoke-apple-ld"
+          clang "${RUNNER_TEMP}/smoke.c" -fuse-ld="$(brew --prefix llvm@18)/bin/ld64.lld" -o "${RUNNER_TEMP}/smoke-lld"
+          "${RUNNER_TEMP}/smoke-apple-ld"
+          "${RUNNER_TEMP}/smoke-lld"
+
+      - name: Linux build and native tests
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND build --workspace --all-targets
+          bash ci/install-driver-shims.sh debug
+          $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
+          $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test acceptance-policy --test external-runner 2>&1 | tee -a platform-tests.log
+
+      - name: Linux relocation malfunction oracle
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+          RELD_TEST_NIGHTLY_TOOLCHAIN: ${{ env.NIGHTLY_TOOLCHAIN }}
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND test -p reld --test acceptance -- \
+            malfunction-elf-relocation-target-plus-one \
+            --test-threads=1 2>&1 | tee malfunction-tests.log
+
+      - name: Linux LTO fixture compatibility
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+          RELD_TEST_NIGHTLY_TOOLCHAIN: ${{ env.NIGHTLY_TOOLCHAIN }}
+        run: |
+          set -euxo pipefail
+          {
+            result=0
+            for test_name in \
+              elf/x86_64/wrap-lto/clang \
+              elf/x86_64/lto-integration/clang \
+              elf/x86_64/rust-integration-dynamic/lto \
+              elf/x86_64/rust-integration/linker-plugin-lto
+            do
+              $CARGO_COMMAND test -p reld --test acceptance -- \
+                "${test_name}" --exact --test-threads=1 || result=1
+            done
+            exit "${result}"
+          } 2>&1 | tee lto-tests.log
+
+      - name: Linux acceptance tests
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_VERIFY_PLATFORM_REQUIREMENTS: "1"
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+          RELD_TEST_NIGHTLY_TOOLCHAIN: ${{ env.NIGHTLY_TOOLCHAIN }}
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND test -p reld --test acceptance 2>&1 | tee acceptance-tests.log
+
+      - name: Linux differential tests
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND run --bin reld-difftest -- --seeds 100 --reference-linker bfd 2>&1 | tee difftest.log
+
+      - name: Linux mold corpus
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        env:
+          RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND test -p reld --test external -- mold 2>&1 | tee external-tests.log
+
+      - name: Windows GNU native tests
+        if: matrix.kind == 'windows-gnu'
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND build --workspace --all-targets --target "${{ matrix.target }}"
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld-core --lib 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
+
+      - name: Windows MSVC native tests
+        if: matrix.kind == 'windows-msvc'
+        shell: pwsh
+        run: |
+          & $env:CARGO_COMMAND build --workspace --all-targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | Tee-Object platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld-core --lib 2>&1 | Tee-Object -Append platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld --bins 2>&1 | Tee-Object -Append platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | Tee-Object -Append platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | Tee-Object -Append platform-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: macOS native tests
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          $CARGO_COMMAND build --workspace --all-targets
+          $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
+          $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
+          $CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
+
+      - name: Publish Linux counts and skips
+        if: always() && matrix.kind == 'linux-gnu'
+        shell: bash
+        run: >-
+          python ci/phase1_summary.py --job linux-gnu
+          --log platform-tests.log --log acceptance-tests.log --log difftest.log
+          --log external-tests.log --versions versions.txt --minimum-run 507
+          --exact-log-total difftest.log=100 --exact-log-total external-tests.log=407
+
+      - name: Publish Windows GNU counts and skips
+        if: always() && matrix.kind == 'windows-gnu'
+        shell: pwsh
+        run: python ci/phase1_summary.py --job windows-gnu --log platform-tests.log --versions versions.txt
+
+      - name: Publish Windows MSVC counts and skips
+        if: always() && matrix.kind == 'windows-msvc'
+        shell: pwsh
+        run: python ci/phase1_summary.py --job windows-msvc --log platform-tests.log --versions versions.txt
+
+      - name: Publish macOS counts and skips
+        if: always() && matrix.kind == 'macos-arm64'
+        shell: bash
+        run: python3 ci/phase1_summary.py --job macos-arm64 --log platform-tests.log --versions versions.txt
 
   python:
     name: Python
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - run: python -m pip install --quiet pillow pytest

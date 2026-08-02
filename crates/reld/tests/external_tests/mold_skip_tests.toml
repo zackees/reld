@@ -1,5 +1,6 @@
 [skipped_groups.unsupported_options]
-reason = "These tests use unsupported options"
+reason = "Reld does not yet implement one or more linker options exercised by these tests"
+tracking_issue = 14
 tests = [
   "audit.sh",
   "color-diagnostics.sh",
@@ -50,12 +51,41 @@ tests = [
   "warn-once.sh",
 ]
 
-[skipped_groups.version_script]
-reason = "Version script support"
-tests = ["version-script15.sh"]
+[skipped_groups.symbol_versioning]
+reason = "Reld's version-script and symbol-versioning implementations do not yet satisfy these cases"
+tracking_issue = 14
+tests = [
+  "empty-default-symver.sh",
+  "linker-script-version.sh",
+  "symver-dup.sh",
+  "version-script15.sh",
+  "version-script23.sh",
+  "versym-local-def.sh",
+]
+
+[skipped_groups.icf_semantics]
+reason = "Reld's identical-code-folding implementation does not yet preserve these preemption and alignment semantics"
+tracking_issue = 14
+tests = ["icf-alignment-bug.sh", "icf-preemption.sh"]
+
+[skipped_groups.as_needed_gc]
+reason = "Reld's --as-needed and --gc-sections interaction does not yet satisfy this case"
+tracking_issue = 14
+tests = ["as-needed-gc.sh"]
+
+[skipped_groups.static_dso]
+reason = "Reld does not yet match the required static-link handling and diagnostic for a DSO input"
+tracking_issue = 14
+tests = ["static-dso.sh"]
+
+[skipped_groups.symtab_binding]
+reason = "Reld does not yet emit the required symbol-table binding for this case"
+tracking_issue = 14
+tests = ["symtab-binding.sh"]
 
 [skipped_groups.z_options]
-reason = "Related to -z"
+reason = "Reld does not yet implement the required -z option semantics"
+tracking_issue = 14
 tests = [
   "z-cet-report.sh",
   "z-dynamic-undefined-weak-exe.sh",
@@ -68,7 +98,8 @@ tests = [
 ]
 
 [skipped_groups.arch_x86_64]
-reason = "x86_64 specific tests"
+reason = "Architecture-specific mold tests are excluded from the Phase 1 native-only ratchet"
+tracking_issue = 14
 tests = [
   "arch-x86_64-address-equality.sh",
   "arch-x86_64-empty-mergeable-section.sh",
@@ -94,18 +125,21 @@ tests = [
 ]
 
 [skipped_groups.arch_aarch64]
-reason = "Aarch64 specific tests"
+reason = "Architecture-specific mold tests are excluded from the Phase 1 native-only ratchet"
+tracking_issue = 14
 tests = [
   "arch-aarch64-long-thunk.sh",
   "arch-aarch64-range-extension-thunk-disassembly.sh",
 ]
 
 [skipped_groups.arch_riscv64]
-reason = "RISC-V specific tests"
+reason = "Architecture-specific mold tests are excluded from the Phase 1 native-only ratchet"
+tracking_issue = 14
 tests = ["arch-riscv64-relax-got.sh", "arch-riscv64-reloc-overflow.sh"]
 
 [skipped_groups.arch_loongarch64]
-reason = "LoongArch64 specific tests"
+reason = "Architecture-specific mold tests are excluded from the Phase 1 native-only ratchet"
+tracking_issue = 14
 tests = [
   "arch-loongarch64-relax-call36.sh",
   "arch-loongarch64-relax-got-load.sh",
@@ -114,15 +148,18 @@ tests = [
 ]
 
 [skipped_groups.arch_ppc64le]
-reason = "ppc64le specific tests"
+reason = "Architecture-specific mold tests are excluded from the Phase 1 native-only ratchet"
+tracking_issue = 14
 tests = ["arch-ppc64le-save-restore-gprs.sh"]
 
 [skipped_groups.tls]
-reason = "Related to TLS"
+reason = "Reld's TLS relocation semantics do not yet satisfy these cases"
+tracking_issue = 14
 tests = ["tls-common.sh", "tls-le-error.sh"]
 
 [skipped_groups.ignore]
-reason = "We ignore these tests for some reasons"
+reason = "Known output or diagnostic differences from GNU-family semantics; see per-test comments"
+tracking_issue = 14
 tests = [
   "arch-riscv64-global-pointer.sh", # GNU ld and lld do not export `__global_pointer$` to `.dynsym`.
   "arch-riscv64-obj-compatible.sh", # Different message formats
@@ -176,6 +213,7 @@ tests = [
 
 [skipped_groups.lto]
 reason = "Failing LTO tests."
+tracking_issue = 14
 tests = [
   "lto-no-plugin.sh",       # We don't currently support LTO without an explicit plugin
   "lto-gcc.sh",             # We don't currently support LTO without an explicit plugin
@@ -188,6 +226,7 @@ tests = [
 
 [skipped_groups.uncommon]
 reason = "These tests use uncommon features and are therefore likely not supported by Reld, at least for the time being."
+tracking_issue = 14
 tests = [
   "filler.sh",
   "no-quick-exit.sh",
@@ -204,7 +243,8 @@ tests = [
 ]
 
 [skipped_groups.misc]
-reason = "Not grouped yet"
+reason = "Known unsupported behavior awaiting classification in the mold burn-down issue"
+tracking_issue = 14
 tests = [
   "bno-symbolic.sh",
   "canonical-plt.sh",

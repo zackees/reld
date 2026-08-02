@@ -4,11 +4,10 @@
 //#CompArgs:-fno-PIC
 //#Mode:dynamic
 //#Shared:force-dynamic-linking.c
-//#DiffIgnore:section.got
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:rel.undefined-weak.dynamic.R_X86_64_GLOB_DAT
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:rel.undefined-weak.dynamic.R_X86_64_GLOB_DAT #13
 
 #include "../common/runtime.h"
 

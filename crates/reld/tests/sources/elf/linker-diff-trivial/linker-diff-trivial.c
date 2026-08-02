@@ -5,6 +5,10 @@
 //#Malfunction:elf-incorrect-type
 //#Arch:x86_64
 
+//#Config:malfunction-elf-relocation-target-plus-one:default
+//#Malfunction:elf-relocation-target-plus-one
+//#Arch:x86_64
+
 #include "../common/runtime.h"
 
 void _start(void) {

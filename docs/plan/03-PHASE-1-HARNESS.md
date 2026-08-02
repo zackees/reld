@@ -40,7 +40,8 @@ ExpectSym:{name} [props]       NoSym:{name}
 ExpectDynSym:{name} [props]    NoDynSym:{name}
 ExpectSection:{name}           NoSection:{name}      ExpectSectionBytes:{name}=0x{hex}
 ExpectDynamic:{tag}            ExpectError:{regex}   Contains:{string}
-RunEnabled:{bool}              DiffEnabled:{bool}    DiffIgnore:{key}   DiffMatchAny:{bool}
+RunEnabled:{bool}              DiffEnabled:{bool}    DiffMatchAny:{bool}
+DiffIgnore:{key} #{issue} [arch={a}[,{b}...]]
 Malfunction:{id}               Requires{Glibc,NightlyRustc,LinkerPlugin,...}:{bool}
 ```
 

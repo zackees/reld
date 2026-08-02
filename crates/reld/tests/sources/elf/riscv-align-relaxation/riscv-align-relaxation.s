@@ -2,7 +2,7 @@
 //#Arch: riscv64
 //#CompArgs: -march=rv64gc
 //#LinkArgs: -nostdlib -static
-//#DiffIgnore:file-header.entry
+//#DiffIgnore:file-header.entry #13
 */
 
 .globl _start

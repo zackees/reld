@@ -29,6 +29,7 @@ use reld_reloc::elf::secnames::*;
 use reld_reloc::utils::slice_from_all_bytes;
 use section_map::IndexedLayout;
 use section_map::LayoutAndFiles;
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
@@ -76,6 +77,14 @@ pub struct Config {
     #[arg(long, value_delimiter = ',')]
     pub ignore: Vec<String>,
 
+    /// Fail if a caller-supplied ignore does not suppress any observed difference.
+    #[arg(long)]
+    pub ratchet_ignores: bool,
+
+    /// Inherited ignores with mandatory per-entry tracking provenance.
+    #[arg(skip)]
+    reld_default_ignores: Vec<TrackedIgnore>,
+
     /// Show only the specified keys.
     #[arg(long, value_delimiter = ',')]
     pub only: Vec<String>,
@@ -92,6 +101,11 @@ pub struct Config {
     /// Print information about what sections did and didn't get diffed.
     #[arg(long)]
     pub coverage: bool,
+
+    /// Minimum percentage of input relocations that the semantic oracle must analyze. This is
+    /// enforced whenever --coverage is enabled.
+    #[arg(long, default_value = "50")]
+    pub coverage_floor: Option<u8>,
 
     /// Display names for input files.
     #[arg(long, value_delimiter = ',', value_name = "NAME,NAME...")]
@@ -110,6 +124,21 @@ pub struct Config {
 
     /// Primary file that we're validating against the reference file(s)
     pub file: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct TrackedIgnore {
+    pattern: String,
+    tracking_issue: u64,
+}
+
+impl TrackedIgnore {
+    fn new(pattern: &str, tracking_issue: u64) -> Self {
+        Self {
+            pattern: pattern.to_owned(),
+            tracking_issue,
+        }
+    }
 }
 
 /// An output binary such as an executable or shared object.
@@ -143,198 +172,209 @@ impl Config {
     }
 
     fn apply_reld_defaults(&mut self, arch: ArchKind) {
-        self.ignore.extend(
-            [
-                // We don't currently support allocating space except in sections, so we have
-                // sections to hold the section and program headers. We then need
-                // to ignore them because GNU ld doesn't define such sections.
-                "section.shdr",
-                "section.phdr",
-                // We don't yet support these sections.
-                "section.data.rel.ro",
-                // We set this to 8. GNU ld sometimes does too, but sometimes to 0.
-                "section.got.entsize",
-                "section.plt.got.entsize",
-                "section.plt.entsize",
-                // GNU ld sometimes sets this differently that we do.
-                "section.plt",
-                "section.plt.alignment",
-                "section.bss.alignment",
-                "section.gnu.build.attributes",
-                "section.annobin.notes.entsize",
-                // We don't yet group .lrodata sections separately.
-                "section.lrodata",
-                // We sometimes eliminate __tls_get_addr where GNU ld doesn't. This can mean that
-                // we have no versioned symbols for ld-linux-x86-64.so.2 or
-                // equivalent, which means we end up with one less version record.
-                ".dynamic.DT_VERNEEDNUM",
-                // We currently handle these dynamic tags differently
-                ".dynamic.DT_JMPREL",
-                ".dynamic.DT_PLTGOT",
-                ".dynamic.DT_PLTREL",
-                // We currently produce a .got.plt whenever we produce .plt, but GNU ld doesn't
-                "section.got.plt",
-                GOT_PLT_SECTION_NAME_STR,
-                // We don't currently produce a separate .plt.sec section.
-                "section.plt.sec",
-                // Different hash values due to different implementations.
-                ".dynamic.DT_HASH",
-                // Different hash values due to different implementations.
-                ".hash",
-                "section.hash.alignment",
-                "section.hash.entsize",
-                // Some other linkers seem to generate a `.hash` section even when there are no
-                // dynamic symbols.
-                "section.hash",
-                // aarch64-linux-gnu-ld on arch linux emits DT_BIND_NOW instead of
-                // DT_FLAGS.BIND_NOW
-                ".dynamic.DT_BIND_NOW",
-                ".dynamic.DT_FLAGS.BIND_NOW",
-                // When GNU ld encounters a GOT-forming reference to an ifunc, it generates a
-                // canonical PLT entry and points the GOT at that. This means that it ends up with
-                // GOT->PLT->GOT. We don't as yet support doing this.
-                "rel.missing-got-plt-got",
-                // We do support this. TODO: Should definitely look into why we're seeing this
-                // missing in our output.
-                "section.rela.plt",
-                // We currently write 10 byte PLT entries in some cases where GNU ld writes 8 byte
-                // ones.
-                "section.plt.got.alignment",
-                // GNU ld sometimes makes this writable sometimes not. Presumably this depends on
-                // whether there are relocations or some flags.
-                "section.eh_frame.flags",
-                // TLSDESC relaxations aren't yet implemented.
-                "rel.match_failed.R_X86_64_GOTPC32_TLSDESC",
-                "rel.match_failed.R_X86_64_CODE_4_GOTPC32_TLSDESC",
+        // Every inherited default below is tracked independently. Do not add an untyped string:
+        // the report validates the typed list before using these patterns.
+        let mut defaults = Vec::from([
+            // We don't currently support allocating space except in sections, so we have
+            // sections to hold the section and program headers. We then need
+            // to ignore them because GNU ld doesn't define such sections.
+            TrackedIgnore::new("section.shdr", 13),
+            TrackedIgnore::new("section.phdr", 13),
+            // We don't yet support these sections.
+            TrackedIgnore::new("section.data.rel.ro", 13),
+            // We set this to 8. GNU ld sometimes does too, but sometimes to 0.
+            TrackedIgnore::new("section.got.entsize", 13),
+            TrackedIgnore::new("section.plt.got.entsize", 13),
+            TrackedIgnore::new("section.plt.entsize", 13),
+            // GNU ld sometimes sets this differently that we do.
+            TrackedIgnore::new("section.plt", 13),
+            TrackedIgnore::new("section.plt.alignment", 13),
+            TrackedIgnore::new("section.bss.alignment", 13),
+            TrackedIgnore::new("section.gnu.build.attributes", 13),
+            TrackedIgnore::new("section.annobin.notes.entsize", 13),
+            // We don't yet group .lrodata sections separately.
+            TrackedIgnore::new("section.lrodata", 13),
+            // We sometimes eliminate __tls_get_addr where GNU ld doesn't. This can mean that
+            // we have no versioned symbols for ld-linux-x86-64.so.2 or
+            // equivalent, which means we end up with one less version record.
+            TrackedIgnore::new(".dynamic.DT_VERNEEDNUM", 13),
+            // We currently handle these dynamic tags differently
+            TrackedIgnore::new(".dynamic.DT_JMPREL", 13),
+            TrackedIgnore::new(".dynamic.DT_PLTGOT", 13),
+            TrackedIgnore::new(".dynamic.DT_PLTREL", 13),
+            // We currently produce a .got.plt whenever we produce .plt, but GNU ld doesn't
+            TrackedIgnore::new("section.got.plt", 13),
+            TrackedIgnore::new(GOT_PLT_SECTION_NAME_STR, 13),
+            // We don't currently produce a separate .plt.sec section.
+            TrackedIgnore::new("section.plt.sec", 13),
+            // Different hash values due to different implementations.
+            TrackedIgnore::new(".dynamic.DT_HASH", 13),
+            // Different hash values due to different implementations.
+            TrackedIgnore::new(".hash", 13),
+            TrackedIgnore::new("section.hash.alignment", 13),
+            TrackedIgnore::new("section.hash.entsize", 13),
+            // Some other linkers seem to generate a `.hash` section even when there are no
+            // dynamic symbols.
+            TrackedIgnore::new("section.hash", 13),
+            // aarch64-linux-gnu-ld on arch linux emits DT_BIND_NOW instead of
+            // DT_FLAGS.BIND_NOW
+            TrackedIgnore::new(".dynamic.DT_BIND_NOW", 13),
+            TrackedIgnore::new(".dynamic.DT_FLAGS.BIND_NOW", 13),
+            // When GNU ld encounters a GOT-forming reference to an ifunc, it generates a
+            // canonical PLT entry and points the GOT at that. This means that it ends up with
+            // GOT->PLT->GOT. We don't as yet support doing this.
+            TrackedIgnore::new("rel.missing-got-plt-got", 13),
+            // We do support this. TODO: Should definitely look into why we're seeing this
+            // missing in our output.
+            TrackedIgnore::new("section.rela.plt", 13),
+            // We currently write 10 byte PLT entries in some cases where GNU ld writes 8 byte
+            // ones.
+            TrackedIgnore::new("section.plt.got.alignment", 13),
+            // GNU ld sometimes makes this writable sometimes not. Presumably this depends on
+            // whether there are relocations or some flags.
+            TrackedIgnore::new("section.eh_frame.flags", 13),
+            // TLSDESC relaxations aren't yet implemented.
+            TrackedIgnore::new("rel.match_failed.R_X86_64_GOTPC32_TLSDESC", 13),
+            TrackedIgnore::new("rel.match_failed.R_X86_64_CODE_4_GOTPC32_TLSDESC", 13),
+            TrackedIgnore::new(
                 "rel.missing-opt.R_X86_64_TLSDESC_CALL.SkipTlsDescCall.*",
-                // Reld eliminates GOTPCRELX in statically linked executables even for undefined
-                // symbols, whereas other linkers don't. This is a valid optimisation that other
-                // linkers don't currently do.
+                13,
+            ),
+            // Reld eliminates GOTPCRELX in statically linked executables even for undefined
+            // symbols, whereas other linkers don't. This is a valid optimisation that other
+            // linkers don't currently do.
+            TrackedIgnore::new(
                 "rel.extra-opt.R_X86_64_GOTPCRELX.CallIndirectToRelative.static-*",
-                // Reld applies MovIndirectToLea relaxation to _DYNAMIC symbol in static builds
-                // because it's marked as NON_INTERPOSABLE. GNU ld keeps the GOT-relative access.
-                // Both are correct, but Reld's approach is more optimized.
+                13,
+            ),
+            // Reld applies MovIndirectToLea relaxation to _DYNAMIC symbol in static builds
+            // because it's marked as NON_INTERPOSABLE. GNU ld keeps the GOT-relative access.
+            // Both are correct, but Reld's approach is more optimized.
+            TrackedIgnore::new(
                 "rel.extra-opt.R_X86_64_REX_GOTPCRELX.MovIndirectToLea.static-*",
-                // We don't yet support emitting warnings.
-                "section.gnu.warning",
-                // GNU ld sometimes applies relaxations that we don't yet.
-                "rel.match_failed.R_AARCH64_TLSDESC_LD64_LO12",
-                "rel.match_failed.R_AARCH64_TLSGD_ADD_LO12_NC",
+                13,
+            ),
+            // We don't yet support emitting warnings.
+            TrackedIgnore::new("section.gnu.warning", 13),
+            // GNU ld sometimes applies relaxations that we don't yet.
+            TrackedIgnore::new("rel.match_failed.R_AARCH64_TLSDESC_LD64_LO12", 13),
+            TrackedIgnore::new("rel.match_failed.R_AARCH64_TLSGD_ADD_LO12_NC", 13),
+            TrackedIgnore::new(
                 "rel.missing-opt.R_X86_64_TLSGD.TlsGdToInitialExec.shared-object",
-                // GNU ld sometimes relaxes an adrp instruction to an adr instruction when the
-                // address is known and within +/-1MB. We don't as yet.
-                "rel.missing-opt.R_AARCH64_ADR_GOT_PAGE.AdrpToAdr.*",
-                "rel.missing-opt.R_AARCH64_ADR_PREL_PG_HI21.AdrpToAdr.*",
+                13,
+            ),
+            // GNU ld sometimes relaxes an adrp instruction to an adr instruction when the
+            // address is known and within +/-1MB. We don't as yet.
+            TrackedIgnore::new("rel.missing-opt.R_AARCH64_ADR_GOT_PAGE.AdrpToAdr.*", 13),
+            TrackedIgnore::new("rel.missing-opt.R_AARCH64_ADR_PREL_PG_HI21.AdrpToAdr.*", 13),
+            TrackedIgnore::new(
                 "rel.extra-opt.R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21.MovzXnLsl16.*",
-                // LLD does some different relaxations to us
+                13,
+            ),
+            // LLD does some different relaxations to us
+            TrackedIgnore::new(
                 "rel.missing-opt.R_AARCH64_ADR_GOT_PAGE.ReplaceWithNop.*",
+                13,
+            ),
+            TrackedIgnore::new(
                 "rel.missing-opt.R_AARCH64_ADR_PREL_PG_HI21.ReplaceWithNop.*",
-                // The other linkers set properties on sections if all input sections have that
-                // property. For sections like .rodata, this seems like an unimportant behaviour to
-                // replicate.
-                "section.rodata.entsize",
-                "section.rodata.flags",
-                // We emit dynamic relocations for direct references to undefined weak symbols that
-                // might be provided at runtime as well as GOT entries for indirect references. GNU
-                // ld and lld only emit the GOT entries and leave direct references as null. Our
-                // behaviour seems more consistent with the description of
-                // `-zdynamic-undefined-weak`.
-                "rel.undefined-weak.dynamic.R_X86_64_64",
-                "rel.undefined-weak.dynamic.R_AARCH64_ABS64",
-                // On aarch64, GNU ld, at least sometimes, converts R_AARCH64_ABS64 to a
-                // PLT-forming relocation. We at present, don't.
-                "rel.dynamic-plt-bypass",
-                // If we don't optimise a TLS access, then we'll have references to __tls_get_addr,
-                // when GNU ld doesn't.
-                "dynsym.__tls_get_addr.*",
-                // GNU ld emits two segments, whereas reld emits only a single segment.
-                "segment.LOAD.R.*",
-                // We haven't provided an implementation that is compatible with existing linkers.
-                "segment.PHDR.*",
-                "segment.GNU_RELRO.*",
-                "segment.GNU_STACK.*",
-                // Reld currently generates PT_NOTE even for non-alloc note sections, while the
-                // other linkers don't.
-                "segment.NOTE.*",
-                // TODO: RISC-V
-                "segment.LOAD.RW.alignment",
-                // TODO: Latest lld sometimes doesn’t create a .note.gnu.property section even when
-                // Reld does.
-                "segment.GNU_PROPERTY.alignment",
-                "segment.GNU_PROPERTY.flags",
-                // TODO: We consider SFrame sections experimental and disabled by default.
-                "segment.GNU_SFRAME.alignment",
-                "segment.GNU_SFRAME.flags",
-                "section.sframe",
-                // Different linkers put the PLT in different locations relative to .text, so
-                // whether range-extension thunks are needed varies.
-                "rel.plt.extra-thunk",
-                "rel.plt.absent-thunk",
-                // On some systems Reld outputs these symbols while GNU ld does not.
-            ]
-            .into_iter()
-            .map(ToOwned::to_owned),
-        );
+                13,
+            ),
+            // The other linkers set properties on sections if all input sections have that
+            // property. For sections like .rodata, this seems like an unimportant behaviour to
+            // replicate.
+            TrackedIgnore::new("section.rodata.entsize", 13),
+            TrackedIgnore::new("section.rodata.flags", 13),
+            // We emit dynamic relocations for direct references to undefined weak symbols that
+            // might be provided at runtime as well as GOT entries for indirect references. GNU
+            // ld and lld only emit the GOT entries and leave direct references as null. Our
+            // behaviour seems more consistent with the description of
+            // `-zdynamic-undefined-weak`.
+            TrackedIgnore::new("rel.undefined-weak.dynamic.R_X86_64_64", 13),
+            TrackedIgnore::new("rel.undefined-weak.dynamic.R_AARCH64_ABS64", 13),
+            // On aarch64, GNU ld, at least sometimes, converts R_AARCH64_ABS64 to a
+            // PLT-forming relocation. We at present, don't.
+            TrackedIgnore::new("rel.dynamic-plt-bypass", 13),
+            // If we don't optimise a TLS access, then we'll have references to __tls_get_addr,
+            // when GNU ld doesn't.
+            TrackedIgnore::new("dynsym.__tls_get_addr.*", 13),
+            // GNU ld emits two segments, whereas reld emits only a single segment.
+            TrackedIgnore::new("segment.LOAD.R.*", 13),
+            // We haven't provided an implementation that is compatible with existing linkers.
+            TrackedIgnore::new("segment.PHDR.*", 13),
+            TrackedIgnore::new("segment.GNU_RELRO.*", 13),
+            TrackedIgnore::new("segment.GNU_STACK.*", 13),
+            // Reld currently generates PT_NOTE even for non-alloc note sections, while the
+            // other linkers don't.
+            TrackedIgnore::new("segment.NOTE.*", 13),
+            // TODO: RISC-V
+            TrackedIgnore::new("segment.LOAD.RW.alignment", 13),
+            // TODO: Latest lld sometimes doesn’t create a .note.gnu.property section even when
+            // Reld does.
+            TrackedIgnore::new("segment.GNU_PROPERTY.alignment", 13),
+            TrackedIgnore::new("segment.GNU_PROPERTY.flags", 13),
+            // TODO: We consider SFrame sections experimental and disabled by default.
+            TrackedIgnore::new("segment.GNU_SFRAME.alignment", 13),
+            TrackedIgnore::new("segment.GNU_SFRAME.flags", 13),
+            TrackedIgnore::new("section.sframe", 13),
+            // Different linkers put the PLT in different locations relative to .text, so
+            // whether range-extension thunks are needed varies.
+            TrackedIgnore::new("rel.plt.extra-thunk", 13),
+            TrackedIgnore::new("rel.plt.absent-thunk", 13),
+            // On some systems Reld outputs these symbols while GNU ld does not.
+        ]);
 
         match arch {
-            ArchKind::Aarch64 => self.ignore.extend(
-                [
-                    "section.ARM.attributes",
-                    // Other linkers have a bigger initial PLT entry, thus the entsize is set to
-                    // zero: https://sourceware.org/bugzilla/show_bug.cgi?id=26312
-                    "section.plt.entsize",
-                    // On Alpine Linux, aarch64, GNU ld seems to emit the _DYNAMIC symbol without a
-                    // section index instead of pointing it at the .dynamic section.
-                    "rel.extra-symbol._DYNAMIC",
-                    // Also on Alpine Linux, aarch64, it seems that GNU ld is emitting an
-                    // unnecessary GLOB_DAT relocation in a GOT entry.
-                    "rel.missing-got-dynamic.executable",
-                    // GNU ld replaces calls to undefined symbols with nop. Reld instead encodes
-                    // bl 0x0 so that if the call site is reached, it will crash rather than
-                    // silently continuing execution.
-                    "rel.missing-opt.R_AARCH64_CALL26.ReplaceWithNop.*",
-                    "rel.missing-opt.R_AARCH64_JUMP26.ReplaceWithNop.*",
-                ]
-                .into_iter()
-                .map(ToOwned::to_owned),
-            ),
-            ArchKind::RiscV64 => self.ignore.extend(
-                [
-                    // TODO: for some reason, main is put into .dynsym by GNU ld.
-                    "dynsym.main.section",
-                    // GOT entries may differ due to unimplemented relaxations
-                    "section.got.*",
-                    // Dynamic relocations may differ
-                    "rel.dynamic.*",
-                    "rel.undefined-weak.*",
-                    // Symbol address inconsistencies due to different optimizations
-                    "error.*",
-                    "section-diff-failed*",
-                    // .relro_padding is showing up on risc-v.
-                    "section.relro_padding",
-                ]
-                .into_iter()
-                .map(ToOwned::to_owned),
-            ),
+            ArchKind::Aarch64 => defaults.extend([
+                TrackedIgnore::new("section.ARM.attributes", 13),
+                // Other linkers have a bigger initial PLT entry, thus the entsize is set to
+                // zero: https://sourceware.org/bugzilla/show_bug.cgi?id=26312
+                TrackedIgnore::new("section.plt.entsize", 13),
+                // On Alpine Linux, aarch64, GNU ld seems to emit the _DYNAMIC symbol without a
+                // section index instead of pointing it at the .dynamic section.
+                TrackedIgnore::new("rel.extra-symbol._DYNAMIC", 13),
+                // Also on Alpine Linux, aarch64, it seems that GNU ld is emitting an
+                // unnecessary GLOB_DAT relocation in a GOT entry.
+                TrackedIgnore::new("rel.missing-got-dynamic.executable", 13),
+                // GNU ld replaces calls to undefined symbols with nop. Reld instead encodes
+                // bl 0x0 so that if the call site is reached, it will crash rather than
+                // silently continuing execution.
+                TrackedIgnore::new("rel.missing-opt.R_AARCH64_CALL26.ReplaceWithNop.*", 13),
+                TrackedIgnore::new("rel.missing-opt.R_AARCH64_JUMP26.ReplaceWithNop.*", 13),
+            ]),
+            ArchKind::RiscV64 => defaults.extend([
+                // TODO: for some reason, main is put into .dynsym by GNU ld.
+                TrackedIgnore::new("dynsym.main.section", 13),
+                // GOT entries may differ due to unimplemented relaxations
+                TrackedIgnore::new("section.got.*", 13),
+                // Dynamic relocations may differ
+                TrackedIgnore::new("rel.dynamic.*", 13),
+                TrackedIgnore::new("rel.undefined-weak.*", 13),
+                // Symbol address inconsistencies due to different optimizations
+                TrackedIgnore::new("error.*", 13),
+                TrackedIgnore::new("section-diff-failed*", 13),
+                // .relro_padding is showing up on risc-v.
+                TrackedIgnore::new("section.relro_padding", 13),
+            ]),
             ArchKind::X86_64 => {}
             ArchKind::Ppc64 => {}
-            ArchKind::LoongArch64 => self.ignore.extend(
-                [
-                    "section.sdata",
-                    "section.iplt",
-                    "rel.unknown_failure*",
-                    "literal-byte-mismatch*",
-                    "error.*",
-                    "section-diff-failed*",
-                    // GNU ld replaces calls to undefined symbols with nop. Reld instead encodes
-                    // bl 0x0 so that if the call site is reached, it will crash rather than
-                    // silently continuing execution.
-                    "rel.missing-opt.R_LARCH_B26.ReplaceWithNop.*",
-                ]
-                .into_iter()
-                .map(ToOwned::to_owned),
-            ),
+            ArchKind::LoongArch64 => defaults.extend([
+                TrackedIgnore::new("section.sdata", 13),
+                TrackedIgnore::new("section.iplt", 13),
+                TrackedIgnore::new("rel.unknown_failure*", 13),
+                TrackedIgnore::new("literal-byte-mismatch*", 13),
+                TrackedIgnore::new("error.*", 13),
+                TrackedIgnore::new("section-diff-failed*", 13),
+                // GNU ld replaces calls to undefined symbols with nop. Reld instead encodes
+                // bl 0x0 so that if the call site is reached, it will crash rather than
+                // silently continuing execution.
+                TrackedIgnore::new("rel.missing-opt.R_LARCH_B26.ReplaceWithNop.*", 13),
+            ]),
         }
+
+        self.ignore
+            .extend(defaults.iter().map(|entry| entry.pattern.clone()));
+        self.reld_default_ignores = defaults;
 
         self.equiv.push((
             GOT_SECTION_NAME_STR.to_owned(),
@@ -559,6 +599,8 @@ pub struct Report {
     config: Config,
 
     pub coverage: Option<Coverage>,
+
+    used_ignores: RefCell<std::collections::HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -579,6 +621,9 @@ struct SectionCoverage {
 
     /// The size of the section in bytes.
     num_bytes: u64,
+
+    total_relocations: u64,
+    diffed_relocations: u64,
 }
 
 impl Report {
@@ -620,6 +665,8 @@ impl Report {
 
         let arch = ArchKind::from_objects(&objects)?;
 
+        let ratcheted_ignores = config.ratchet_ignores.then(|| config.ignore.clone());
+
         if config.reld_defaults {
             config.apply_reld_defaults(arch);
         }
@@ -632,10 +679,43 @@ impl Report {
                 colour: config.colour,
                 ..Coverage::default()
             }),
+            used_ignores: RefCell::new(std::collections::HashSet::new()),
             config,
         };
 
         report.run_on_objects(&objects, arch);
+
+        if report
+            .config
+            .reld_default_ignores
+            .iter()
+            .any(|entry| entry.tracking_issue == 0)
+        {
+            report.add_error("reld default ignore is missing a tracking issue");
+        }
+
+        if let Some(ratcheted_ignores) = ratcheted_ignores {
+            let unused = ratcheted_ignores
+                .iter()
+                .filter(|pattern| !report.used_ignores.borrow().contains(*pattern))
+                .cloned()
+                .collect_vec();
+            for pattern in unused {
+                report.add_error(format!(
+                    "ignore `{pattern}` is no longer needed; remove it from the fixture"
+                ));
+            }
+        }
+
+        if let (Some(coverage), Some(floor)) =
+            (report.coverage.as_ref(), report.config.coverage_floor)
+            && coverage.relocation_percentage() < u64::from(floor)
+        {
+            report.add_error(format!(
+                "ELF relocation coverage {}% is below the required {floor}% floor",
+                coverage.relocation_percentage()
+            ));
+        }
 
         Ok(report)
     }
@@ -726,6 +806,12 @@ impl Report {
         !self.diffs.is_empty()
     }
 
+    /// Caller-supplied ignore patterns that suppressed at least one observed difference.
+    #[must_use]
+    pub fn used_ignores(&self) -> std::collections::HashSet<String> {
+        self.used_ignores.borrow().clone()
+    }
+
     #[must_use]
     pub fn should_ignore(&self, key: &str) -> bool {
         if !self.config.only.is_empty() {
@@ -739,9 +825,19 @@ impl Report {
         }
         self.config.ignore.iter().any(|i| {
             if let Some(prefix) = i.strip_suffix('*') {
-                key.starts_with(prefix)
+                if key.starts_with(prefix) {
+                    self.used_ignores.borrow_mut().insert(i.clone());
+                    true
+                } else {
+                    false
+                }
             } else {
-                key == *i
+                if key == *i {
+                    self.used_ignores.borrow_mut().insert(i.clone());
+                    true
+                } else {
+                    false
+                }
             }
         })
     }
@@ -805,6 +901,8 @@ impl Display for Coverage {
 
         let mut total_bytes = 0;
         let mut total_diffed = 0;
+        let mut total_relocations = 0;
+        let mut diffed_relocations = 0;
 
         for sec in self.sections.values() {
             writeln!(
@@ -824,15 +922,41 @@ impl Display for Coverage {
             }
 
             total_bytes += sec.num_bytes;
+            total_relocations += sec.total_relocations;
+            diffed_relocations += sec.diffed_relocations;
         }
 
         writeln!(
             f,
             "Diffed {total_diffed} of {total_bytes} section bytes ({}%)",
-            total_diffed * 100 / total_bytes
+            if total_bytes == 0 {
+                0
+            } else {
+                total_diffed * 100 / total_bytes
+            }
+        )?;
+        writeln!(
+            f,
+            "ELF relocation coverage: {diffed_relocations} of {total_relocations} ({}%)",
+            self.relocation_percentage()
         )?;
 
         Ok(())
+    }
+}
+
+impl Coverage {
+    /// Number of relocations analyzed by the semantic oracle and total relocations observed.
+    #[must_use]
+    pub fn relocation_counts(&self) -> (u64, u64) {
+        let total = self.sections.values().map(|s| s.total_relocations).sum();
+        let diffed = self.sections.values().map(|s| s.diffed_relocations).sum();
+        (diffed, total)
+    }
+
+    fn relocation_percentage(&self) -> u64 {
+        let (diffed, total) = self.relocation_counts();
+        if total == 0 { 0 } else { diffed * 100 / total }
     }
 }
 

@@ -5,7 +5,7 @@
 
 //#Config:no-gc:default
 //#LinkArgs:-z now --no-gc-sections
-//#DiffIgnore: segment.LOAD.RW.alignment
+//#DiffIgnore: segment.LOAD.RW.alignment #13
 
 // With --gc-sections enabled, all code gets eliminated and there's nothing to run. If we try to
 // execute this binary, it will segfault, so we don't. #Config:gc:default #LinkArgs:-z now

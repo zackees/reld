@@ -1,0 +1,26 @@
+reld: elf/x86_64/linker-diff-trivial/malfunction-elf-relocation-target-plus-one/linker-diff-trivial.c.reld
+ld: elf/x86_64/linker-diff-trivial/malfunction-elf-relocation-target-plus-one/linker-diff-trivial.c.ld
+rel.R_X86_64_PC32.R_X86_64_PC32
+`elf/x86_64/linker-diff-trivial/malfunction-elf-relocation-target-plus-one/linker-diff-trivial.c.o` .text _start
+R_X86_64_PLT32
+ORIG runtime_init -4
+R_X86_64_PC32 NoOp
+reld runtime_init +1
+reld TRACE: relaxation applied relaxation=NoOp, flags=NON_INTERPOSABLE | DIRECT | HAS_NON_IR_REF,
+reld TRACE: rel_kind=Relative,
+reld TRACE: value=0xd, symbol_name=runtime_init
+R_X86_64_PC32 NoOp
+ld   runtime_init
+
+rel.R_X86_64_PC32.R_X86_64_PC32
+`elf/x86_64/linker-diff-trivial/malfunction-elf-relocation-target-plus-one/linker-diff-trivial.c.o` .text _start
+R_X86_64_PLT32
+ORIG exit_syscall -4
+R_X86_64_PC32 NoOp
+reld exit_syscall +1
+reld TRACE: relaxation applied relaxation=NoOp, flags=NON_INTERPOSABLE | DIRECT | HAS_NON_IR_REF,
+reld TRACE: rel_kind=Relative,
+reld TRACE: value=0xe, symbol_name=exit_syscall
+R_X86_64_PC32 NoOp
+ld   exit_syscall
+

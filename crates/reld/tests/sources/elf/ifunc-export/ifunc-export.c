@@ -5,10 +5,10 @@
 //#Shared:ifunc-export-1.c:-fPIC
 //#RequiresGlibc:true
 //#Arch:x86_64
-//#DiffIgnore:section.rodata
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.data
-//#DiffIgnore:dynsym.foo.section
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:section.data #13
+//#DiffIgnore:dynsym.foo.section #13
 
 typedef void (*Func)(void);
 static int foo_called = 0;

@@ -1,6 +1,6 @@
 //#LinkerDriver:clang++
-//#DiffIgnore:section.__unwind_info
-//#DiffIgnore:section.__gcc_except_tab
+//#DiffIgnore:section.__unwind_info #13
+//#DiffIgnore:section.__gcc_except_tab #13
 
 #include <iostream>
 

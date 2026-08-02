@@ -7,9 +7,8 @@
 //#Shared:symver-shared-1.c
 //#Shared:symver-shared-2.c
 //#Mode:dynamic
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:.dynamic.DT_RELA* #13
 //#LinkArgs:--version-script=./symver-shared.map -znow
 //#RequiresGlibc:true
 

@@ -12,7 +12,11 @@
 //#Config:clang:default
 //#Compiler:clang
 //#LinkerDriver:clang
-//#ReferenceLinkers:lld
+// Clang LTO bitcode requires a matching LLVMgold plugin. CI keeps its general LLD reference pin,
+// so use BFD with the matching LLVMgold plugin for this LTO-specific reference.
+//#ReferenceLinkers:bfd
+// TODO(#13): BFD+LLVMgold emits SHT_X86_64_UNWIND while reld uses SHT_PROGBITS.
+//#DiffIgnore:section.eh_frame.type #13
 
 #include "../common/runtime.h"
 

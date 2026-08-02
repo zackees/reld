@@ -1,8 +1,5 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.data
-//#DiffIgnore:section.data.alignment
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.rodata.alignment
+//#DiffIgnore:section.rodata #13
 
 //#Config:pie:default
 //#SkipArch: ppc64le

@@ -4,10 +4,8 @@
 //#AbstractConfig:default
 //#Shared:shared.c
 //#CompArgs:-fPIC
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.data
-//#DiffIgnore:section.eh_frame.alignment
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:section.rodata #13
 //#SkipArch:ppc64le
 
 //#Config:gcc:default

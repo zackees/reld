@@ -5,13 +5,10 @@
 //#CompArgs:-fPIC
 //#Object:runtime.c
 //#Mode:dynamic
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 // TODO: RISC-V BFD linker keeps the symbol in .dynsym section
-//#DiffIgnore:section.rela.dyn
-//#DiffIgnore:dynsym.var1.section
+//#DiffIgnore:section.rela.dyn #13 arch=riscv64
+//#DiffIgnore:dynsym.var1.section #13 arch=riscv64
 
 //#Config:shared-first-archive-not-loaded:default
 //#SkipArch: ppc64le

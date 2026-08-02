@@ -7,8 +7,8 @@
 //#Shared:copy-relocations-2.c
 //#Object:copy-relocations-3.c:-fPIC
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:dynsym.w2.section
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:dynsym.w2.section #13
 //#ExpectSym:_start section=".text"
 //#ExpectSym:w4
 //#DiffMatchAny:true

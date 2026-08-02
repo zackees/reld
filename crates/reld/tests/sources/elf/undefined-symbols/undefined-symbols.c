@@ -1,11 +1,12 @@
 //#AbstractConfig:default
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:file-header.entry
 
 //#Config:shared-lib:default
 //#LinkArgs:--shared -z now
 //#RunEnabled:false
+// TODO(#13): Reld emits empty RELA metadata that BFD and LLD omit for this shared object.
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 
 //#Config:no-undefined:default
 //#LinkArgs:--shared --no-undefined

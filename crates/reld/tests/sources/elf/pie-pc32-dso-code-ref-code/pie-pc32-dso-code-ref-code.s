@@ -5,12 +5,11 @@
 //#SoSingleLinker:reld
 //#LinkArgs:-pie
 //#RunEnabled:false
-//#EnableLinker:lld
-//#SkipLinker:ld
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:section.got.plt.entsize
+//#ReferenceLinkers:lld
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:section.got.plt.entsize #13
 .global _start
 _start:
     call zed_fn

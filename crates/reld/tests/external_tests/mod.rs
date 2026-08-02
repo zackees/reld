@@ -1,7 +1,7 @@
 mod mold_tests;
 
-use crate::Filter;
-use crate::Result;
+use super::Filter;
+use super::Result;
 use libtest_mimic::Trial;
 use std::env;
 use std::io::Write;
@@ -10,15 +10,15 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 use std::sync::OnceLock;
+use std::time::Duration;
+
+use super::external_process;
+use super::external_process::TimedOutput;
+
+const EXTERNAL_TEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub(super) fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
-    if cfg!(feature = "mold_tests") {
-        mold_tests::collect_tests(tests, filter)?;
-    }
-
-    let _ = (tests, filter);
-
-    Ok(())
+    mold_tests::collect_tests(tests, filter)
 }
 
 #[derive(Clone, Debug)]
@@ -101,52 +101,39 @@ fn get_fakes_dir() -> &'static Path {
 }
 
 enum FakesDir {
-    Static(PathBuf),
     Temp(tempfile::TempDir),
 }
 
 impl FakesDir {
     fn new(linker: &ExternalLinker) -> Result<Self> {
-        match linker {
-            ExternalLinker::Reld => {
-                let current_dir = env::current_dir().expect("failed to get current directory");
-                let fakes = current_dir.parent().unwrap().join("fakes-debug");
-                assert!(
-                    fakes.exists(),
-                    "fakes-debug directory not found at {}",
-                    fakes.display()
-                );
-                Ok(FakesDir::Static(fakes))
-            }
-            ExternalLinker::ThirdParty { path, name } => {
-                let tmp = tempfile::tempdir()
-                    .expect("failed to create temp directory for external linker fakes");
-                let tmp_path = tmp.path();
+        let (path, name) = match linker {
+            ExternalLinker::Reld => (super::reld_path().to_owned(), "reld"),
+            ExternalLinker::ThirdParty { path, name } => (path.clone(), name.as_str()),
+        };
+        let tmp =
+            tempfile::tempdir().expect("failed to create temp directory for external linker fakes");
+        let tmp_path = tmp.path();
 
-                for link_name in &["mold", "ld", "ld.lld"] {
-                    let link = tmp_path.join(link_name);
-                    // Note, we can't just create a symlink, since lld requires that it's invoked as
-                    // "ld.lld" to work properly. Instead, we create a wrapper script.
-                    let script_contents = format!("#!/bin/bash\nexec {} \"$@\"\n", path.display());
-                    let mut file = std::fs::File::create(&link)?;
-                    file.write_all(script_contents.as_bytes())?;
-                    reld_core::make_executable(&file)?;
-                }
-
-                eprintln!(
-                    "external_tests: using linker '{name}' ({}) via fakes dir {}",
-                    path.display(),
-                    tmp_path.display()
-                );
-
-                Ok(FakesDir::Temp(tmp))
-            }
+        for link_name in &["mold", "ld", "ld.lld"] {
+            let link = tmp_path.join(link_name);
+            // We can't use a symlink: lld selects its driver mode from argv[0].
+            let script_contents = format!("#!/bin/bash\nexec '{}' \"$@\"\n", path.display());
+            let mut file = std::fs::File::create(&link)?;
+            file.write_all(script_contents.as_bytes())?;
+            reld_core::make_executable(&file)?;
         }
+
+        eprintln!(
+            "external_tests: using linker '{name}' ({}) via fakes dir {}",
+            path.display(),
+            tmp_path.display()
+        );
+
+        Ok(FakesDir::Temp(tmp))
     }
 
     fn path(&self) -> &Path {
         match self {
-            FakesDir::Static(p) => p.as_path(),
             FakesDir::Temp(t) => t.path(),
         }
     }
@@ -192,5 +179,13 @@ fn run_external_test(external_test: &Path, extra_env: &[(&str, &str)]) -> Result
         command.env(key, value);
     }
 
-    command.output().map_err(Into::into)
+    match external_process::output_with_timeout(&mut command, EXTERNAL_TEST_TIMEOUT)? {
+        TimedOutput::Completed(output) => Ok(output),
+        TimedOutput::TimedOut => Err(format!(
+            "External test `{}` timed out after {} seconds; terminated its process group",
+            external_test.display(),
+            EXTERNAL_TEST_TIMEOUT.as_secs(),
+        )
+        .into()),
+    }
 }

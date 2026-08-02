@@ -2,11 +2,11 @@
 // Create a .got.plt section to force ld to include a PT_GNU_RELRO program header
 //#Shared:runtime.c
 //#Mode:dynamic
-//#DiffIgnore:section.got
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:section.got #13
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 
 //#Config:enabled:default
 //#SkipArch: ppc64le

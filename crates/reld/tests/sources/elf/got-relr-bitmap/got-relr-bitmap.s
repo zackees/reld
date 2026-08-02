@@ -10,9 +10,9 @@
 //#LinkArgs:-shared -z pack-relative-relocs --no-relax
 //#RunEnabled:false
 //#ReferenceLinkers:lld
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
-//#DiffIgnore:section.got.plt.entsize
-//#DiffIgnore:rel.R_X86_64_REX_GOTPCRELX.R_X86_64_REX_GOTPCRELX
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
+//#DiffIgnore:section.got.plt.entsize #13
+//#DiffIgnore:rel.R_X86_64_REX_GOTPCRELX.R_X86_64_REX_GOTPCRELX #13
 //
 //#Config:x86_64:default
 //#Arch:x86_64

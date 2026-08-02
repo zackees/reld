@@ -2,7 +2,7 @@
 //#Object:runtime.c
 //#LinkArgs:-e _custom_entry
 //#ExpectEntry:_custom_entry
-//#DiffIgnore:section.__unwind_info
+//#DiffIgnore:section.__unwind_info #13
 
 #include "../common/runtime.h"
 

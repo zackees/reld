@@ -1,7 +1,6 @@
 //#Mode:dynamic
 //#RunEnabled:false
 //#LinkArgs:-shared -z now -T ./linker-script.ld
-//#DiffIgnore:section.got
 //#ExpectDynSym:start_bar section="bar",offset-in-section=0
 //#ExpectDynSym:start_aaa section="bar",offset-in-section=8
 //#ExpectDynSym:end_bar section="bar",offset-in-section=12
@@ -15,8 +14,8 @@
 //#ExpectSym:sections_start address=0xabcd
 //#ExpectSym:sections_end address=0xcdef
 // Different linkers emit different corresponding sections.
-//#DiffIgnore:dynsym.sections_start.section
-//#DiffIgnore:dynsym.sections_end.section
+//#DiffIgnore:dynsym.sections_start.section #13
+//#DiffIgnore:dynsym.sections_end.section #13
 
 static int foo1 __attribute__((used, section(".data.foo"))) = 0x01;
 

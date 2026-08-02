@@ -5,10 +5,7 @@
 //#LinkArgs:-z now
 //#Shared:data-pointers-2.c
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
-// GNU ld emits a .got section for the shared object, despite it not being
-// necessary.
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 //#DiffMatchAny:true
 
 #include "../common/runtime.h"

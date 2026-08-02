@@ -1,10 +1,8 @@
 //#AbstractConfig:default
 //#LinkerDriver:gcc
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.data
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.rodata.alignment
-//#DiffIgnore:rel.match_failed.R_AARCH64_TLSGD_ADR_PAGE21
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:section.rodata.alignment #13 arch=aarch64,riscv64,loongarch64
+//#DiffIgnore:rel.match_failed.R_AARCH64_TLSGD_ADR_PAGE21 #13
 
 //#Config:gcc:default
 //#CompArgs:-fpic
@@ -17,6 +15,8 @@
 //#CompArgs:-fpic
 //#Shared:tls-variant-1.c:-mtls-dialect=gnu2,tls-variant-2.c:-ftls-model=global-dynamic,tls-variant-3.c:-ftls-model=initial-exec
 //#Arch: x86_64
+// TODO(#13): Reld records the fixture DSO's path while BFD records its SONAME-equivalent path.
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 //#Config:gcc-tls-trad:default
 //#CompArgs:-fpic
@@ -31,7 +31,7 @@
 //#SkipArch: x86_64
 //#RequiresCompilerFlags:-mtls-dialect=trad
 // Similarly to Mold, Reld also sets STATIC_TLS flag.
-//#DiffIgnore:.dynamic.DT_FLAGS.STATIC_TLS
+//#DiffIgnore:.dynamic.DT_FLAGS.STATIC_TLS #13
 
 int foo(void);
 int bar(void);

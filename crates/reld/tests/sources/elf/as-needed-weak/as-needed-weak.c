@@ -7,11 +7,7 @@
 // incorrectly activated; exit with fn1() (1) so the test fails. If fn1 is null the lib was
 // correctly excluded; exit 42. force-dynamic-linking.c is linked without --as-needed so both Reld
 // and GNU ld produce a dynamic binary, enabling a meaningful diff.
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.got
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:rel.undefined-weak.dynamic.R_X86_64_GLOB_DAT
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 #include "../common/runtime.h"
 

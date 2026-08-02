@@ -1,9 +1,9 @@
 // Test that linker-defined symbols with PROVIDE semantics don't conflict with user-defined symbols
 //#Object:runtime.c
-//#DiffIgnore:section.data
-//#DiffIgnore:section-diff-failed..data
-//#DiffIgnore:segment.TLS.alignment
-//#DiffIgnore:segment.TLS.flags
+//#DiffIgnore:section.data #13
+//#DiffIgnore:section-diff-failed..data #13
+//#DiffIgnore:segment.TLS.alignment #13
+//#DiffIgnore:segment.TLS.flags #13
 //#ExpectSym:_end
 //#ExpectSym:__init_array_start
 //#ExpectSym:__init_array_end

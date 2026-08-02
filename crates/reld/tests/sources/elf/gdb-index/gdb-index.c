@@ -6,7 +6,7 @@
 
 //#Config:enabled:default
 //#LinkArgs:--gdb-index
-//#DiffIgnore:section.gdb_index
+//#DiffIgnore:section.gdb_index #13
 //#ExpectSection:.gdb_index
 //#ExpectGdbIndexCuCount:3
 //#ExpectGdbIndexSymbol:compute
@@ -27,7 +27,7 @@
 
 //#Config:with-strip-all:default
 //#LinkArgs:--gdb-index --strip-all
-//#DiffIgnore:file-header.entry
+//#DiffIgnore:file-header.entry #13
 //#NoSection:.gdb_index
 
 #include "../common/runtime.h"

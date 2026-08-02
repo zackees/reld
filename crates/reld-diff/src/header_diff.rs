@@ -22,7 +22,6 @@ use object::macho::LC_CODE_SIGNATURE;
 use object::macho::LC_DYLD_CHAINED_FIXUPS;
 use object::read::elf::Dyn;
 use object::read::macho::LoadCommandVariant;
-use object::read::macho::MachHeader;
 use reld_reloc::elf::SectionFlags;
 #[allow(clippy::wildcard_imports)]
 use reld_reloc::elf::secnames::*;
@@ -243,44 +242,7 @@ pub(crate) fn report_section_diffs(report: &mut Report, objects: &[Binary]) {
             |object| {
                 let section = section_or_equiv(object, name, &report.config)
                     .ok_or_else(|| anyhow!("Section missing"))?;
-                let e = object.file.endianness();
-                let mut values = FieldValues::default();
-
-                match object.file {
-                    object::File::Elf64(elf_file) => {
-                        let section = elf_file.section_by_index(section.index())?;
-
-                        values.insert("alignment", section.align(), Converter::None, object);
-                        let section_header = section.elf_section_header();
-                        values.insert(
-                            "link",
-                            section_header.sh_link.get(e),
-                            Converter::SectionIndex,
-                            object,
-                        );
-                        values.insert(
-                            "flags",
-                            section_header.sh_flags.get(e).0,
-                            Converter::SectionFlags,
-                            object,
-                        );
-                        values.insert(
-                            "type",
-                            section_header.sh_type.get(e).0,
-                            Converter::None,
-                            object,
-                        );
-                        values.insert(
-                            "entsize",
-                            section_header.sh_entsize.get(e),
-                            Converter::None,
-                            object,
-                        );
-                    }
-                    _ => {}
-                }
-
-                Ok(values)
+                structural_format(object)?.section_header_fields(object, section.index())
             },
             &table_name,
             DiffMode::Normal,
@@ -496,47 +458,92 @@ impl FieldValues {
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
 fn read_file_header_fields(obj: &Binary) -> Result<FieldValues> {
-    let mut values = FieldValues::default();
-    match &obj.file {
-        object::File::Elf64(elf_file) => {
-            let header = elf_file.elf_header();
-            let e = elf_file.endianness();
-            values.insert_string("ident", format!("{:?}", header.e_ident.magic));
-            values.insert("type", header.e_type.get(e).0, Converter::None, obj);
-            values.insert("machine", header.e_machine.get(e).0, Converter::None, obj);
-            values.insert("version", header.e_version.get(e), Converter::None, obj);
-            values.insert("entry", header.e_entry.get(e), Converter::SymAddress, obj);
-            values.insert("phoff", header.e_phoff.get(e), Converter::None, obj);
-            values.insert("flags", header.e_flags.get(e).0, Converter::None, obj);
-            values.insert("ehsize", header.e_ehsize.get(e), Converter::None, obj);
-            values.insert("phentsize", header.e_phentsize.get(e), Converter::None, obj);
-            values.insert("shentsize", header.e_shentsize.get(e), Converter::None, obj);
-            values.insert(
-                "shstrndx",
-                header.e_shstrndx.get(e).0,
-                Converter::SectionIndex,
-                obj,
-            );
-            // We currently ignore e_shoff, e_phnum and e_shnum, since we don't really expect them
-            // the same number of sections and program segments and the section header
-            // offset is also generally going to be different between different linkers.
-        }
-        object::File::MachO64(file) => {
-            let header = file.macho_header();
-            let e = file.endianness();
-            values.insert("magic", header.magic(), Converter::None, obj);
-            values.insert_string(
-                "cputype",
-                header.cputype(e).name().unwrap_or("none").to_owned(),
-            );
-            values.insert("cpusubtype", header.cpusubtype(e).0, Converter::None, obj);
-            values.insert("filetype", header.filetype(e).0, Converter::None, obj);
-        }
-        _ => {}
+    structural_format(obj)?.file_header_fields(obj)
+}
+
+/// Structural comparisons are format-dispatched from the first implementation. The default
+/// methods deliberately fail: returning an empty field set would make an unsupported format
+/// compare equal to itself and silently turn the oracle green.
+trait StructuralFormat {
+    fn file_header_fields(&self, _obj: &Binary) -> Result<FieldValues> {
+        bail!("structural diff is not implemented for this object format")
     }
-    Ok(values)
+
+    fn section_header_fields(
+        &self,
+        _obj: &Binary,
+        _section_index: object::SectionIndex,
+    ) -> Result<FieldValues> {
+        bail!("section structural diff is not implemented for this object format")
+    }
+}
+
+struct ElfStructuralFormat;
+
+impl StructuralFormat for ElfStructuralFormat {
+    fn file_header_fields(&self, obj: &Binary) -> Result<FieldValues> {
+        let object::File::Elf64(elf_file) = &obj.file else {
+            bail!("ELF structural differ received a non-ELF object")
+        };
+        let header = elf_file.elf_header();
+        let e = elf_file.endianness();
+        let mut values = FieldValues::default();
+        values.insert_string("ident", format!("{:?}", header.e_ident.magic));
+        values.insert("type", header.e_type.get(e).0, Converter::None, obj);
+        values.insert("machine", header.e_machine.get(e).0, Converter::None, obj);
+        values.insert("version", header.e_version.get(e), Converter::None, obj);
+        values.insert("entry", header.e_entry.get(e), Converter::SymAddress, obj);
+        values.insert("phoff", header.e_phoff.get(e), Converter::None, obj);
+        values.insert("flags", header.e_flags.get(e).0, Converter::None, obj);
+        values.insert("ehsize", header.e_ehsize.get(e), Converter::None, obj);
+        values.insert("phentsize", header.e_phentsize.get(e), Converter::None, obj);
+        values.insert("shentsize", header.e_shentsize.get(e), Converter::None, obj);
+        values.insert(
+            "shstrndx",
+            header.e_shstrndx.get(e).0,
+            Converter::SectionIndex,
+            obj,
+        );
+        Ok(values)
+    }
+
+    fn section_header_fields(
+        &self,
+        obj: &Binary,
+        section_index: object::SectionIndex,
+    ) -> Result<FieldValues> {
+        let object::File::Elf64(elf_file) = &obj.file else {
+            bail!("ELF structural differ received a non-ELF object")
+        };
+        let section = elf_file.section_by_index(section_index)?;
+        let e = elf_file.endianness();
+        let mut values = FieldValues::default();
+        values.insert("alignment", section.align(), Converter::None, obj);
+        let header = section.elf_section_header();
+        values.insert("link", header.sh_link.get(e), Converter::SectionIndex, obj);
+        values.insert(
+            "flags",
+            header.sh_flags.get(e).0,
+            Converter::SectionFlags,
+            obj,
+        );
+        values.insert("type", header.sh_type.get(e).0, Converter::None, obj);
+        values.insert("entsize", header.sh_entsize.get(e), Converter::None, obj);
+        Ok(values)
+    }
+}
+
+static ELF_STRUCTURAL_FORMAT: ElfStructuralFormat = ElfStructuralFormat;
+
+fn structural_format(obj: &Binary) -> Result<&'static dyn StructuralFormat> {
+    match obj.file {
+        object::File::Elf64(_) => Ok(&ELF_STRUCTURAL_FORMAT),
+        _ => bail!(
+            "structural diff is not implemented for {:?}; refusing an empty comparison",
+            obj.file.format()
+        ),
+    }
 }
 
 fn read_dynamic_fields(obj: &Binary) -> Result<FieldValues> {

@@ -5,8 +5,8 @@
 //#LinkArgs:-shared --no-gc-sections --sort-section=alignment
 //#RunEnabled:false
 //#ReferenceLinkers:bfd
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
-//#DiffIgnore:segment.LOAD.RX.alignment
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
+//#DiffIgnore:segment.LOAD.RX.alignment #13
 //#Config:x86_64:default
 //#Arch:x86_64
 //#ExpectSectionBytes:.data=0x3300000000000000 0..8

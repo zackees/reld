@@ -12,7 +12,7 @@
 //#Config:dynamic:default
 //#Mode:dynamic
 //#Shared:force-dynamic-linking.c
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 #include "../common/ptr_black_box.h"
 #include "../common/runtime.h"

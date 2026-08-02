@@ -4,7 +4,7 @@
 //#Object:runtime.c
 //#LinkArgs:--strip-all
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:file-header.entry
+//#DiffIgnore:file-header.entry #13
 
 //#Config:single-threaded:default
 //#Object:runtime.c
@@ -35,7 +35,7 @@
 //#Config:strip-debug-strip-all
 //#Object:runtime.c
 //#LinkArgs:--strip-debug --strip-all
-//#DiffIgnore:file-header.entry
+//#DiffIgnore:file-header.entry #13
 //#NoSym:_start
 
 // The later --strip-debug flag should override --strip-all.

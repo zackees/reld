@@ -8,8 +8,8 @@
 //#LinkArgs:-Bshareable -z now -z undefs
 //#Mode:dynamic
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 
 int foo(void);
 

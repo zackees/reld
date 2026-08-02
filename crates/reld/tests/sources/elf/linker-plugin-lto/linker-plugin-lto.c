@@ -1,7 +1,7 @@
 //#AbstractConfig:default
 // TODO: Investigate why we don't emit _IO_stdin_used which is in .rodata.
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.got
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:section.got #13
 //#RequiresLinkerPlugin:true
 
 //#AbstractConfig:error
@@ -21,7 +21,7 @@
 //#LinkArgs:-Wl,-znow -flto -nostdlib -O0
 //#Object:runtime.c
 //#Object:linker-plugin-lto-2.c
-//#DiffIgnore:section.eh_frame.type
+//#DiffIgnore:section.eh_frame.type #13
 
 //#Config:clang-thin:default
 //#Compiler:clang
@@ -30,7 +30,7 @@
 //#LinkArgs:-Wl,-znow -flto=thin -nostdlib -O0
 //#Object:runtime.c
 //#Object:linker-plugin-lto-2.c
-//#DiffIgnore:section.eh_frame.type
+//#DiffIgnore:section.eh_frame.type #13
 
 //#Config:clang-link-gcc:error
 //#Compiler:clang

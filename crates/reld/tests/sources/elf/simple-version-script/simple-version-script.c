@@ -9,7 +9,6 @@
 //#ExpectDynSym:bar
 //#NoDynSym:aaa1
 //#NoDynSym:aaa2
-//#DiffIgnore:section.got
 
 #define WEAK __attribute__((weak))
 

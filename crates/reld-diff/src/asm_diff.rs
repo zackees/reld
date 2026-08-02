@@ -141,9 +141,7 @@ pub(crate) fn report_section_diffs<A: Arch>(report: &mut Report, binaries: &[Bin
                 .unwrap_or("unknown-section")
         );
 
-        if !report.should_ignore(&section_diff_key)
-            && let Err(error) = compare_sections::<A>(report, section_versions, binaries, layout)
-        {
+        if let Err(error) = compare_sections::<A>(report, section_versions, binaries, layout) {
             report.add_diff(Diff {
                 key: section_diff_key,
                 values: DiffValues::PreFormatted(error.to_string()),
@@ -160,14 +158,6 @@ fn compare_sections<A: Arch>(
 ) -> Result {
     let original_section = section_versions.original_section(layout)?;
 
-    if let Some(coverage) = report.coverage.as_mut()
-        && let Some(sec_cov) = coverage
-            .sections
-            .get_mut(&section_versions.input_section_id)
-    {
-        sec_cov.diffed = true;
-    }
-
     // We already filtered input sections based on their kind. Now we filter based on the output
     // section into which the input section was placed. If we don't do this, we're likely to end up
     // diffing input sections like '.ctors' which are often just set to PROGBITS.
@@ -175,6 +165,16 @@ fn compare_sections<A: Arch>(
         .is_some_and(|output_section_kind| !SUPPORTED_SECTION_KINDS.contains(&output_section_kind))
     {
         return Ok(());
+    }
+
+    if let Some(coverage) = report.coverage.as_mut()
+        && let Some(sec_cov) = coverage
+            .sections
+            .get_mut(&section_versions.input_section_id)
+    {
+        // Literal-byte comparison covers relocation-free sections too. Relocation coverage is
+        // accounted separately, after each relocation group is processed successfully.
+        sec_cov.diffed = true;
     }
 
     let mut testers = binaries
@@ -202,6 +202,7 @@ fn compare_sections<A: Arch>(
 
     while let Some(group) = RelocationGroup::<A>::next(&mut relocations, section_versions, layout)?
     {
+        let group_relocation_count = group.relocations.len() as u64;
         diff_literal_bytes::<A>(
             report,
             section_versions,
@@ -281,6 +282,15 @@ fn compare_sections<A: Arch>(
                     &mut relocations,
                 )?;
             }
+        }
+
+        if let Some(coverage) = report.coverage.as_mut()
+            && let Some(sec_cov) = coverage
+                .sections
+                .get_mut(&section_versions.input_section_id)
+        {
+            sec_cov.diffed = true;
+            sec_cov.diffed_relocations += group_relocation_count;
         }
     }
 
@@ -4018,6 +4028,8 @@ fn populate_section_coverage(cov: &mut crate::Coverage, layout: &IndexedLayout<'
                     .to_owned(),
                 name: String::from_utf8_lossy(name).into_owned(),
                 num_bytes: elf_section.size(),
+                total_relocations: elf_section.relocations().count() as u64,
+                diffed_relocations: 0,
                 diffed: false,
             },
         );

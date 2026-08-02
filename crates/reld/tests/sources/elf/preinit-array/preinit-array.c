@@ -1,12 +1,10 @@
 //#Object:preinit-array.s
 //#Shared:runtime.c
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:segment.LOAD.RW.alignment
-//#DiffIgnore:.dynamic.DT_PREINIT_ARRAY
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:segment.LOAD.RW.alignment #13
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 //#Arch: x86_64
 //#RequiresGlibc:true
 //#Mode:dynamic

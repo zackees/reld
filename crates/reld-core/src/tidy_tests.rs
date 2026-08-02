@@ -140,6 +140,9 @@ fn check_text_files() -> Result {
         "target",
         "build",
         "external_test_suites",
+        // A separately checked-out binary-fixture submodule. Its checkout
+        // policy is independent of this repository's `.gitattributes`.
+        "bins",
         "fakes-debug",
         "fakes",
     ];

@@ -15,21 +15,20 @@
 //#ExpectSym:__data_end
 // GNU ld doesn't emit unreferenced `PROVIDE` symbols
 //#NoSym:unreferenced_symbol
-//#DiffIgnore:.dynamic.*
-//#DiffIgnore:section.got
-//#DiffIgnore:section.rela.dyn
-//#DiffIgnore:segment.LOAD.RX.alignment
-//#DiffIgnore:segment.LOAD.RWX.alignment
-//#DiffIgnore:rel.extra-opt.R_X86_64_REX_GOTPCRELX.MovIndirectToLea.invalid-shared-object
-//#DiffIgnore:rel.missing-got-dynamic.shared-object
-//#DiffIgnore:rel.R_AARCH64_ADR_GOT_PAGE.R_AARCH64_ADR_GOT_PAGE
+//#DiffIgnore:.dynamic.* #13
+//#DiffIgnore:section.got #13
+//#DiffIgnore:section.rela.dyn #13
+//#DiffIgnore:segment.LOAD.RX.alignment #13
+//#DiffIgnore:segment.LOAD.RWX.alignment #13
+//#DiffIgnore:rel.extra-opt.R_X86_64_REX_GOTPCRELX.MovIndirectToLea.invalid-shared-object #13
+//#DiffIgnore:rel.R_AARCH64_ADR_GOT_PAGE.R_AARCH64_ADR_GOT_PAGE #13
 // GNU ld behaves strangely when a symbol referenced in a linker script is empty. See this:
 // https://github.com/wild-linker/wild/pull/1525#discussion_r2785478582
-//#DiffIgnore:dynsym.__data_start.section
-//#DiffIgnore:dynsym.__data_end.section
-//#DiffIgnore:dynsym.__sections_end.section
+//#DiffIgnore:dynsym.__data_start.section #13
+//#DiffIgnore:dynsym.__data_end.section #13
+//#DiffIgnore:dynsym.__sections_end.section #13
 // Different linkers emit different first sections.
-//#DiffIgnore:dynsym.__sections_start.section
+//#DiffIgnore:dynsym.__sections_start.section #13
 
 extern char provided_absolute __attribute__((weak));
 extern char provided_hidden_absolute __attribute__((weak));

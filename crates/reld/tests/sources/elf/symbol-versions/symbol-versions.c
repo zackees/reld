@@ -1,9 +1,9 @@
 //#AbstractConfig:verdef
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_FLAGS*
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:file-header.entry
+//#DiffIgnore:.dynamic.DT_FLAGS* #13
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:file-header.entry #13
 //#Object:runtime.c
 
 //#Config:verneed
@@ -28,7 +28,7 @@
 //#LinkerDriver:gcc
 //#CompArgs:-flto -znow
 //#LinkArgs:--shared -Wl,--version-script=./symbol-versions-script.map -flto
-//#DiffIgnore:eh_frame
+//#DiffIgnore:eh_frame #13
 
 //#Config:with-escaping:verdef
 //#SkipArch: ppc64le

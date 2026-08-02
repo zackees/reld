@@ -10,8 +10,8 @@
 //#RunEnabled:false
 //#Shared:force-dynamic-linking.c
 //#LinkArgs:--unresolved-symbols=ignore-all -z now
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:section.got #13
 
 //#Config:report-all:default
 //#LinkArgs:--unresolved-symbols=report-all

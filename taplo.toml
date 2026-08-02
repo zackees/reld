@@ -1,1 +1,7 @@
-exclude = [".cargo-home/**", "external_test_suites/**", "target/**"]
+exclude = [
+  ".cargo-home/**",
+  "crates/reld/tests/bins/**",
+  "external_test_suites/**",
+  "reld/tests/bins/**",
+  "target/**",
+]

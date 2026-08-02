@@ -4,9 +4,9 @@
 //#CompArgs:-fPIC
 //#Object:runtime.c
 //#Mode:dynamic
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 //#Config:archive:default
 //#SkipArch: ppc64le

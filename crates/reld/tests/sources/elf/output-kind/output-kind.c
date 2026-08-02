@@ -4,7 +4,6 @@
 
 //#AbstractConfig:default
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:section.relro_padding
 
 // `-no-pie` should override `-shared`, and `-pie --dynamic-linker ..` should result in dynamic PIE.
 // LLD rejects this with an error.
@@ -12,7 +11,6 @@
 //#LinkArgs:-shared -z now -pie
 //#Object:runtime.c
 //#Mode:dynamic
-//#DiffIgnore:section.got
 
 // `-no-pie` should override `-shared`. LLD rejects this with an error.
 //#Config:no-pie-over-shared
@@ -26,7 +24,7 @@
 //#Object:runtime.c
 //#Shared:empty.c
 //#Mode:dynamic
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 
 // With GNU ld non-loaded DSO has no effect on output kind, but LLD's approach
 // simplifies code a lot.

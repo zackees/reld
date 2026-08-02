@@ -6,12 +6,9 @@
 //#LinkArgs:-z now
 //#Shared:trivial-dynamic-2.c
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
-// We put a GLOB_DAT in .rela.dyn, other linkers use a JUMP_SLOT in .rela.plt.
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 // On aarch64, GNU ld seems to emit a GOT in the shared object even though it isn't needed.
-//#DiffIgnore:section.got
+//#DiffIgnore:section.got #13 arch=aarch64
 //#ExpectSym:_start section=".text"
 //#ExpectSym:foo_ptr section=".data"
 //#DiffMatchAny:true
@@ -30,8 +27,7 @@
 //#SkipArch: ppc64le
 //#LinkArgs:-z now -Bsymbolic
 // TODO: Set these
-//#DiffIgnore:.dynamic.DT_FLAGS.SYMBOLIC
-//#DiffIgnore:.dynamic.DT_SYMBOLIC
+//#DiffIgnore:.dynamic.DT_FLAGS.SYMBOLIC #13
 //#ExpectDynamic:DT_FLAGS
 
 #include "../common/runtime.h"

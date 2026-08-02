@@ -1,16 +1,29 @@
 //#AbstractConfig:default
 //#CompArgs:-g
 //#Object:runtime.c
-//#DiffIgnore:section.debug_*
-//#ExpectSym:_start line=55
+//#ExpectSym:_start line=68
 
 //#Config:zlib:default
 //#LinkArgs:--compress-debug-sections=zlib
+// TODO(#13): BFD 2.42 raises compressed DWARF section alignment to 8; Reld retains 1.
+//#DiffIgnore:section.debug_abbrev.alignment #13
+//#DiffIgnore:section.debug_aranges.alignment #13
+//#DiffIgnore:section.debug_line_str.alignment #13
+//#DiffIgnore:section.debug_line.alignment #13
+//#DiffIgnore:section.debug_str.alignment #13
+//#DiffIgnore:section.debug_info.alignment #13
 
 //#Config:zstd:default
 //#RequiresLinkerFlags:--compress-debug-sections=zstd
 //#RequiresZstdCompression:true
 //#LinkArgs:--compress-debug-sections=zstd
+// TODO(#13): BFD 2.42 raises compressed DWARF section alignment to 8; Reld retains 1.
+//#DiffIgnore:section.debug_str.alignment #13
+//#DiffIgnore:section.debug_line_str.alignment #13
+//#DiffIgnore:section.debug_abbrev.alignment #13
+//#DiffIgnore:section.debug_line.alignment #13
+//#DiffIgnore:section.debug_aranges.alignment #13
+//#DiffIgnore:section.debug_info.alignment #13
 
 //#Config:none:default
 //#LinkArgs:--compress-debug-sections=none

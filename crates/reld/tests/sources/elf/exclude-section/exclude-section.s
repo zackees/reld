@@ -2,8 +2,8 @@
 //#Mode:dynamic
 //#RunEnabled:false
 //#LinkArgs:-shared --no-gc-sections -z now
-//#DiffIgnore:section.got
-//#DiffIgnore:segment.LOAD.RX.alignment
+//#DiffIgnore:section.got #13
+//#DiffIgnore:segment.LOAD.RX.alignment #13
 //#Contains:ShouldBeKept
 //#DoesNotContain:ShouldBeExcluded
 */

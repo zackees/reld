@@ -6,9 +6,9 @@
 //#LinkArgs:--no-gc-sections -shared
 //#ReferenceLinkers:lld
 //#RunDynSym:get_bar
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
-//#DiffIgnore:section.got
-//#DiffIgnore:rel.extra-opt.R_X86_64_REX_GOTPCRELX.RexMovIndirectToAbsolute*
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
+//#DiffIgnore:section.got #13
+//#DiffIgnore:rel.extra-opt.R_X86_64_REX_GOTPCRELX.RexMovIndirectToAbsolute* #13
 .text
 .globl get_bar
 .type get_bar, @function

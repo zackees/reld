@@ -1,17 +1,15 @@
 //#Config:default
 //#SkipArch: ppc64le
-//#DiffIgnore:.dynamic.*
-// It looks like GNU ld sets .tdata's alignment to match .tbss's alignment
-//#DiffIgnore:section.tdata.alignment
-// TODO: RISC-V BFD linker keeps multiple .dynsym symbols
-//#DiffIgnore:dynsym.*
+//#DiffIgnore:.dynamic.* #13
 //#CompArgs:-C debuginfo=2
 //#Shared:rdyn1.rs
 
 //#Config:lto:default
 //#RequiresLinkerPlugin:true
 //#LinkerDriver:clang
-//#ReferenceLinkers:lld
+// Rust LTO bitcode requires a matching LLVMgold plugin. CI keeps its general LLD reference pin,
+// so use BFD with the matching LLVMgold plugin for this LTO-specific reference.
+//#ReferenceLinkers:bfd
 //#CompArgs:-Clinker-plugin-lto -Clink-arg=-flto -Clink-arg=-Wl,-znow
 //#DiffEnabled:false
 

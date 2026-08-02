@@ -5,8 +5,8 @@
 //#RunEnabled:false
 //#Archive:exclude-libs-selective-excluded.c
 //#Archive:exclude-libs-selective-included.c
-//#DiffIgnore:.dynamic.DT_RELA
-//#DiffIgnore:.dynamic.DT_RELAENT
+//#DiffIgnore:.dynamic.DT_RELA #13
+//#DiffIgnore:.dynamic.DT_RELAENT #13
 //#ExpectDynSym:included_fn
 //#NoDynSym:excluded_fn
 

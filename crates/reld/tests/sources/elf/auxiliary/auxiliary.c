@@ -1,7 +1,6 @@
 //#Config:shared
 //#Object:runtime.c
 //#LinkArgs:-shared -f foo --auxiliary bar -z now
-//#DiffIgnore:section.got
 //#RunEnabled:false
 
 //#Config:no-shared

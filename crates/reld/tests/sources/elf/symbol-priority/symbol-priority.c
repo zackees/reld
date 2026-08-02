@@ -7,8 +7,8 @@
 //#Object:symbol-priority-s1.c
 //#Object:symbol-priority-s2.c
 //#Object:symbol-priority-s3.c
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:section.got #13
 
 #include "../common/runtime.h"
 

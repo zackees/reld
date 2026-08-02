@@ -2,7 +2,7 @@
 //#Object:lib.c
 //#ExpectSym:_main
 //#TestUpdateInPlace:true
-//#DiffIgnore:section.__unwind_info
+//#DiffIgnore:section.__unwind_info #13
 
 #include "../common/runtime.h"
 

@@ -6,9 +6,9 @@
 //#LinkArgs:-z now
 //#Mode:dynamic
 //#Shared:runtime.c
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.got
-//#DiffIgnore:.dynamic.*
+//#DiffIgnore:section.rodata #13
+//#DiffIgnore:section.got #13
+//#DiffIgnore:.dynamic.* #13
 //#ExpectProgramHeader:TLS file-size=0,mem-size=4
 
 #include "../common/runtime.h"

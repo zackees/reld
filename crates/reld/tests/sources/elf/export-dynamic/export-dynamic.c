@@ -7,7 +7,7 @@
 //#Mode:unspecified
 //#RunEnabled:false
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 // TODO: Reld probably should set dynamic linker here
 //#ReferenceLinkers:bfd,lld
 //#RunEnabled:false
@@ -28,7 +28,7 @@
 //#Mode:dynamic
 //#RunEnabled:false
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 //#ReferenceLinkers:bfd,lld
 
 //#Config:select-symbols-list
@@ -40,7 +40,7 @@
 //#Mode:dynamic
 //#RunEnabled:false
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
+//#DiffIgnore:.dynamic.DT_NEEDED #13
 //#ReferenceLinkers:bfd,lld
 
 //#Config:dynamic-symbols-list
@@ -52,9 +52,9 @@
 //#Mode:dynamic
 //#RunEnabled:false
 // We're linking different .so files, so this is expected.
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:file-header.entry
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:.dynamic.DT_RELA* #13
+//#DiffIgnore:file-header.entry #13
 //#ReferenceLinkers:bfd,lld
 
 void foo(void) {};

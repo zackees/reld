@@ -17,9 +17,25 @@ name = "reld-link"
 path = "src/bin/reld-link.rs"
 
 [[test]]
-name = "integration_tests"
-path = "tests/integration_tests.rs"
+name = "acceptance"
+path = "tests/acceptance.rs"
 harness = false
+
+# Keep the external-suite entry point separate at the Cargo level so it can be
+# scheduled independently on the Linux runner. The libtest-mimic name filter
+# selects only external trials for this target.
+[[test]]
+name = "external"
+path = "tests/external.rs"
+harness = false
+
+[[test]]
+name = "external-runner"
+path = "tests/external_runner.rs"
+
+[[test]]
+name = "acceptance-policy"
+path = "tests/acceptance_policy_tests.rs"
 
 [dependencies]
 reld-core = { path = "../reld-core", version = "0.0.0", default-features = false }
@@ -57,6 +73,9 @@ which.workspace = true
 
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
 wait-timeout.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
 
 [features]
 default = ["fork", "plugins", "zstd"]

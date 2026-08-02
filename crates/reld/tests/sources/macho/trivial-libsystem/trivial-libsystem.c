@@ -1,7 +1,7 @@
 //#Config:default
 //#TestUpdateInPlace:true
 //#LinkerDriver:clang
-//#DiffIgnore:section.__unwind_info
+//#DiffIgnore:section.__unwind_info #13
 
 //#Config:cpp:default
 //#LinkerDriver:clang++

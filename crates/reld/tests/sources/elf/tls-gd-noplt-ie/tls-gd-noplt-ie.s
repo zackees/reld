@@ -10,7 +10,7 @@
 //#SoSingleLinker:reld
 //#ReferenceLinkers:lld,bfd
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW
+//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
 .globl _start
 _start:
     .byte 0x66

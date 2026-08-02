@@ -5,9 +5,8 @@
 //#Object:runtime.c
 //#LinkArgs:-z now --version-script ./mixed-verdef-verneed.map
 //#Shared:mixed-verdef-verneed-2.c
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:section.got
+//#DiffIgnore:.dynamic.DT_NEEDED #13
+//#DiffIgnore:.dynamic.DT_RELA* #13
 
 #include "../common/runtime.h"
 

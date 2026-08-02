@@ -4,7 +4,8 @@
 //#ReferenceLinkers:
 //#ExpectError:linker plugin was not supplied
 //#CompArgs:-flto
-//#RequiresLinkerPlugin:true
+// This fixture deliberately drives reld directly without a plugin. Compiling the LTO object is
+// the capability check; requiring a linker driver plugin would contradict the behavior under test.
 
 //#Config:gcc:default
 //#Compiler:gcc
