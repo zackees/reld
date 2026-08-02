@@ -5,7 +5,6 @@
 //#CompArgs:-fPIC -ftls-model=global-dynamic
 //#LinkArgs:-shared -z now
 //#RunEnabled:false
-//#DiffIgnore:.dynamic.DT_RELAENT
 //#DiffIgnore:.dynamic.DT_RELA
 
 // We use a large alignment here so that it's almost certain that padding will need to be added

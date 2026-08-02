@@ -4,7 +4,6 @@
 //#CompArgs:-fno-PIC
 //#Mode:dynamic
 //#Shared:force-dynamic-linking.c
-//#DiffIgnore:section.got
 //#DiffIgnore:.dynamic.DT_NEEDED
 //#DiffIgnore:.dynamic.DT_RELA
 //#DiffIgnore:.dynamic.DT_RELAENT

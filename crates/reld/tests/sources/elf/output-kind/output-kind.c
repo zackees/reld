@@ -4,7 +4,6 @@
 
 //#AbstractConfig:default
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:section.relro_padding
 
 // `-no-pie` should override `-shared`, and `-pie --dynamic-linker ..` should result in dynamic PIE.
 // LLD rejects this with an error.
@@ -12,7 +11,6 @@
 //#LinkArgs:-shared -z now -pie
 //#Object:runtime.c
 //#Mode:dynamic
-//#DiffIgnore:section.got
 
 // `-no-pie` should override `-shared`. LLD rejects this with an error.
 //#Config:no-pie-over-shared

@@ -1,7 +1,6 @@
 //#Mode:dynamic
 //#RunEnabled:false
 //#LinkArgs:-shared -z now -T ./linker-script.ld
-//#DiffIgnore:section.got
 //#ExpectDynSym:start_bar section="bar",offset-in-section=0
 //#ExpectDynSym:start_aaa section="bar",offset-in-section=8
 //#ExpectDynSym:end_bar section="bar",offset-in-section=12

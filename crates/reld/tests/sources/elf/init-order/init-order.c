@@ -1,7 +1,6 @@
 //#Object:runtime.c
 //#Object:init.c
 //#Object:init-order-2.c
-//#DiffIgnore:section.data
 //#DiffIgnore:section.rodata
 
 #include "../common/init.h"

@@ -3,7 +3,6 @@
 //#RunEnabled:false
 //#Contains:FOOBAR
 //#Contains:HELLO_WORLD
-//#DiffIgnore:section.got
 //#DiffIgnore:segment.RISCV_ATTRIBUTES.*
 // Reld emits `.riscv.attributes`, but GNU ld does not
 //#DiffIgnore:riscv_attributes.*

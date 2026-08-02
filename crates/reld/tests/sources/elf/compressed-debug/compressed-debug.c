@@ -1,7 +1,6 @@
 //#AbstractConfig:default
 //#CompArgs:-g
 //#Object:runtime.c
-//#DiffIgnore:section.debug_*
 //#ExpectSym:_start line=55
 
 //#Config:zlib:default

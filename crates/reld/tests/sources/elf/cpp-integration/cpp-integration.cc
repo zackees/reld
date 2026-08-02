@@ -1,6 +1,4 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.data
 //#DiffIgnore:section.sdata
 //#DiffIgnore:section.rodata.alignment
 //#DiffIgnore:section.bss.alignment

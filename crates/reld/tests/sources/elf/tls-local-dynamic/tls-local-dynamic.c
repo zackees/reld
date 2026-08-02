@@ -1,5 +1,4 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.data
 //#DiffIgnore:section.rodata
 //#DiffIgnore:dynsym.foo.section
 

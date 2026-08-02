@@ -1,7 +1,6 @@
 // TODO: remove DiffIgnore for asm.* once relaxations are supported
 
 //#AbstractConfig:default
-//#DiffIgnore:.dynamic.DT_NEEDED
 //#DiffIgnore:section.data
 //#DiffIgnore:section.rodata
 
@@ -40,9 +39,9 @@
 //#SkipArch: x86_64,riscv64,loongarch64,ppc64le
 
 //#Config:clang-tls-desc:gcc-tls-desc
-//#CompArgs:-mtls-dialect=desc -fPIC
+//#CompArgs:-mtls-dialect=gnu2 -fPIC
 //#Compiler:clang
-//#RequiresCompilerFlags:-mtls-dialect=desc
+//#RequiresCompilerFlags:-mtls-dialect=gnu2
 //#Arch: x86_64
 
 //#Config:clang-tls-desc-desc:clang-tls-desc
@@ -50,7 +49,7 @@
 //#SkipArch: x86_64,riscv64
 
 //#Config:clang-tls-desc-shared:clang-tls-desc
-//#CompArgs:-mtls-dialect=desc -fPIC
+//#CompArgs:-mtls-dialect=gnu2 -fPIC
 //#Shared:tlsdesc-obj.c
 //#Arch: x86_64
 

@@ -2,7 +2,6 @@
 //#RunEnabled:false
 //#LinkArgs:-shared -z now
 //#Object:visibility-merging-1.c
-//#DiffIgnore:section.got
 //#ExpectDynSym:data2
 //#ExpectDynSym:data3
 //#ExpectDynSym:get_data1

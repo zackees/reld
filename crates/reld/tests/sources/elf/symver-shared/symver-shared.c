@@ -9,7 +9,6 @@
 //#Mode:dynamic
 //#DiffIgnore:.dynamic.DT_NEEDED
 //#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:section.got
 //#LinkArgs:--version-script=./symver-shared.map -znow
 //#RequiresGlibc:true
 

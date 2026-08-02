@@ -6,7 +6,6 @@
 //#Object:runtime.c
 //#Mode:dynamic
 //#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:.dynamic.DT_RELA
 //#DiffIgnore:.dynamic.DT_RELAENT
 //#DiffIgnore:section.got
 // TODO: RISC-V BFD linker keeps the symbol in .dynsym section

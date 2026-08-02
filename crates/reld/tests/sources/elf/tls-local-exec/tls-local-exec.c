@@ -1,5 +1,4 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.data
 //#DiffIgnore:section.data.alignment
 //#DiffIgnore:section.rodata
 //#DiffIgnore:section.rodata.alignment

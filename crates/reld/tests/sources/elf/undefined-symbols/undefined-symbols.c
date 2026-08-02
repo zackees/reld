@@ -1,7 +1,5 @@
 //#AbstractConfig:default
 //#ReferenceLinkers:bfd,lld
-//#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:file-header.entry
 
 //#Config:shared-lib:default
 //#LinkArgs:--shared -z now

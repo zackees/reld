@@ -1,8 +1,6 @@
 //#AbstractConfig:default
 //#LinkerDriver:gcc
 //#LinkArgs:-Wl,-z,now
-//#DiffIgnore:section.rodata
-//#DiffIgnore:section.data
 //#DiffIgnore:section.data.alignment
 //#ExpectSym:main
 

@@ -1,7 +1,5 @@
 //#AbstractConfig:default
 //#LinkerDriver:gcc
-//#DiffIgnore:.dynamic.DT_NEEDED
-//#DiffIgnore:section.data
 //#DiffIgnore:section.rodata
 //#DiffIgnore:section.rodata.alignment
 //#DiffIgnore:rel.match_failed.R_AARCH64_TLSGD_ADR_PAGE21

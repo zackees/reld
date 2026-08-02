@@ -3,7 +3,6 @@
 //#Compiler:clang
 //#CompArgs:-g -gdwarf-5
 //#Object:runtime.c
-//#DiffIgnore:section.debug_*
 //#DiffIgnore:section.eh_frame.type
 
 //#Config:zlib:default

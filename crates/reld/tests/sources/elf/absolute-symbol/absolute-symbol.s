@@ -1,7 +1,6 @@
 /* For some reason, GAS on riscv64 does not support '//' comments.
 //#LinkArgs:-shared -z now
 //#RunEnabled:false
-//#DiffIgnore:section.got
 //#ExpectSym:abs_sym address=0xCAFECAFE
 //#ExpectDynSym:abs_sym address=0xCAFECAFE
 

@@ -3,7 +3,6 @@
 //#RunEnabled:false
 //#ReferenceLinkers:lld
 //#LinkArgs:-shared -z now
-//#DiffIgnore:section.got
 //#DiffIgnore:segment.LOAD.RX.alignment
 //#DiffIgnore:segment.LOAD.RWX.alignment
 

@@ -1,7 +1,6 @@
 //#Mode:dynamic
 //#RunEnabled:false
 //#LinkArgs:-shared -z now -T ./linker-script-glob.ld
-//#DiffIgnore:section.got
 //#ExpectSym:val_0 section="mydata"
 //#ExpectSym:val_1 section="mydata"
 //#ExpectSym:val_5 section="mydata"

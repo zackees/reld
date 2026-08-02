@@ -7,7 +7,6 @@
 //#Shared:mixed-verdef-verneed-2.c
 //#DiffIgnore:.dynamic.DT_NEEDED
 //#DiffIgnore:.dynamic.DT_RELA*
-//#DiffIgnore:section.got
 
 #include "../common/runtime.h"
 

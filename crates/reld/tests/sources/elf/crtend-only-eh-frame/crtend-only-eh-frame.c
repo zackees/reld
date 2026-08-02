@@ -6,7 +6,6 @@
 //#CompArgs:-fPIC
 //#DiffIgnore:.dynamic.DT_NEEDED
 //#DiffIgnore:section.rodata
-//#DiffIgnore:section.data
 //#DiffIgnore:section.eh_frame.alignment
 //#SkipArch:ppc64le
 
