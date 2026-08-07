@@ -66,6 +66,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew untap aws/tap || true
           brew install llvm
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           command -v clang
