@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ci.benchmark_stats import (  # noqa: E402
     collect_metadata,
     parse_benchmark_log,
+    series_mode,
     write_outputs,
 )
 
@@ -83,8 +84,20 @@ def test_write_outputs_produces_all_artifacts(tmp_path):
         assert (tmp_path / name).exists(), name
 
     payload = json.loads((tmp_path / "latest.json").read_text())
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert len(payload["results"]) == 15
+    for entry in payload["results"]:
+        assert "mode" in entry
+        if entry["series"] in ("bfd", "lld"):
+            assert entry["mode"] == "reference"
+
+
+def test_series_mode():
+    assert series_mode("reld", "Linux") == "native"
+    assert series_mode("reld", "Windows") == "bridge"
+    assert series_mode("reld", "Darwin") == "bridge"
+    assert series_mode("bfd", "Linux") == "reference"
+    assert series_mode("lld", "Windows") == "reference"
 
 
 def test_history_appends_and_caps(tmp_path):
@@ -94,6 +107,9 @@ def test_history_appends_and_caps(tmp_path):
     write_outputs(r, meta, tmp_path)
     lines = (tmp_path / "history.jsonl").read_text().strip().splitlines()
     assert len(lines) == 2
+    for line in lines:
+        entry = json.loads(line)
+        assert "target" in entry
 
 
 def test_render_refuses_empty(tmp_path):
