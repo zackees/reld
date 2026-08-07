@@ -46,17 +46,28 @@ jobs:
         include:
           - name: windows-msvc
             target: x86_64-pc-windows-msvc
+            cross_targets: x86_64-pc-windows-msvc
             artifact: reld-windows-x86_64-msvc
             executable: reld.exe
           - name: macos-arm64
             target: aarch64-apple-darwin
+            cross_targets: aarch64-apple-darwin
             artifact: reld-macos-arm64
             executable: reld
           # windows-gnu cross-from-Linux: soldr provisions the Linux-hosted
           # mingw cross gcc toolchain (soldr-toolchain#114 Phase 2), so no
           # hand-installed `gcc-mingw-w64`. Requires soldr >= 0.8.44.
+          #
+          # cross_targets is deliberately EMPTY here: soldr#2341 wired the
+          # win-gnu Linux-host toolchain into `soldr build --target` (which
+          # self-provisions) but not yet into `soldr prepare --target` (what
+          # setup-soldr's cross-targets runs) — that path still finds no
+          # mingw dir and fails with an empty archive. Skipping the prepare
+          # step and letting `soldr build --target` fetch the toolchain works
+          # today; `soldr prepare` parity is tracked in soldr#2342.
           - name: windows-gnu
             target: x86_64-pc-windows-gnu
+            cross_targets: ""
             artifact: reld-windows-x86_64-gnu
             executable: reld.exe
     steps:
@@ -76,7 +87,9 @@ jobs:
           # 0.8.44 is the first release with Linux-hosted win-gnu cross
           # support (soldr#2341); msvc/darwin work on it too.
           version: 0.8.44
-          cross-targets: ${{ matrix.target }}
+          # Empty for win-gnu (see matrix note) — `soldr build --target`
+          # self-provisions that toolchain.
+          cross-targets: ${{ matrix.cross_targets }}
           cache: true
           cache-preset: full
           prebuild-deps: soldr-cook
