@@ -48,12 +48,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             cross_targets: x86_64-pc-windows-msvc
             linker: fast
+            cache: "true"
             artifact: reld-windows-x86_64-msvc
             executable: reld.exe
           - name: macos-arm64
             target: aarch64-apple-darwin
             cross_targets: aarch64-apple-darwin
             linker: fast
+            cache: "true"
             artifact: reld-macos-arm64
             executable: reld
           # windows-gnu cross-from-Linux: soldr provisions the Linux-hosted
@@ -75,6 +77,7 @@ jobs:
             target: x86_64-pc-windows-gnu
             cross_targets: ""
             linker: platform-default
+            cache: "false"
             artifact: reld-windows-x86_64-gnu
             executable: reld.exe
     steps:
@@ -99,7 +102,7 @@ jobs:
           cross-targets: ${{ matrix.cross_targets }}
           # win-gnu links via the mingw gcc's own ld (see matrix note).
           linker: ${{ matrix.linker }}
-          cache: true
+          cache: ${{ matrix.cache }}
           cache-preset: full
           prebuild-deps: soldr-cook
 
