@@ -527,7 +527,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
+          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
       - name: Set up soldr (build cache)
         uses: zackees/setup-soldr@v0
@@ -536,8 +536,16 @@ jobs:
 
       - name: Cross-compile reld (release)
         shell: bash
+        # The workspace pulls in cc-built C libraries (zstd, blake3 SIMD). When
+        # cross-compiling, the `cc` crate must build them with the mingw cross
+        # compiler/archiver, not the host gcc — otherwise the C objects are ELF
+        # and the final PE/COFF link fails with undefined references. Point the
+        # target-scoped CC/CXX/AR (and the Rust linker) at the mingw tools.
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
+          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
         run: |
           set -euxo pipefail
           rustup target add "${{ matrix.target }}"
