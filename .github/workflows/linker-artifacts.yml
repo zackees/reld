@@ -61,17 +61,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'CC_x86_64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
-          echo 'CXX_x86_64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
-          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link' >> "$GITHUB_ENV"
+          echo 'CC_x86_64_pc_windows_msvc=' >> "$GITHUB_ENV"
+          echo 'CXX_x86_64_pc_windows_msvc=' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=' >> "$GITHUB_ENV"
+
+      - name: Clear cross-target linker overrides for native host build
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'CARGO_ENCODED_RUSTFLAGS=' >> "$GITHUB_ENV"
+          echo 'RUSTFLAGS=' >> "$GITHUB_ENV"
+          echo 'SOLDR_LINKER=platform-default' >> "$GITHUB_ENV"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)
+              echo 'SDKROOT=' >> "$GITHUB_ENV"
+              echo 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=' >> "$GITHUB_ENV"
+              echo 'CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=' >> "$GITHUB_ENV"
+              ;;
+            x86_64-unknown-linux-gnu)
+              echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=' >> "$GITHUB_ENV"
+              echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=' >> "$GITHUB_ENV"
+              ;;
+          esac
 
       - name: Build linker
         shell: bash
         run: |
           set -euo pipefail
-          soldr cargo build --locked --release --package reld --bin reld-link --target "${{ matrix.target }}"
+          soldr cargo build --locked --release --package reld --bin reld-link
           mkdir -p package
-          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "package/${{ matrix.executable }}"
+          cp "target/release/${{ matrix.executable }}" "package/${{ matrix.executable }}"
 
       - name: Smoke build artifact
         shell: bash
