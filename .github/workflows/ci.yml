@@ -121,7 +121,7 @@ jobs:
         with:
           tool: taplo-cli@0.10.0
 
-      - name: Install Linux reference linkers
+      - name: Install Linux clang toolchain
         if: matrix.kind == 'linux-gnu'
         shell: bash
         run: |
@@ -135,22 +135,30 @@ jobs:
           sudo apt-get install -y \
             "clang-22=${CLANG_PACKAGE_VERSION}" \
             "llvm-22-linker-tools=${CLANG_PACKAGE_VERSION}"
-          curl -fsSL -o "${RUNNER_TEMP}/libtinfo5.deb" "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_${LIBTINFO5_VERSION}_amd64.deb"
-          echo 'b9bb64e716a7d9de05b1b33992763142ca81bcae3a7f8ce7e29fa3c6fd32f1e8  '${RUNNER_TEMP}'/libtinfo5.deb' | sha256sum --check
-          sudo apt-get install -y "${RUNNER_TEMP}/libtinfo5.deb"
-          mkdir -p "${RUNNER_TEMP}/refs" "${RUNNER_TEMP}/ref-bin"
-          curl -fsSL -o "${RUNNER_TEMP}/mold.tar.gz" "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz"
-          echo 'a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d  '${RUNNER_TEMP}'/mold.tar.gz' | sha256sum --check
-          tar -xzf "${RUNNER_TEMP}/mold.tar.gz" -C "${RUNNER_TEMP}/refs"
-          curl -fsSL -o "${RUNNER_TEMP}/wild.tar.gz" "https://github.com/davidlattimore/wild/releases/download/${WILD_VERSION}/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          echo 'deb6ee0e5caec798053ec4aafaba042e20a8edf91f08cb4d36268571cc628d3b  '${RUNNER_TEMP}'/wild.tar.gz' | sha256sum --check
-          tar -xzf "${RUNNER_TEMP}/wild.tar.gz" -C "${RUNNER_TEMP}/refs"
-          cp "$(find "${RUNNER_TEMP}/refs" -type f -path '*/bin/mold' | head -1)" "${RUNNER_TEMP}/ref-bin/mold"
-          cp "$(find "${RUNNER_TEMP}/refs" -type f -name wild | head -1)" "${RUNNER_TEMP}/ref-bin/ld.wild"
-          ln -s /usr/bin/clang-22 "${RUNNER_TEMP}/ref-bin/clang"
-          ln -s /usr/bin/clang++-22 "${RUNNER_TEMP}/ref-bin/clang++"
-          chmod +x "${RUNNER_TEMP}/ref-bin/mold" "${RUNNER_TEMP}/ref-bin/ld.wild"
-          echo "${RUNNER_TEMP}/ref-bin" >> "${GITHUB_PATH}"
+
+      # The mold/wild release tarballs and the libtinfo5 .deb are the heavy, pinned
+      # downloads paid on every run. Cache them keyed on the pinned versions so
+      # subsequent runs restore them instead of re-fetching. The version-drift
+      # smoke step below is the correctness gate on a cache hit.
+      - name: Restore cached Linux reference linkers
+        if: matrix.kind == 'linux-gnu'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/reld-linker-cache
+          key: linkers-${{ runner.os }}-mold${{ env.MOLD_VERSION }}-wild${{ env.WILD_VERSION }}-libtinfo${{ env.LIBTINFO5_VERSION }}
+
+      - name: Provision cached Linux reference linkers
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Cache-gated: no-op for artifacts already restored above; download +
+          # verify only on a miss. Installs the cached libtinfo5 .deb, symlinks
+          # clang-22/clang++-22, and appends the cache bin dir to GITHUB_PATH.
+          python3 ci/linker_setup.py \
+            --cache-dir "${RUNNER_TEMP}/reld-linker-cache" \
+            --install-debs \
+            --link-clang
 
       - name: Verify and smoke Linux reference linkers
         if: matrix.kind == 'linux-gnu'
@@ -496,3 +504,70 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --quiet pillow pytest
       - run: python -m pytest ci/tests -q
+
+  # Release cross-compilation on cheap, plentiful Linux runners. Building the
+  # Windows target from Linux exploits parallel Linux capacity for the compile +
+  # link phases (native on-target *test* execution stays on the native matrix
+  # legs above).
+  #
+  # NOTE: this uses the standard mingw-w64 cross toolchain directly rather than
+  # `soldr cargo`. soldr's current cross-compile path breaks here two ways — its
+  # zccache builds the cc-crate C deps (zstd, blake3) with the host compiler
+  # (host ELF objects -> mingw PE link fails, zackees/soldr#2334) and its
+  # toolchain cache does not rehydrate the target's rust-std on a cache hit
+  # (E0463 can't find crate for std). Once a published soldr cross toolchain
+  # exists (zackees/soldr#2335, `soldr cc --target ...`), this job should switch
+  # to it and drop the mingw CC/CXX/AR wiring. Tracked for reld in follow-up.
+  cross-release:
+    name: Cross release (linux -> ${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-gnu
+            artifact: reld.exe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install mingw-w64 cross toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cross-compile reld (release)
+        shell: bash
+        # The workspace pulls in cc-built C libraries (zstd, blake3 SIMD). Point
+        # the cc crate's target-scoped CC/CXX/AR (and the Rust linker) at the
+        # mingw tools so the C objects are built as PE/COFF and link cleanly.
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
+          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
+        run: |
+          set -euxo pipefail
+          cargo build --release --target "${{ matrix.target }}" -p reld --bin reld
+
+      - name: Verify cross-compiled artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          out="target/${{ matrix.target }}/release/${{ matrix.artifact }}"
+          test -f "$out"
+          file "$out"
+          file "$out" | grep -q 'PE32'
+
+      - name: Upload cross-compiled release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reld-${{ matrix.target }}-release
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          if-no-files-found: error
