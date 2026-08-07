@@ -6,37 +6,106 @@
 Linux, and macOS as co-equal targets, incremental linking as the architecture, and a mandate to
 beat `wild` in every measured category.
 
-> **Status: ELF/Linux linking works today, inherited from wild.** Windows/COFF and macOS/Mach-O
-> are not implemented. Every performance number below remains a **target**, not a measurement.
-> See [DESIGN.md](DESIGN.md).
+`reld` is a **polylinker**: it bundles multiple real linkers per platform (today: its own native
+engine plus an `lld` bridge) behind a single dispatch point, so it can run everywhere *and*,
+eventually, satisfy every requested link configuration by routing to whichever bundled engine
+supports it — fast by default, escalating only when the flags demand it. See
+["Polylinker" below](#polylinker-runs-everywhere-supports-everything-by-routing) for what that
+means concretely, and what part of it is shipped vs. designed.
+
+> **Status: reld links real programs on all three platforms today.** Linux/ELF links natively
+> (inherited from wild). Windows/COFF and macOS/Mach-O link via a **bridge** to `lld` (the
+> `rust-lld` that ships with every Rust toolchain) — proven by CI end-to-end builds on the
+> windows-msvc and macos-arm64 runners. Native COFF/Mach-O codegen in reld's own engine is still
+> **future work**. This bridge is today's *only* routing: it dispatches by platform/format, not
+> by requested flags. The flag-aware router described below (LTO/optimized links → a capable
+> bundled engine) is **design, not yet implemented** — see
+> [#30](https://github.com/zackees/reld/issues/30). Every performance number below remains a
+> **target**, not a measurement, except where noted. See [DESIGN.md](DESIGN.md) and
+> [#17](https://github.com/zackees/reld/issues/17) for the phase history.
 
 <!-- BENCHMARK:BEGIN -->
 [![Latest reld link benchmark](https://raw.githubusercontent.com/zackees/reld/benchmark-stats/benchmark-link.jpg)](https://github.com/zackees/reld/tree/benchmark-stats)
 
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
-alongside `latest.json` and `history.jsonl`. The `reld` column remains `n/a` until Phase 2's
-CI-generated measurement lands; Phase 0 does not publish unmeasured results. With
-[`soldr`](https://github.com/zackees/soldr) installed, reproduce locally with
-`soldr cargo run --release --bin reld-bench`.*
+alongside `latest.json` and `history.jsonl`. The `reld` column carries a real measurement on
+Linux (native engine, driven via `clang -fuse-ld`). It still charts `n/a` on Windows/macOS in
+this clang-based harness, because clang can't drive reld's bridge there — on those platforms reld
+links via rustc `-Clinker`, not `-fuse-ld`, so a bridge-mode bench number is future work, not a
+pending measurement being withheld. With [`soldr`](https://github.com/zackees/soldr) installed,
+reproduce locally with `soldr cargo run --release --bin reld-bench`.*
 <!-- BENCHMARK:END -->
 
 ## What it is
 
 `reld` is a source fork of `wild` at commit
-`5793935f1d8b05b9a978ce2089e16e718072e9a9`. The inherited ELF linker works now; the scope then
-expands toward native Windows and macOS backends and incremental linking:
+`5793935f1d8b05b9a978ce2089e16e718072e9a9`. The inherited ELF linker works now, and a bridge to
+`lld` makes Windows and macOS link today too; the scope then expands toward native Windows and
+macOS backends (reld's own COFF/Mach-O codegen) and incremental linking:
 
 | | `wild` | `reld` |
 |---|---|---|
-| Platforms | Linux / ELF | Linux / ELF now; **Windows and macOS planned** |
+| Platforms | Linux / ELF | **Linux / ELF native; Windows / macOS via lld bridge — all three work today** |
 | Incremental linking | on the roadmap | **the architecture** |
 | Optimizes for | the final link | the **edit → link → run** loop |
 | Release-quality output | required | **explicit non-goal** |
 
+### Bridge status
+
+| Platform | Format | Today | Native backend |
+|---|---|---|---|
+| Linux | ELF | **Native** — inherited wild core | Already native |
+| Windows | PE/COFF | **Bridge** — delegates to `lld-link` (`rust-lld`) | Future (issue #7) |
+| macOS | Mach-O | **Bridge** — delegates to `ld64.lld` (`rust-lld`) | Future (issue #8) |
+
+The bridge is a real, CI-proven delegation to the `lld` shipped with every Rust toolchain, not a
+stub — it links and runs a multi-crate, C-dependency (`rusqlite` bundled/SQLite) program on both
+platforms today. It is not reld's own codegen; see
+[issue #17](https://github.com/zackees/reld/issues/17) for the full BR-1…BR-4 phase history and
+[DESIGN.md](DESIGN.md) for the architecture.
+
+## Polylinker: runs everywhere, supports everything, by routing
+
+`reld` bundles more than one real linker per platform — today, its own native engine (Linux/ELF)
+and the `lld` bridge (Windows/COFF, macOS/Mach-O). That makes it a **polylinker**: a single
+binary that can, in principle, satisfy any requested link configuration by routing the request to
+whichever bundled engine already supports it, rather than by implementing every feature natively.
+Concretely (per [#30](https://github.com/zackees/reld/issues/30)):
+
+- **Fast by default.** Ordinary dev-loop links use the fastest engine available for the platform.
+- **Escalate on demand.** A configuration the fast engine can't do — the leading example is
+  **LTO** — gets routed to a bundled engine that *can* (e.g. `lld`'s real LTO/plugin support),
+  instead of being rejected.
+- **Fall back, never mislink.** If the fastest engine lacks a requested capability, reld falls
+  back to a capable bundled engine. If *no* bundled engine supports the configuration, that's a
+  loud, specific error — never a silent mislink.
+- **Explicit override.** `--engine=<name>` / `RELD_ENGINE` will force a specific bundled engine.
+- **Always observable.** Every routing decision is meant to be logged, so a user can always tell
+  which real linker ran and why.
+
+**What's shipped today vs. designed:**
+
+| | Status |
+|---|---|
+| Bundling multiple real linkers per platform | **Shipped** — native ELF engine + lld bridge, see "Bridge status" above |
+| Routing by platform/format (dispatch to native vs. bridge) | **Shipped** |
+| Routing by requested *flags/config* (e.g. `-flto` → capable engine) | **Design only** — not implemented. Tracked by [#30](https://github.com/zackees/reld/issues/30), decision **B8** in [#17](https://github.com/zackees/reld/issues/17), and the daemon router in [#19](https://github.com/zackees/reld/issues/19) |
+| Capability table per bundled engine | **Design only** |
+| Fallback ordering when the fast engine lacks a capability | **Design only** |
+| `--engine=` / `RELD_ENGINE` override | **Design only** |
+| Per-decision routing log line | **Design only** |
+
+Today, an `-flto` link is **not** automatically routed anywhere — see the Stretch goals section
+below for the current, honest state of LTO handling. See [DESIGN.md](DESIGN.md) for the full
+routing design and [`agents/docs/polylinker.md`](agents/docs/polylinker.md) for the contributor-
+facing summary.
+
 ## The four claims
 
-1. **Runs and targets everywhere** — Windows, Linux, macOS. Not "Linux plus ports."
+1. **Runs and targets everywhere** — Windows, Linux, macOS. Not "Linux plus ports." The
+   polylinker framing extends this claim toward "and supports every requested link
+   configuration," via routing — see above; that extension is design-stage, not shipped.
 2. **Incremental** — a one-object change reflows the image instead of rebuilding it.
    Target: **warm relink in low single-digit milliseconds**, largely independent of binary size.
 3. **Faster than `wild` in every category** — cold link, warm full link, warm incremental,
@@ -76,8 +145,16 @@ day, not the one that goes to customers.
 
 **(Thin)LTO is a stretch goal, not a non-goal** — deliberately sequenced after the fast linker
 on all three platforms. The inner loop is the priority; LTO touches nearly every subsystem and
-would slow down the thing this project exists to deliver. Until then, LTO flags are rejected
-with a clear diagnostic rather than silently mislinked.
+would slow down the thing this project exists to deliver.
+
+The framing for *how* LTO gets supported has changed: rather than reld ever implementing LTO
+natively in its own engine, `-flto`/`--plugin`/`/LTCG` links are meant to be **routed to a
+bundled engine that already does LTO** (the polylinker model above) — strictly better for the
+user than rejection, and still zero LTO codegen owned by reld. **That flag-aware router is
+design-stage, not implemented** ([#30](https://github.com/zackees/reld/issues/30), decision B8
+in [#17](https://github.com/zackees/reld/issues/17)); until it lands, LTO flags are rejected or
+ignored with a clear diagnostic rather than silently mislinked, per
+[D13](docs/plan/01-DECISIONS.md).
 
 ## Honest risks
 

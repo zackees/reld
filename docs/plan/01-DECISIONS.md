@@ -260,27 +260,50 @@ Phase 3 (`/OPT:REF` equivalent). **ICF is deferred indefinitely** — it is a si
 (radlink's is ~630 lines of generation-tagged concurrent hash tables) and reld optimizes the
 dev loop, where output size is irrelevant.
 
-## D13 — (Thin)LTO. **Locked: stretch goal, sequenced after the fast linker. Not a non-goal.**
+## D13 — (Thin)LTO. **REVISED after #30. Locked: routed to a capable bundled engine, not rejected outright. Native LTO codegen remains a deferred stretch goal, not a non-goal.**
 
-LTO is **deferred, not rejected**. The fast linker across Linux, Windows and macOS is the
-priority; LTO interacts with nearly every subsystem (symbol resolution, archive extraction,
-section layout, debug info) and pulling it forward would slow down the thing the project exists
-to deliver. See `DESIGN.md` §3.1.
+**Original text (superseded below):** LTO was deferred, with its flags rejected/ignored via a
+specific diagnostic until reld implemented LTO natively per format.
+
+**Revision (per [#30](https://github.com/zackees/reld/issues/30), the polylinker issue, and
+decision **B8** in [#17](https://github.com/zackees/reld/issues/17)):** reld already bundles more
+than one real linker per platform (the native engine + the `lld` bridge, see `DESIGN.md` §4.4).
+Once that's true, "reject LTO" is no longer the honest best available answer — a bundled engine
+(`lld`) already has real LTO support. The product-level decision changes from *reject* to
+*route*:
+
+- **LTO is delegated to a capable bundled engine** (the polylinker's flag-aware router,
+  `DESIGN.md` §4.5) rather than rejected, wherever a bundled engine supports it. This is strictly
+  better for the user than a rejection diagnostic, and reld's own engine still implements zero
+  LTO codegen.
+- **Native LTO codegen in reld's own engine remains future work**, sequenced after the fast
+  linker across all three platforms — unchanged from the original rationale in `DESIGN.md` §3.1.
+  The revision is about *how the user's LTO request is handled today*, not about reld growing
+  native LTO sooner.
+- **The flag-aware router itself is not yet implemented.** This decision records the target
+  policy for B8/#17 and the daemon router (#19) to implement against; it does not claim the
+  routing exists. **Until the router lands, current behavior is unchanged from the original
+  text**: LTO flags are rejected or ignored with a specific diagnostic naming the feature — never
+  silently mislinked.
 
 Consequences for every phase:
 
 - **Do not delete wild's linker-plugin LTO.** The fork inherits a working-with-known-issues
   implementation on ELF (`linker_plugins.rs`, ~1467 LOC, driven from `lib.rs:325` and
   `lib.rs:374`). P2 must not regress it; pin current behaviour with a smoke test.
-- **Until LTO is implemented on a given format, its flags are rejected or ignored with a
+- **Until the flag-aware router (B8) is implemented, LTO flags are rejected or ignored with a
   specific diagnostic naming the feature** — never silently mislinked. This matters most where
   build systems pass the flag unconditionally: rustc passes `-plugin` on the MinGW gcc path
-  (unless `-fno-use-linker-plugin`), and MSBuild passes `/LTCG`.
-- When LTO does land it will be **incompatible with the incremental path** — gold and MSVC both
-  fall back to a full link for it — so trigger 13 in `09-INCREMENTAL.md` §I1 stays permanent.
+  (unless `-fno-use-linker-plugin`), and MSBuild passes `/LTCG`. Once B8 lands, the same flags
+  route to a capable bundled engine instead of producing that diagnostic.
+- When native LTO does land in reld's own engine it will still be **incompatible with the
+  incremental path** — gold and MSVC both fall back to a full link for it — so trigger 13 in
+  `09-INCREMENTAL.md` §I1 stays permanent. Routing an LTO link to the `lld` bridge is likewise
+  incompatible with the incremental path, for the same reason.
 
 Do not treat "LTO is a non-goal" as current. Earlier drafts of `DESIGN.md` and `README.md` said
-that; both have been corrected.
+that; both have been corrected. Do not treat "the flag-aware router routes LTO today" as current
+either — see `agents/docs/polylinker.md` for the shipped-vs-designed summary.
 
 ## D12 — Test oracle. **Locked: semantic differential, not byte comparison.**
 
