@@ -37,9 +37,13 @@ means concretely, and what part of it is shipped vs. designed.
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
 with independent `latest.json` and `history.jsonl` per target. Linux measures reld's native
-engine; Windows and macOS currently report honest `n/a` for reld in this clang-based harness
-until the rustc-based bridge measurement lands. Every chart labels reference, native, and bridge
-series modes in its generated metadata.*
+engine; Windows and macOS mark reld **`pending`** (unsupported-by-design in this clang-based
+harness) until the rustc-based bridge measurement lands — an explicit, documented state that
+`latest.json` and the charts render distinctly from a failed `n/a`. Each platform gates its
+**expected** linkers in CI (Linux `bfd`/`lld`/`mold`/`wild`/`reld`, Windows `link.exe`/`lld`,
+macOS `ld`/`ld64.lld`): a missing timing for an expected linker fails the build, so coverage can
+never silently understate itself (see [#63](https://github.com/zackees/reld/issues/63)). Every
+chart labels reference, native, and bridge series modes in its generated metadata.*
 <!-- BENCHMARK:END -->
 
 ## What it is

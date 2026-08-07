@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
@@ -45,6 +45,9 @@ FG = (230, 237, 243)
 MUTED = (125, 133, 144)
 GRID = (48, 54, 61)
 NA = (70, 76, 86)
+# Pending (unsupported-by-design) reads as a deliberate, documented gap — amber, distinct from the
+# dim grey of a failed ``n/a`` so the chart never conflates the two.
+PENDING = (187, 128, 9)
 
 # Stable colour per linker so a series keeps its identity across runs.
 SERIES_COLORS = {
@@ -62,6 +65,15 @@ class Row:
     scenario: str
     series: str
     seconds: float | None
+    # A cell is *pending* when the linker is unsupported-by-design on this platform (documented,
+    # e.g. reld's bridge measurement on Windows/macOS) rather than *failed* (a real ``n/a``). The
+    # two are indistinguishable as bare ``n/a`` — this flag is what keeps them apart downstream.
+    pending: bool = False
+
+    def status(self) -> str:
+        if self.seconds is not None:
+            return "measured"
+        return "pending" if self.pending else "na"
 
 
 @dataclass
@@ -83,6 +95,23 @@ class Report:
                 return r.seconds
         return None
 
+    def is_pending(self, scenario: str, series: str) -> bool:
+        for r in self.rows:
+            if r.scenario == scenario and r.series == series:
+                return r.pending
+        return False
+
+    def series_status(self, series: str) -> str:
+        """Collapse a series' per-scenario cells into one status. A series counts as *measured*
+        if any scenario produced a real timing, *pending* if it was never measured but every
+        cell is a deliberate pending marker, otherwise *na* (failed)."""
+        cells = [r for r in self.rows if r.series == series]
+        if any(r.seconds is not None for r in cells):
+            return "measured"
+        if cells and all(r.pending for r in cells):
+            return "pending"
+        return "na"
+
 
 def _clean(cell: str) -> str:
     return cell.replace("**", "").replace("`", "").strip()
@@ -96,6 +125,20 @@ def _to_seconds(cell: str) -> float | None:
         return float(cell.rstrip("s"))
     except ValueError:
         return None
+
+
+# Cell tokens the runner uses to mark a linker it did not time on purpose, rather than one that
+# failed. Kept distinct from the ``n/a`` family in ``_to_seconds`` so pending never renders as a
+# silent failure.
+_PENDING_TOKENS = ("pending", "pending*", "todo")
+
+
+def _classify(cell: str) -> tuple[float | None, bool]:
+    """Return ``(seconds, pending)`` for a raw table cell. ``seconds`` is ``None`` for both
+    failed (``n/a``) and pending cells; ``pending`` is ``True`` only for the deliberate markers."""
+    if _clean(cell).lower() in _PENDING_TOKENS:
+        return None, True
+    return _to_seconds(cell), False
 
 
 def parse_benchmark_log(text: str) -> Report:
@@ -139,8 +182,10 @@ def parse_benchmark_log(text: str) -> Report:
         if not scenario:
             continue
         for idx, series in enumerate(report.series, start=1):
-            value = _to_seconds(cells[idx]) if idx < len(cells) else None
-            report.rows.append(Row(scenario=scenario, series=series, seconds=value))
+            value, pending = _classify(cells[idx]) if idx < len(cells) else (None, False)
+            report.rows.append(
+                Row(scenario=scenario, series=series, seconds=value, pending=pending)
+            )
 
     return report
 
@@ -272,12 +317,15 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
             d.text((34 * SCALE, (y + 5) * SCALE), s, font=f_meta, fill=MUTED)
 
             if v is None:
+                pending = report.is_pending(scenario, s)
+                edge = PENDING if pending else NA
+                label = "pending" if pending else "n/a"
                 d.rectangle(
                     [bar_x * SCALE, (y + 4) * SCALE, (bar_x + 60) * SCALE, (y + 18) * SCALE],
-                    outline=NA,
+                    outline=edge,
                     width=SCALE,
                 )
-                d.text(((bar_x + 70) * SCALE, (y + 5) * SCALE), "n/a", font=f_meta, fill=NA)
+                d.text(((bar_x + 70) * SCALE, (y + 5) * SCALE), label, font=f_meta, fill=edge)
             else:
                 w = max(2, int(bar_max * (v / peak))) if peak > 0 else 2
                 d.rectangle(
@@ -297,7 +345,8 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
 
     d.text(
         (20 * SCALE, (height - 24) * SCALE),
-        "lower is better  |  median of N trials, link step only  |  n/a = linker unavailable on runner",
+        "lower is better  |  median of N trials, link step only  |  "
+        "n/a = linker failed/unavailable  |  pending = unsupported-by-design (documented)",
         font=f_meta,
         fill=MUTED,
     )
@@ -313,7 +362,12 @@ def render_html(report: Report, meta: dict[str, Any]) -> str:
         cells = ""
         for s in report.series:
             v = report.value(sc, s)
-            cells += f"<td>{'n/a' if v is None else f'{v:.4f}s'}</td>"
+            if v is not None:
+                cells += f"<td>{v:.4f}s</td>"
+            elif report.is_pending(sc, s):
+                cells += '<td class="pending">pending</td>'
+            else:
+                cells += '<td class="na">n/a</td>'
         body += f"<tr><td>{sc}</td>{cells}</tr>"
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>reld benchmarks</title>
@@ -321,6 +375,7 @@ def render_html(report: Report, meta: dict[str, Any]) -> str:
 body{{background:#0d1117;color:#e6edf3;font:14px system-ui,sans-serif;margin:2rem auto;max-width:960px}}
 table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #30363d;padding:.4rem .6rem;text-align:right}}
 th:first-child,td:first-child{{text-align:left}}img{{max-width:100%}}a{{color:#58a6ff}}
+td.na{{color:#7d8590}}td.pending{{color:#bb8009}}
 </style></head><body>
 <h1>reld &mdash; link benchmark</h1>
 <p>{meta['generated_at']} &middot; {meta.get('target','')} &middot; {meta['runner']['platform']}</p>
@@ -347,6 +402,10 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
                 "scenario": r.scenario,
                 "series": r.series,
                 "seconds": r.seconds,
+                # "measured" | "pending" | "na" — pending (unsupported-by-design, documented) is
+                # kept distinct from na (failed) so consumers never read a deliberate gap as a
+                # regression. See issue #63.
+                "status": r.status(),
                 "mode": series_mode(r.series, runner_os, meta.get("target", "")),
             }
             for r in report.rows

@@ -25,10 +25,15 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-linux
+          # reld is measured natively on Linux; on Windows/macOS it is pending-by-design (the
+          # rustc-based bridge measurement hasn't landed — see #17), so it renders an explicit
+          # `pending` rather than a silent `n/a` (#63).
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
+            reld_pending: "reld bridge measurement pending (rustc-based); see #17"
           - runner: macos-14
             target: aarch64-apple-darwin
+            reld_pending: "reld bridge measurement pending (rustc-based); see #17"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -89,12 +94,34 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          RELD_PENDING: ${{ matrix.reld_pending }}
         run: |
           set -euo pipefail
           mkdir -p benchmark-output
-          cargo run --release -p reld-testkit --bin reld-bench -- \
-            --target "$TARGET" --trials 5 --warmup 1 \
-            > "benchmark-output/benchmark.log" 2>&1
+          if [ -n "${RELD_PENDING:-}" ]; then
+            # Render reld's documented, unsupported-by-design gap as `pending`, never silent n/a.
+            cargo run --release -p reld-testkit --bin reld-bench -- \
+              --target "$TARGET" --trials 5 --warmup 1 --reld-pending "$RELD_PENDING" \
+              > "benchmark-output/benchmark.log" 2>&1
+          else
+            cargo run --release -p reld-testkit --bin reld-bench -- \
+              --target "$TARGET" --trials 5 --warmup 1 \
+              > "benchmark-output/benchmark.log" 2>&1
+          fi
+
+      - name: Assert benchmark coverage (no silent n/a for expected linkers)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Fails the build if any expected linker for this platform reports n/a, or if a
+          # pending-by-design linker slipped to a bare n/a. Prints the expected-vs-measured
+          # table to the log and the job step summary (#63).
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          "$PY" -m ci.benchmark_coverage \
+            --input-log "benchmark-output/benchmark.log" --target "$TARGET"
 
       - name: Upload raw benchmark log
         if: always()

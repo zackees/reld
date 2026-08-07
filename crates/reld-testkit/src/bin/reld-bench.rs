@@ -56,6 +56,14 @@ struct Args {
     #[arg(long)]
     target: Option<String>,
 
+    /// Mark reld as *pending / unsupported-by-design* with this reason when it can't be measured
+    /// on this platform (e.g. the bridge measurement hasn't landed yet on Windows/macOS). The
+    /// reld cell then renders `pending` (carrying the reason as an HTML comment) instead of a bare
+    /// `n/a`, so the chart and `latest.json` can tell a documented gap apart from a real failure
+    /// (#63). Ignored when a working `ld.reld` shim is discovered — real data always wins.
+    #[arg(long)]
+    reld_pending: Option<String>,
+
     /// Replay a frozen link corpus instead of generating synthetic workloads: this directory
     /// must contain `corpus.json` plus the referenced object files (as produced by the
     /// benchmark-assets pipeline and fetched via `ci/benchmark_assets.py`). Times only the link
@@ -238,6 +246,15 @@ fn main() -> Result<()> {
         reld_unavailable_reason
     };
 
+    let reld_measured = reld_shim_str.is_some() && reld_ok;
+    // When reld can't be measured but the caller declared it pending-by-design, render `pending`
+    // (carrying the reason) instead of a silent `n/a`. A working shim always wins over the flag.
+    let reld_pending = if reld_measured {
+        None
+    } else {
+        args.reld_pending.clone()
+    };
+
     let target = args.target.clone().unwrap_or_else(target_triple);
     println!("## Link Benchmark: {target}");
     println!();
@@ -276,15 +293,21 @@ fn main() -> Result<()> {
                 }
             }
         }
-        match (&reld_shim_str, reld_ok) {
-            (Some(linker), true) => match time_link(&args, &dir, &objects, linker) {
+        if reld_measured {
+            let linker = reld_shim_str
+                .as_ref()
+                .expect("measured implies a shim path");
+            match time_link(&args, &dir, &objects, linker) {
                 Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
                 Err(e) => {
                     failures.push(("reld".to_string(), name.clone(), e.to_string()));
                     println!(" n/a |");
                 }
-            },
-            _ => println!(" n/a |"),
+            }
+        } else if reld_pending.is_some() {
+            println!(" pending |");
+        } else {
+            println!(" n/a |");
         }
     }
 
@@ -297,7 +320,9 @@ fn main() -> Result<()> {
             );
         }
     }
-    if let Some(reason) = reld_unavailable_reason {
+    if let Some(reason) = &reld_pending {
+        println!("{}", format_pending_comment("reld", reason));
+    } else if let Some(reason) = reld_unavailable_reason {
         println!("<!-- linker reld not available: {reason} -->");
     }
     for (linker, scenario, error) in &failures {
@@ -336,6 +361,25 @@ fn format_failure_comment(linker: &str, scenario: &str, error: &str) -> String {
         neutralized
     };
     format!("<!-- linker {linker} link failed ({scenario}): {truncated} -->")
+}
+
+/// Format reld's pending-by-design marker as a single-line HTML comment carrying the reason. Same
+/// one-line / `-->`-safe / length-capped guarantees as [`format_failure_comment`], so it is always
+/// safe to emit as one `<!-- ... -->` line.
+fn format_pending_comment(linker: &str, reason: &str) -> String {
+    let collapsed = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let neutralized = collapsed.replace("-->", "- >");
+    let truncated: String = if neutralized.chars().count() > FAILURE_COMMENT_ERROR_LIMIT {
+        let mut s: String = neutralized
+            .chars()
+            .take(FAILURE_COMMENT_ERROR_LIMIT)
+            .collect();
+        s.push_str("...");
+        s
+    } else {
+        neutralized
+    };
+    format!("<!-- linker {linker} pending: {truncated} -->")
 }
 
 fn target_triple() -> String {
@@ -543,6 +587,12 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
         Some(linker) => probe_linker(&cc, linker, &root).unwrap_or(false),
         None => false,
     };
+    let reld_measured = reld_shim_str.is_some() && reld_ok;
+    let reld_pending = if reld_measured {
+        None
+    } else {
+        args.reld_pending.clone()
+    };
 
     let target = args.target.clone().unwrap_or_else(target_triple);
     let scenario = corpus
@@ -581,8 +631,11 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
             Err(_) => print!(" n/a |"),
         }
     }
-    match (&reld_shim_str, reld_ok) {
-        (Some(linker), true) => match time_link_replay(
+    if reld_measured {
+        let linker = reld_shim_str
+            .as_ref()
+            .expect("measured implies a shim path");
+        match time_link_replay(
             &cc,
             &objects,
             &corpus.extra_link_args,
@@ -593,10 +646,16 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
         ) {
             Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
             Err(_) => println!(" n/a |"),
-        },
-        _ => println!(" n/a |"),
+        }
+    } else if reld_pending.is_some() {
+        println!(" pending |");
+    } else {
+        println!(" n/a |");
     }
     println!();
+    if let Some(reason) = &reld_pending {
+        println!("{}", format_pending_comment("reld", reason));
+    }
     Ok(())
 }
 
@@ -640,6 +699,48 @@ mod tests {
     fn ld64_lld_token_falls_back_to_lld_when_not_found() {
         let resolved = resolve_fuse_ld("ld64.lld", |_| None);
         assert_eq!(resolved, "lld");
+    }
+
+    #[test]
+    fn expected_linker_tokens_never_resolve_to_a_bogus_ld_name() {
+        // Regression guard for #60/#63 across the full expected matrix: no expected linker may
+        // resolve to a bare `ld64.lld`, which clang would rewrite to a nonexistent `ld.ld64.lld`
+        // and link silently to n/a. Reference linkers pass through so clang forms the real
+        // `ld.bfd` / `ld.lld` / `ld.mold` / `ld.wild`; `ld64.lld` must be rewritten.
+        for token in ["bfd", "lld", "mold", "wild"] {
+            assert_eq!(
+                resolve_fuse_ld(token, |_| panic!("reference tokens need no PATH lookup")),
+                token,
+                "{token} must pass through so clang forms ld.{token}"
+            );
+        }
+        assert_eq!(
+            resolve_fuse_ld("ld64.lld", |_| Some(PathBuf::from("/usr/bin/ld64.lld"))),
+            "/usr/bin/ld64.lld"
+        );
+        let fallback = resolve_fuse_ld("ld64.lld", |_| None);
+        assert_ne!(
+            fallback, "ld64.lld",
+            "must never stay a bare ld64.lld token"
+        );
+        assert_eq!(fallback, "lld");
+    }
+
+    #[test]
+    fn format_pending_comment_is_single_line_and_safe() {
+        // The reason is caller-supplied, so it gets the same one-line / `-->`-safe treatment as a
+        // failure comment: no embedded newline, exactly one `-->` (the closing delimiter).
+        let comment =
+            format_pending_comment("reld", "bridge measurement pending\nsee --> issue #17");
+        assert!(
+            comment.starts_with("<!-- linker reld pending: "),
+            "{comment}"
+        );
+        assert!(comment.ends_with("-->"));
+        assert_eq!(comment.matches("-->").count(), 1, "{comment}");
+        assert!(!comment.contains('\n'), "{comment}");
+        assert!(comment.contains("bridge measurement pending"));
+        assert!(comment.contains("issue #17"));
     }
 
     #[test]
