@@ -63,7 +63,7 @@ jobs:
           set -euo pipefail
           echo 'CC_x86_64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
           echo 'CXX_x86_64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
-          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=clang-cl' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link' >> "$GITHUB_ENV"
 
       - name: Build linker
         shell: bash
