@@ -379,6 +379,20 @@ jobs:
           path: benchmark-windows-msvc.md
           if-no-files-found: warn
 
+      - name: Windows MSVC self-host (link reld with reld-link)
+        if: matrix.kind == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $reld = "$env:GITHUB_WORKSPACE\target\debug\reld-link.exe"
+          if (-not (Test-Path $reld)) { throw "reld-link.exe not found at $reld" }
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $reld
+          & $env:CARGO_COMMAND build -p reld --bin reld
+          if ($LASTEXITCODE -ne 0) { throw "self-host build (link reld with reld-link) failed" }
+          $out = & "$env:GITHUB_WORKSPACE\target\debug\reld.exe" --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "self-linked reld --version failed (exit $LASTEXITCODE)" }
+          Write-Output $out
+          if ($out -notmatch 'Reld') { throw "self-linked reld --version output missing 'Reld' marker" }
+
       - name: macOS native tests
         if: matrix.kind == 'macos-arm64'
         shell: bash
