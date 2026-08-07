@@ -52,6 +52,13 @@ jobs:
             target: aarch64-apple-darwin
             artifact: reld-macos-arm64
             executable: reld
+          # windows-gnu cross-from-Linux: soldr provisions the Linux-hosted
+          # mingw cross gcc toolchain (soldr-toolchain#114 Phase 2), so no
+          # hand-installed `gcc-mingw-w64`. Requires soldr >= 0.8.44.
+          - name: windows-gnu
+            target: x86_64-pc-windows-gnu
+            artifact: reld-windows-x86_64-gnu
+            executable: reld.exe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -66,6 +73,9 @@ jobs:
         id: setup
         uses: zackees/setup-soldr@main
         with:
+          # 0.8.44 is the first release with Linux-hosted win-gnu cross
+          # support (soldr#2341); msvc/darwin work on it too.
+          version: 0.8.44
           cross-targets: ${{ matrix.target }}
           cache: true
           cache-preset: full
@@ -94,6 +104,7 @@ jobs:
           file "package/${{ matrix.executable }}"
           case "${{ matrix.target }}" in
             x86_64-pc-windows-msvc) file "package/${{ matrix.executable }}" | grep -q 'PE32' ;;
+            x86_64-pc-windows-gnu)  file "package/${{ matrix.executable }}" | grep -q 'PE32' ;;
             aarch64-apple-darwin)   file "package/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
           esac
 
@@ -144,15 +155,20 @@ jobs:
             runner: macos-14
             artifact: reld-macos-arm64
             executable: reld
+          - name: windows-gnu
+            runner: windows-2022
+            artifact: reld-windows-x86_64-gnu
+            executable: reld.exe
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: package
 
-      # On windows-msvc, reld is a normal executable and prints its version.
-      - name: Smoke deployed reld (windows-msvc)
-        if: matrix.name == 'windows-msvc'
+      # On Windows (msvc or gnu), reld is a normal executable and prints its
+      # version.
+      - name: Smoke deployed reld (windows)
+        if: startsWith(matrix.name, 'windows')
         shell: pwsh
         run: |
           $out = & ".\package\${{ matrix.executable }}" --version 2>&1 | Out-String
