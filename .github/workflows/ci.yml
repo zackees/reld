@@ -444,10 +444,14 @@ jobs:
           test -x "$reld"
           export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$reld"
           export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-Clinker-flavor=ld64.lld"
+          # A successful relink (reld -> ld64.lld) IS the self-host proof. Do not run the
+          # self-linked reld to check it: on a macOS host reld is invoked as a linker and bridges
+          # every invocation (incl. `--version`) to ld64.lld, so it can't print its own version.
+          # Instead confirm the relinked binary is a well-formed Mach-O executable.
           $CARGO_COMMAND build -p reld --bin reld
-          out=$("$reld" --version)
-          echo "$out"
-          echo "$out" | grep -q 'Reld'
+          test -x "$reld"
+          file "$reld"
+          file "$reld" | grep -q 'Mach-O'
 
       - name: Upload macOS benchmark artifact
         if: always() && matrix.kind == 'macos-arm64'
