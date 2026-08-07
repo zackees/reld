@@ -64,6 +64,12 @@ jobs:
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/benchmark-stats/history.jsonl" \
             || : > benchmark-stats/history.jsonl
 
+      - name: Build reld and install driver shims
+        run: |
+          set -euo pipefail
+          cargo build --release -p reld
+          bash ci/install-driver-shims.sh release
+
       - name: Run benchmark and render
         env:
           RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats

@@ -167,6 +167,10 @@ fn main() -> Result<()> {
     }
     println!("----:|");
 
+    // (linker display name, scenario name, error) for every `time_link` failure, so the
+    // linker's stderr isn't silently discarded behind the table's `n/a` cell — see #38.
+    let mut failures: Vec<(String, String, String)> = Vec::new();
+
     for (name, spec) in scenarios() {
         let dir = root.join(name.split_whitespace().next().unwrap_or("s"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -181,13 +185,19 @@ fn main() -> Result<()> {
             }
             match time_link(&args, &dir, &objects, linker) {
                 Ok(d) => print!(" {:.4} |", d.as_secs_f64()),
-                Err(_) => print!(" n/a |"),
+                Err(e) => {
+                    failures.push((linker.clone(), name.clone(), e.to_string()));
+                    print!(" n/a |");
+                }
             }
         }
         match (&reld_shim_str, reld_ok) {
             (Some(linker), true) => match time_link(&args, &dir, &objects, linker) {
                 Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
-                Err(_) => println!(" n/a |"),
+                Err(e) => {
+                    failures.push(("reld".to_string(), name.clone(), e.to_string()));
+                    println!(" n/a |");
+                }
             },
             _ => println!(" n/a |"),
         }
@@ -202,7 +212,42 @@ fn main() -> Result<()> {
     if let Some(reason) = reld_unavailable_reason {
         println!("<!-- linker reld not available: {reason} -->");
     }
+    for (linker, scenario, error) in &failures {
+        println!("{}", format_failure_comment(linker, scenario, error));
+    }
     Ok(())
+}
+
+/// Max length (in characters) of the sanitized error text embedded in a failure comment, so a
+/// huge linker stderr dump doesn't bloat the log.
+const FAILURE_COMMENT_ERROR_LIMIT: usize = 500;
+
+/// How many leading lines of the linker's error output to keep before sanitizing/truncating.
+const FAILURE_COMMENT_ERROR_LINES: usize = 3;
+
+/// Format a `time_link` failure as a single-line HTML comment, so the linker's stderr is visible
+/// in the benchmark output instead of being silently discarded behind the table's `n/a` cell
+/// (see #38). The result is always safe to emit as one `<!-- ... -->` line: it never contains a
+/// literal `-->` sequence or an embedded newline, and the error text is capped in length.
+fn format_failure_comment(linker: &str, scenario: &str, error: &str) -> String {
+    let head: String = error
+        .lines()
+        .take(FAILURE_COMMENT_ERROR_LINES)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let collapsed = head.split_whitespace().collect::<Vec<_>>().join(" ");
+    let neutralized = collapsed.replace("-->", "- >");
+    let truncated: String = if neutralized.chars().count() > FAILURE_COMMENT_ERROR_LIMIT {
+        let mut s: String = neutralized
+            .chars()
+            .take(FAILURE_COMMENT_ERROR_LIMIT)
+            .collect();
+        s.push_str("...");
+        s
+    } else {
+        neutralized
+    };
+    format!("<!-- linker {linker} link failed ({scenario}): {truncated} -->")
 }
 
 fn target_triple() -> String {
@@ -279,8 +324,27 @@ fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
     Ok(cmd.output().map(|o| o.status.success()).unwrap_or(false))
 }
 
+/// Build a filesystem-safe output filename for a linker's benchmark artifact. `linker` is the
+/// `-fuse-ld=` value, which for reld is the **absolute path** to the `ld.reld` shim; embedding it
+/// raw would make `dir.join` interpret the path separators as nested directories that don't
+/// exist, so reld (correctly) fails to open its output. Flatten separators so the artifact lands
+/// directly in `dir`.
+fn bench_output_name(linker: &str) -> String {
+    let safe: String = linker
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    format!("bench-{safe}.bin")
+}
+
 fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Result<Duration> {
-    let out = dir.join(format!("bench-{linker}.bin"));
+    let out = dir.join(bench_output_name(linker));
 
     for _ in 0..args.warmup {
         link_once(args, objects, linker, &out)?;
@@ -373,5 +437,60 @@ mod tests {
     fn discover_reld_returns_none_when_no_sibling_dir() {
         // `current_exe()` failing (sibling dir = None) must degrade to None, not panic.
         assert_eq!(discover_reld_in(&None, None), None);
+    }
+
+    #[test]
+    fn format_failure_comment_neutralizes_collapses_and_caps() {
+        // Embedded `-->` must not terminate the comment early, newlines must collapse so the
+        // whole thing stays one line, and a huge dump must be capped in length.
+        let huge_line = "x".repeat(1000);
+        let error =
+            format!("first line has --> in it\nsecond line\n{huge_line}\nfourth line dropped");
+        let comment = format_failure_comment("reld", "large (512 units)", &error);
+
+        assert_eq!(
+            comment.matches("-->").count(),
+            1,
+            "the only `-->` in the comment must be the closing delimiter: {comment}"
+        );
+        assert!(comment.ends_with("-->"));
+        assert!(!comment.contains('\n'), "must be a single line: {comment}");
+        assert!(comment.contains("reld"));
+        assert!(comment.contains("large (512 units)"));
+        assert!(comment.starts_with("<!-- linker reld link failed (large (512 units)): "));
+        assert!(
+            comment.len() < error.len(),
+            "must be capped shorter than the raw error: {comment}"
+        );
+        // Only the first FAILURE_COMMENT_ERROR_LINES lines are considered, so the dropped
+        // fourth line's marker text must not appear.
+        assert!(!comment.contains("fourth line dropped"));
+    }
+
+    #[test]
+    fn format_failure_comment_passes_through_short_single_line_errors() {
+        let comment = format_failure_comment("bfd", "small (16 units)", "undefined symbol: foo");
+        assert_eq!(
+            comment,
+            "<!-- linker bfd link failed (small (16 units)): undefined symbol: foo -->"
+        );
+    }
+
+    #[test]
+    fn bench_output_name_flattens_path_separators() {
+        // A short name is untouched...
+        assert_eq!(bench_output_name("lld"), "bench-lld.bin");
+        // ...but an absolute path (the reld shim) must not embed separators, or `dir.join` would
+        // create nonexistent nested directories and the link would fail to open its output.
+        let name = bench_output_name("/home/runner/reld/target/release/ld.reld");
+        assert_eq!(name, "bench-_home_runner_reld_target_release_ld.reld.bin");
+        assert!(
+            !name.contains('/'),
+            "no separators in the flattened name: {name}"
+        );
+        assert_eq!(
+            bench_output_name(r"C:\tc\ld.reld"),
+            "bench-C__tc_ld.reld.bin"
+        );
     }
 }
