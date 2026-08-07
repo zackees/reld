@@ -22,6 +22,11 @@ fn run() -> reld_core::error::Result {
     reld_core::init_timing()?;
 
     let mut args = reld_core::Args::new(std::env::args)?;
+
+    if args.is_coff() {
+        return reld_core::run_bridge(std::env::args_os());
+    }
+
     args.set_version(VERSION);
     args.parse(std::env::args)?;
 
