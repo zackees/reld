@@ -206,6 +206,13 @@ impl Args {
         }
     }
 
+    /// Returns whether these args are for the COFF/Windows bridge (see the `bridge` module).
+    /// Callers should check this before calling `parse`, since the COFF variant reuses the
+    /// ELF/GNU parser as a placeholder and cannot actually parse MSVC-style link arguments.
+    pub fn is_coff(&self) -> bool {
+        matches!(self, Args::Coff(_))
+    }
+
     pub(crate) fn print_emulation_info(&self, stdout: &mut dyn Write) -> Result<()> {
         match self {
             Args::Elf(_) => {

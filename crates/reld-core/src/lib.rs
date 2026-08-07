@@ -3,6 +3,8 @@ pub use args::Args;
 pub(crate) mod arch;
 pub(crate) mod archive;
 pub mod args;
+pub mod bridge;
+pub use bridge::run_bridge;
 pub(crate) mod compression;
 pub(crate) mod debug_trace;
 pub(crate) mod diagnostics;
