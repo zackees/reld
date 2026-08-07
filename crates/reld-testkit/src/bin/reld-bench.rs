@@ -51,6 +51,10 @@ struct Args {
     /// executable.
     #[arg(long)]
     reld: Option<PathBuf>,
+
+    /// Label written in the benchmark heading (for example, a Rust target triple).
+    #[arg(long)]
+    target: Option<String>,
 }
 
 /// Workload sizes. Small is where incremental linking will eventually matter most; large is
@@ -74,7 +78,26 @@ fn scenarios() -> Vec<(String, WorkloadSpec)> {
 
 /// `-fuse-ld=` values. `""` means the compiler default.
 fn default_linkers() -> Vec<&'static str> {
-    vec!["bfd", "lld", "mold", "wild"]
+    if cfg!(target_os = "windows") {
+        vec!["", "lld"]
+    } else if cfg!(target_os = "macos") {
+        vec!["", "ld64.lld"]
+    } else {
+        vec!["bfd", "lld", "mold", "wild"]
+    }
+}
+
+fn display_linker(linker: &str) -> &str {
+    if !linker.is_empty() {
+        return linker;
+    }
+    if cfg!(target_os = "windows") {
+        "link.exe"
+    } else if cfg!(target_os = "macos") {
+        "ld"
+    } else {
+        "default"
+    }
 }
 
 /// Locate the `ld.reld` driver shim produced by `ci/install-driver-shims.sh`.
@@ -154,11 +177,12 @@ fn main() -> Result<()> {
         reld_unavailable_reason
     };
 
-    println!("## Link Benchmark: {}", target_triple());
+    let target = args.target.clone().unwrap_or_else(target_triple);
+    println!("## Link Benchmark: {target}");
     println!();
     print!("| Scenario |");
     for (l, _) in &available {
-        print!(" {l} |");
+        print!(" {} |", display_linker(l));
     }
     println!(" reld |");
     print!("|:---------|");
@@ -206,7 +230,10 @@ fn main() -> Result<()> {
     println!();
     for (l, ok) in &available {
         if !ok {
-            println!("<!-- linker {l} not available on this runner -->");
+            println!(
+                "<!-- linker {} not available on this runner -->",
+                display_linker(l)
+            );
         }
     }
     if let Some(reason) = reld_unavailable_reason {

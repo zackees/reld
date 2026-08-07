@@ -145,12 +145,25 @@ def parse_benchmark_log(text: str) -> Report:
     return report
 
 
-def series_mode(series: str, runner_os: str) -> str:
+def target_os(target: str) -> str | None:
+    """Infer the benchmark OS from its stable target label when available."""
+    normalized = target.lower()
+    if "windows" in normalized or "msvc" in normalized:
+        return "Windows"
+    if "darwin" in normalized or "macos" in normalized:
+        return "Darwin"
+    if "linux" in normalized:
+        return "Linux"
+    return None
+
+
+def series_mode(series: str, runner_os: str, target: str = "") -> str:
     """How a benchmark series was produced. reld is the subject; everything else is a
     reference linker. reld links natively (wild ELF) on Linux and via the lld bridge
     elsewhere."""
     if series == "reld":
-        return "native" if runner_os == "Linux" else "bridge"
+        effective_os = target_os(target) or runner_os
+        return "native" if effective_os == "Linux" else "bridge"
     return "reference"
 
 
@@ -178,7 +191,7 @@ def collect_metadata(report: Report) -> dict[str, Any]:
         "run_url": f"https://github.com/{repo}/actions/runs/{run_id}" if run_id else None,
         "target": report.label,
         "runner": {
-            "os": platform.system(),
+            "os": target_os(report.label) or platform.system(),
             "arch": platform.machine(),
             "platform": platform.platform(),
             "cpu_count": os.cpu_count(),
@@ -334,7 +347,7 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
                 "scenario": r.scenario,
                 "series": r.series,
                 "seconds": r.seconds,
-                "mode": series_mode(r.series, runner_os),
+                "mode": series_mode(r.series, runner_os, meta.get("target", "")),
             }
             for r in report.rows
         ],

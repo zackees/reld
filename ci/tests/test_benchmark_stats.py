@@ -100,6 +100,12 @@ def test_series_mode():
     assert series_mode("lld", "Windows") == "reference"
 
 
+def test_series_mode_uses_target_when_rendering_on_aggregation_runner():
+    assert series_mode("reld", "Linux", "x86_64-pc-windows-msvc") == "bridge"
+    assert series_mode("reld", "Linux", "aarch64-apple-darwin") == "bridge"
+    assert series_mode("reld", "Linux", "x86_64-linux") == "native"
+
+
 def test_history_appends_and_caps(tmp_path):
     r = parse_benchmark_log(SAMPLE_LOG)
     meta = collect_metadata(r)

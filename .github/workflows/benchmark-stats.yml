@@ -1,14 +1,8 @@
 name: Benchmark Stats
 
-# Runs the link benchmark against reference linkers and force-pushes the rendered chart to
-# an orphan `benchmark-stats` branch, which the README embeds via raw.githubusercontent.com.
-#
-# NOTE: raw.githubusercontent.com only serves unauthenticated requests for PUBLIC repos.
-# While reld is private the README image will 404 — the pipeline still runs and the
-# artifacts are still uploaded, so nothing is lost by running it early.
-#
-# Linux-only by construction: the inherited linker emits ELF only, so it cannot be benchmarked on Windows
-# or macOS runners. Those platforms get lld and the system linker once reld has backends.
+# Run one independently rendered benchmark for each supported target. The publish job is still
+# guarded to the default branch: dispatching this workflow on a PR validates every runner and
+# uploads all generated data without changing the public benchmark branch.
 
 on:
   workflow_dispatch:
@@ -24,63 +18,133 @@ permissions:
 
 jobs:
   benchmark:
-    name: Generate benchmark stats
-    runs-on: ubuntu-24.04
+    name: Generate ${{ matrix.target }} benchmark
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-linux
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@1.94.1
 
-      - name: Install linkers
+      - name: Install Linux linkers
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y clang lld mold python3-pil
-
-          # wild is not packaged. A failure here is not fatal — reld-bench probes each
-          # linker and reports an unavailable one as n/a, which shows up in the chart.
           cargo install --locked wild-linker || echo "wild unavailable; will report n/a"
-
-          # `-fuse-ld=wild` makes clang search for `ld.wild`, but the crate installs a
-          # binary called `wild`. Without this alias wild is silently reported as n/a
-          # forever, which looks like a working pipeline and is not.
           if command -v wild >/dev/null 2>&1; then
             ln -sf "$(command -v wild)" "$HOME/.cargo/bin/ld.wild"
           fi
-
-          # Fail loudly if a linker we expect is missing, rather than quietly charting n/a.
           for l in ld.lld ld.mold; do
             command -v "$l" >/dev/null || { echo "::error::$l missing"; exit 1; }
           done
-          command -v ld.wild >/dev/null || echo "::warning::ld.wild missing; wild will chart as n/a"
 
-      - name: Carry forward history
+      - name: Install Windows linkers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress --yes
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) { throw "clang missing" }
+          if (-not (Get-Command lld-link -ErrorAction SilentlyContinue)) { throw "lld-link missing" }
+          if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) { throw "link.exe missing" }
+
+      - name: Install macOS linkers
+        if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p benchmark-stats
-          curl --fail --silent --location --max-time 30 \
-            -o benchmark-stats/history.jsonl \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/benchmark-stats/history.jsonl" \
-            || : > benchmark-stats/history.jsonl
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
+          brew untap aws/tap || true
+          brew install llvm lld
+          {
+            echo "$(brew --prefix llvm)/bin"
+            echo "$(brew --prefix lld)/bin"
+          } >> "$GITHUB_PATH"
+          command -v clang
+          command -v ld64.lld
 
-      - name: Build reld and install driver shims
+      - name: Build native reld shim
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           set -euo pipefail
           cargo build --release -p reld
           bash ci/install-driver-shims.sh release
 
-      - name: Run benchmark and render
+      - name: Run benchmark
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-output
+          cargo run --release -p reld-testkit --bin reld-bench -- \
+            --target "$TARGET" --trials 5 --warmup 1 \
+            > "benchmark-output/benchmark.log" 2>&1
+
+      - name: Upload raw benchmark log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-log-${{ matrix.target }}
+          path: benchmark-output/benchmark.log
+          if-no-files-found: error
+
+  aggregate:
+    name: Render and publish per-target graphs
+    needs: benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install renderer dependencies
+        run: python -m pip install --disable-pip-version-check pillow
+
+      - name: Download benchmark logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-log-*
+          path: benchmark-input
+          merge-multiple: false
+
+      - name: Carry forward history and render each target
+        shell: bash
         env:
           RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
         run: |
           set -euo pipefail
-          python3 -m ci.benchmark_stats \
-            --run-benchmarks \
-            --output-dir benchmark-stats \
-            --log-path benchmark-output/benchmark.log
+          targets=(x86_64-linux x86_64-pc-windows-msvc aarch64-apple-darwin)
+          for target in "${targets[@]}"; do
+            mkdir -p "benchmark-stats/$target"
+            curl --fail --silent --location --max-time 30 \
+              -o "benchmark-stats/$target/history.jsonl" \
+              "$RELD_BENCHMARK_RAW_BASE_URL/$target/history.jsonl" \
+              || : > "benchmark-stats/$target/history.jsonl"
+            python -m ci.benchmark_stats \
+              --input-log "benchmark-input/benchmark-log-$target/benchmark.log" \
+              --output-dir "benchmark-stats/$target"
+          done
 
-      - name: Upload artifacts
+      - name: Upload per-target benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -88,18 +152,11 @@ jobs:
           path: benchmark-stats
           if-no-files-found: error
 
-      - name: Upload bench log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-log
-          path: benchmark-output/benchmark.log
-          if-no-files-found: warn
-
       - name: Publish benchmark-stats branch
         if: ${{ success() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
           publish_dir="$(mktemp -d)"
@@ -111,6 +168,4 @@ jobs:
           git -C "$publish_dir" commit -m "chore: publish benchmark stats for ${GITHUB_SHA}"
           git -C "$publish_dir" remote add origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          # Orphan branch, replaced wholesale each run. History lives in history.jsonl,
-          # which is carried forward above — so do not add branch protection here.
           git -C "$publish_dir" push --force origin benchmark-stats
