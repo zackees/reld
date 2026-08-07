@@ -55,6 +55,31 @@ struct Args {
     /// Label written in the benchmark heading (for example, a Rust target triple).
     #[arg(long)]
     target: Option<String>,
+
+    /// Replay a frozen link corpus instead of generating synthetic workloads: this directory
+    /// must contain `corpus.json` plus the referenced object files (as produced by the
+    /// benchmark-assets pipeline and fetched via `ci/benchmark_assets.py`). Times only the link
+    /// step across every linker — zero compilation in the loop.
+    #[arg(long)]
+    replay_corpus: Option<PathBuf>,
+}
+
+/// Recipe for replaying a frozen link, read from `<corpus>/corpus.json`. Unknown fields are
+/// ignored so the JSON can carry extra metadata for other consumers. Only the fields needed to
+/// re-run the link are deserialized here.
+#[derive(serde::Deserialize)]
+struct Corpus {
+    /// C compiler / link driver to invoke. Falls back to `--cc` when absent.
+    #[serde(default)]
+    cc: Option<String>,
+    /// Object files (and other linker inputs) relative to the corpus directory.
+    objects: Vec<String>,
+    /// Extra arguments appended to the link (native libs, `-l…`, etc.).
+    #[serde(default)]
+    extra_link_args: Vec<String>,
+    /// Configuration label for the table row (e.g. `quick` / `thin-lto` / `full-lto`).
+    #[serde(default)]
+    configuration: Option<String>,
 }
 
 /// Workload sizes. Small is where incremental linking will eventually matter most; large is
@@ -138,6 +163,10 @@ fn discover_reld_in(explicit: &Option<PathBuf>, sibling_dir: Option<&Path>) -> O
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(dir) = args.replay_corpus.clone() {
+        return run_replay(&args, &dir);
+    }
 
     let root = match &args.workdir {
         Some(p) => p.clone(),
@@ -390,9 +419,190 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
     Ok(samples[samples.len() / 2])
 }
 
+/// Link a frozen corpus once with `cc`, appending `extra` (native libs etc.) and selecting
+/// `linker` via `-fuse-ld=`. Mirrors [`link_once`] but takes the compiler and extra args
+/// explicitly so the corpus can carry its own toolchain, independent of `--cc`.
+fn link_once_replay(
+    cc: &str,
+    objects: &[PathBuf],
+    extra: &[String],
+    linker: &str,
+    out: &Path,
+) -> Result<()> {
+    let mut cmd = Command::new(cc);
+    cmd.args(objects).args(extra).arg("-o").arg(out);
+    if !linker.is_empty() {
+        cmd.arg(format!("-fuse-ld={linker}"));
+    }
+    let status = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawning linker")?;
+    if !status.status.success() {
+        bail!("link failed: {}", String::from_utf8_lossy(&status.stderr));
+    }
+    Ok(())
+}
+
+/// Warmup + timed median link of a frozen corpus. Compilation never happens here — the objects
+/// are already on disk — so this measures only the link step.
+fn time_link_replay(
+    cc: &str,
+    objects: &[PathBuf],
+    extra: &[String],
+    linker: &str,
+    out_dir: &Path,
+    warmup: usize,
+    trials: usize,
+) -> Result<Duration> {
+    let out = out_dir.join(bench_output_name(linker));
+    for _ in 0..warmup {
+        link_once_replay(cc, objects, extra, linker, &out)?;
+    }
+    let mut samples = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        let _ = std::fs::remove_file(&out);
+        let t = Instant::now();
+        link_once_replay(cc, objects, extra, linker, &out)?;
+        samples.push(t.elapsed());
+    }
+    samples.sort();
+    Ok(samples[samples.len() / 2])
+}
+
+/// Replay a frozen link corpus: read `<dir>/corpus.json`, then time the link of its objects
+/// across every available linker (and reld's shim), emitting the same markdown table as the
+/// synthetic path. No compilation happens — only linking is measured.
+fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
+    let recipe = corpus_dir.join("corpus.json");
+    let text = std::fs::read_to_string(&recipe)
+        .with_context(|| format!("reading {}", recipe.display()))?;
+    let corpus: Corpus =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", recipe.display()))?;
+
+    let cc = corpus.cc.clone().unwrap_or_else(|| args.cc.clone());
+    let objects: Vec<PathBuf> = corpus.objects.iter().map(|o| corpus_dir.join(o)).collect();
+    for obj in &objects {
+        if !obj.exists() {
+            bail!("corpus object missing: {}", obj.display());
+        }
+    }
+
+    let root = args
+        .workdir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("reld-bench-replay"));
+    std::fs::create_dir_all(&root)?;
+
+    let requested: Vec<String> = if args.linkers.is_empty() {
+        default_linkers().into_iter().map(String::from).collect()
+    } else {
+        args.linkers.clone()
+    };
+    let mut available = Vec::new();
+    for l in &requested {
+        available.push((l.clone(), probe_linker(&cc, l, &root).unwrap_or(false)));
+    }
+
+    let reld_shim = discover_reld(&args.reld).and_then(|p| std::fs::canonicalize(&p).ok());
+    let reld_shim_str = reld_shim.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let reld_ok = match &reld_shim_str {
+        Some(linker) => probe_linker(&cc, linker, &root).unwrap_or(false),
+        None => false,
+    };
+
+    let target = args.target.clone().unwrap_or_else(target_triple);
+    let scenario = corpus
+        .configuration
+        .clone()
+        .unwrap_or_else(|| "corpus".to_string());
+    println!("## Link Benchmark: {target}");
+    println!();
+    print!("| Scenario |");
+    for (l, _) in &available {
+        print!(" {} |", display_linker(l));
+    }
+    println!(" reld |");
+    print!("|:---------|");
+    for _ in &available {
+        print!("----:|");
+    }
+    println!("----:|");
+
+    print!("| {scenario} |");
+    for (linker, ok) in &available {
+        if !ok {
+            print!(" n/a |");
+            continue;
+        }
+        match time_link_replay(
+            &cc,
+            &objects,
+            &corpus.extra_link_args,
+            linker,
+            &root,
+            args.warmup,
+            args.trials,
+        ) {
+            Ok(d) => print!(" {:.4} |", d.as_secs_f64()),
+            Err(_) => print!(" n/a |"),
+        }
+    }
+    match (&reld_shim_str, reld_ok) {
+        (Some(linker), true) => match time_link_replay(
+            &cc,
+            &objects,
+            &corpus.extra_link_args,
+            linker,
+            &root,
+            args.warmup,
+            args.trials,
+        ) {
+            Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
+            Err(_) => println!(" n/a |"),
+        },
+        _ => println!(" n/a |"),
+    }
+    println!();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_corpus_json_recipe() {
+        let json = r#"{
+            "schema_version": 1,
+            "platform": "x86_64-linux",
+            "configuration": "quick",
+            "cc": "clang",
+            "objects": ["objs/a.o", "objs/b.o"],
+            "extra_link_args": ["-lm"],
+            "output_name": "app"
+        }"#;
+        let corpus: Corpus = serde_json::from_str(json).unwrap();
+        assert_eq!(corpus.cc.as_deref(), Some("clang"));
+        assert_eq!(
+            corpus.objects,
+            vec!["objs/a.o".to_string(), "objs/b.o".to_string()]
+        );
+        assert_eq!(corpus.extra_link_args, vec!["-lm".to_string()]);
+        assert_eq!(corpus.configuration.as_deref(), Some("quick"));
+    }
+
+    #[test]
+    fn corpus_json_defaults_are_lenient() {
+        // Only `objects` is required; cc/extra/configuration default; unknown fields ignored.
+        let corpus: Corpus =
+            serde_json::from_str(r#"{"objects":["a.o"],"unknown":"ignored"}"#).unwrap();
+        assert!(corpus.cc.is_none());
+        assert!(corpus.extra_link_args.is_empty());
+        assert!(corpus.configuration.is_none());
+        assert_eq!(corpus.objects, vec!["a.o".to_string()]);
+    }
 
     /// Unique temp directory per test, so the (hermetic) discovery tests never touch the real
     /// executable directory or race each other.

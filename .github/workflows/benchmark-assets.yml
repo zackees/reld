@@ -1,0 +1,289 @@
+name: Benchmark Assets
+
+# Frozen linker-object benchmark corpora: build once per platform, pack, and publish to the
+# `benchmark-assets` branch alongside a single `manifest.json` index. The benchmark then fetches
+# a frozen corpus and replays only the link (`reld-bench --replay-corpus`) — zero compilation in
+# the loop. See ci/BENCHMARK_ASSETS.md.
+#
+# The `validate` job proves the whole pipeline end-to-end on every PR that touches it. The
+# `publish` job (default branch, dispatch/schedule only) regenerates the corpora + manifest and
+# force-pushes the `benchmark-assets` branch.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "37 9 * * *"
+  pull_request:
+    paths:
+      - ci/benchmark_assets.py
+      - ci/tests/test_benchmark_assets.py
+      - .github/workflows/benchmark-assets.yml
+      - crates/reld-testkit/src/bin/reld-bench.rs
+
+concurrency:
+  group: benchmark-assets-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # End-to-end proof on PRs: build a small real corpus, pack it, index it in a manifest, then
+  # fetch + verify + replay the link through reld-bench with zero compilation in the loop.
+  validate:
+    name: Validate assets pipeline (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install toolchain + linkers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld mold zstd
+
+      - name: Build reld-bench
+        shell: bash
+        run: cargo build -p reld-testkit --bin reld-bench
+
+      - name: Build a demo corpus (compile once)
+        id: corpus
+        shell: bash
+        run: |
+          set -euxo pipefail
+          corpus="${RUNNER_TEMP}/corpus"
+          mkdir -p "${corpus}/objs"
+          # A handful of trivial translation units, compiled once. #55 replaces this with a
+          # frozen Bevy capture; the pipeline is identical.
+          objs=()
+          for i in 0 1 2 3; do
+            printf 'int unit_%d(void){return %d;}\n' "$i" "$i" > "${corpus}/objs/u${i}.c"
+            clang -c "${corpus}/objs/u${i}.c" -o "${corpus}/objs/u${i}.o" -O0 -fPIC
+            objs+=("\"objs/u${i}.o\"")
+          done
+          printf 'int main(void){return 0;}\n' > "${corpus}/objs/main.c"
+          clang -c "${corpus}/objs/main.c" -o "${corpus}/objs/main.o" -O0 -fPIC
+          objs+=("\"objs/main.o\"")
+          joined=$(IFS=,; echo "${objs[*]}")
+          cat > "${corpus}/corpus.json" <<EOF
+          {
+            "schema_version": 1,
+            "platform": "x86_64-linux",
+            "configuration": "quick",
+            "cc": "clang",
+            "objects": [${joined}],
+            "extra_link_args": [],
+            "output_name": "app"
+          }
+          EOF
+          echo "dir=${corpus}" >> "${GITHUB_OUTPUT}"
+
+      - name: Pack, index, fetch, and replay
+        shell: bash
+        run: |
+          set -euxo pipefail
+          assets="${RUNNER_TEMP}/benchmark-assets"
+          mkdir -p "${assets}/x86_64-linux/quick"
+          archive_rel="x86_64-linux/quick/corpus.tar.zst"
+
+          python ci/benchmark_assets.py pack \
+            --corpus-dir "${{ steps.corpus.outputs.dir }}" \
+            --out "${assets}/${archive_rel}"
+
+          python ci/benchmark_assets.py manifest \
+            --out "${assets}/manifest.json" \
+            --generated-at "ci" --corpus-version "demo-v1" \
+            --base-url "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/benchmark-assets" \
+            --asset "platform=x86_64-linux,configuration=quick,archive=${assets}/${archive_rel},archive_path=${archive_rel}"
+
+          python ci/benchmark_assets.py validate --manifest "${assets}/manifest.json"
+
+          extracted="${RUNNER_TEMP}/extracted"
+          python ci/benchmark_assets.py fetch \
+            --manifest "${assets}/manifest.json" \
+            --platform x86_64-linux --configuration quick \
+            --base "${assets}" --dest "${extracted}"
+
+          # The benchmark consumes the fetched corpus and links it repeatedly — no compilation.
+          ./target/debug/reld-bench --replay-corpus "${extracted}" --trials 2 --warmup 1 \
+            | tee "${RUNNER_TEMP}/replay.md"
+          grep -q '## Link Benchmark:' "${RUNNER_TEMP}/replay.md"
+          grep -q '| quick |' "${RUNNER_TEMP}/replay.md"
+
+  # Per-platform corpus build + pack. Runs on dispatch/schedule; feeds `publish`.
+  build:
+    name: Build corpus (${{ matrix.target }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-linux
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install clang + zstd (linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld zstd
+
+      - name: Install clang + zstd (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install zstd || true
+          command -v clang
+
+      - name: Install clang + zstd (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install llvm zstandard --no-progress --yes
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build a corpus and pack it
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euxo pipefail
+          corpus="${RUNNER_TEMP}/corpus"
+          mkdir -p "${corpus}/objs"
+          objs=()
+          for i in 0 1 2 3; do
+            printf 'int unit_%d(void){return %d;}\n' "$i" "$i" > "${corpus}/objs/u${i}.c"
+            clang -c "${corpus}/objs/u${i}.c" -o "${corpus}/objs/u${i}.o" -O0
+            objs+=("\"objs/u${i}.o\"")
+          done
+          printf 'int main(void){return 0;}\n' > "${corpus}/objs/main.c"
+          clang -c "${corpus}/objs/main.c" -o "${corpus}/objs/main.o" -O0
+          objs+=("\"objs/main.o\"")
+          joined=$(IFS=,; echo "${objs[*]}")
+          cat > "${corpus}/corpus.json" <<EOF
+          {
+            "schema_version": 1,
+            "platform": "${TARGET}",
+            "configuration": "quick",
+            "cc": "clang",
+            "objects": [${joined}],
+            "extra_link_args": [],
+            "output_name": "app"
+          }
+          EOF
+          out="${RUNNER_TEMP}/out/${TARGET}/quick"
+          mkdir -p "${out}"
+          python ci/benchmark_assets.py pack --corpus-dir "${corpus}" --out "${out}/corpus.tar.zst"
+
+      - name: Upload corpus artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.target }}
+          path: ${{ runner.temp }}/out/${{ matrix.target }}/quick/corpus.tar.zst
+          if-no-files-found: error
+
+  # Assemble manifest.json and publish everything to the benchmark-assets branch.
+  publish:
+    name: Publish benchmark-assets branch
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: Download corpus artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: corpus-*
+          path: ${{ runner.temp }}/corpora
+
+      - name: Assemble benchmark-assets tree + manifest
+        id: assemble
+        shell: bash
+        run: |
+          set -euxo pipefail
+          assets="${RUNNER_TEMP}/benchmark-assets"
+          mkdir -p "${assets}"
+          base_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/benchmark-assets"
+          asset_args=()
+          for target in x86_64-linux x86_64-pc-windows-msvc aarch64-apple-darwin; do
+            src="${RUNNER_TEMP}/corpora/corpus-${target}/corpus.tar.zst"
+            if [[ ! -f "${src}" ]]; then
+              echo "::warning::no corpus artifact for ${target}; skipping"
+              continue
+            fi
+            rel="${target}/quick/corpus.tar.zst"
+            mkdir -p "${assets}/${target}/quick"
+            cp "${src}" "${assets}/${rel}"
+            asset_args+=(--asset "platform=${target},configuration=quick,archive=${assets}/${rel},archive_path=${rel}")
+          done
+          if [[ ${#asset_args[@]} -eq 0 ]]; then
+            echo "::error::no corpora to publish"; exit 1
+          fi
+          python ci/benchmark_assets.py manifest \
+            --out "${assets}/manifest.json" \
+            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --corpus-version "demo-v1" \
+            --base-url "${base_url}" \
+            "${asset_args[@]}"
+          python ci/benchmark_assets.py validate --manifest "${assets}/manifest.json"
+          touch "${assets}/.nojekyll"
+          echo "dir=${assets}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish to benchmark-assets branch
+        if: ${{ success() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          assets="${{ steps.assemble.outputs.dir }}"
+          echo "Publishing frozen linker-object corpora to the 'benchmark-assets' branch."
+          echo "This is a force-push of generated content (source sha ${GITHUB_SHA})."
+          echo "Contents:"
+          find "${assets}" -type f | sed "s#${assets}/#  #" | sort
+          publish_dir="$(mktemp -d)"
+          cp -a "${assets}/." "${publish_dir}/"
+          git -C "${publish_dir}" init -b benchmark-assets
+          git -C "${publish_dir}" config user.name "github-actions[bot]"
+          git -C "${publish_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${publish_dir}" add .
+          git -C "${publish_dir}" commit -m "chore: publish benchmark assets for ${GITHUB_SHA}"
+          git -C "${publish_dir}" remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "${publish_dir}" push --force origin benchmark-assets
+          count=$(find "${assets}" -name 'corpus.tar.zst' | wc -l)
+          echo "Published ${count} corpus archive(s) + manifest.json to benchmark-assets (https://github.com/${GITHUB_REPOSITORY}/tree/benchmark-assets)."
+
+      - name: Note when publish is skipped
+        if: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+        shell: bash
+        run: echo "Not on the default branch (${GITHUB_REF}); skipping publish of the benchmark-assets branch."
