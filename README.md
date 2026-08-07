@@ -25,16 +25,18 @@ means concretely, and what part of it is shipped vs. designed.
 > [#17](https://github.com/zackees/reld/issues/17) for the phase history.
 
 <!-- BENCHMARK:BEGIN -->
-[![Latest reld link benchmark](https://raw.githubusercontent.com/zackees/reld/benchmark-stats/benchmark-link.jpg)](https://github.com/zackees/reld/tree/benchmark-stats)
+<table><tr>
+<td align="center"><b>x86_64-linux</b><br><a href="https://github.com/zackees/reld/tree/benchmark-stats/x86_64-linux"><img alt="Linux reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-linux/benchmark-link.jpg"></a></td>
+<td align="center"><b>x86_64-pc-windows-msvc</b><br><a href="https://github.com/zackees/reld/tree/benchmark-stats/x86_64-pc-windows-msvc"><img alt="Windows reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-pc-windows-msvc/benchmark-link.jpg"></a></td>
+<td align="center"><b>aarch64-apple-darwin</b><br><a href="https://github.com/zackees/reld/tree/benchmark-stats/aarch64-apple-darwin"><img alt="macOS reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/aarch64-apple-darwin/benchmark-link.jpg"></a></td>
+</tr></table>
 
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
-alongside `latest.json` and `history.jsonl`. The `reld` column carries a real measurement on
-Linux (native engine, driven via `clang -fuse-ld`). It still charts `n/a` on Windows/macOS in
-this clang-based harness, because clang can't drive reld's bridge there — on those platforms reld
-links via rustc `-Clinker`, not `-fuse-ld`, so a bridge-mode bench number is future work, not a
-pending measurement being withheld. With [`soldr`](https://github.com/zackees/soldr) installed,
-reproduce locally with `soldr cargo run --release --bin reld-bench`.*
+with independent `latest.json` and `history.jsonl` per target. Linux measures reld's native
+engine; Windows and macOS currently report honest `n/a` for reld in this clang-based harness
+until the rustc-based bridge measurement lands. Every chart labels reference, native, and bridge
+series modes in its generated metadata.*
 <!-- BENCHMARK:END -->
 
 ## What it is
