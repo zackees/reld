@@ -1,0 +1,14 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[dependencies]
+dbcore = { path = "../dbcore" }
+anyhow.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
