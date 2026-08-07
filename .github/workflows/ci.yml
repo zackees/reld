@@ -435,6 +435,20 @@ jobs:
           grep -q '## Link Benchmark:' benchmark-macos-arm64.md || { echo "benchmark table missing '## Link Benchmark:' heading" >&2; exit 1; }
           grep -qE '\| *reld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing reld column" >&2; exit 1; }
 
+      - name: macOS self-host (link reld with reld)
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          reld="$GITHUB_WORKSPACE/target/debug/reld"
+          test -x "$reld"
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$reld"
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-Clinker-flavor=ld64.lld"
+          $CARGO_COMMAND build -p reld --bin reld
+          out=$("$reld" --version)
+          echo "$out"
+          echo "$out" | grep -q 'Reld'
+
       - name: Upload macOS benchmark artifact
         if: always() && matrix.kind == 'macos-arm64'
         uses: actions/upload-artifact@v4
