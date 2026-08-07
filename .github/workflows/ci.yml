@@ -360,6 +360,25 @@ jobs:
           if ($output -notmatch "OK") { throw "sqlite-bridge e2e output did not contain OK marker" }
           if ($output -notmatch "linked SQLite") { throw "sqlite-bridge e2e output did not contain 'linked SQLite' marker" }
 
+      - name: Windows MSVC reld-bench smoke
+        if: matrix.kind == 'windows-msvc'
+        shell: pwsh
+        run: |
+          & $env:CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker lld --trials 2 --warmup 1 | Tee-Object benchmark-windows-msvc.md
+          if ($LASTEXITCODE -ne 0) { throw "reld-bench exited with code $LASTEXITCODE" }
+          if (-not (Test-Path benchmark-windows-msvc.md)) { throw "benchmark-windows-msvc.md not produced" }
+          $table = Get-Content benchmark-windows-msvc.md -Raw
+          if (-not ($table | Select-String -Pattern '## Link Benchmark:' -Quiet)) { throw "benchmark table missing '## Link Benchmark:' heading" }
+          if (-not ($table | Select-String -Pattern '\| *reld *\|' -Quiet)) { throw "benchmark table missing reld column" }
+
+      - name: Upload Windows MSVC benchmark artifact
+        if: always() && matrix.kind == 'windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-windows-msvc
+          path: benchmark-windows-msvc.md
+          if-no-files-found: warn
+
       - name: macOS native tests
         if: matrix.kind == 'macos-arm64'
         shell: bash
@@ -371,6 +390,23 @@ jobs:
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
+
+      - name: macOS reld-bench smoke
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker lld --trials 2 --warmup 1 | tee benchmark-macos-arm64.md
+          grep -q '## Link Benchmark:' benchmark-macos-arm64.md || { echo "benchmark table missing '## Link Benchmark:' heading" >&2; exit 1; }
+          grep -qE '\| *reld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing reld column" >&2; exit 1; }
+
+      - name: Upload macOS benchmark artifact
+        if: always() && matrix.kind == 'macos-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-macos-arm64
+          path: benchmark-macos-arm64.md
+          if-no-files-found: warn
 
       - name: Publish Linux counts and skips
         if: always() && matrix.kind == 'linux-gnu'
