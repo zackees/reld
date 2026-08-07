@@ -56,11 +56,20 @@ jobs:
           set -euo pipefail
           python -c 'import json, os; p=json.loads(os.environ["CAPABILITIES"]); assert p["canonicalTarget"] == os.environ["TARGET"]; assert "build" in p["supportedOperations"]'
 
+      - name: Normalize MSVC compiler drivers
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'CC_x86_64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
+          echo 'CXX_x86_64_pc_windows_msvc=clang-cl' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=clang-cl' >> "$GITHUB_ENV"
+
       - name: Build linker
         shell: bash
         run: |
           set -euo pipefail
-          soldr build --locked --release --package reld --bin reld-link --target "${{ matrix.target }}"
+          soldr cargo build --locked --release --package reld --bin reld-link --target "${{ matrix.target }}"
           mkdir -p package
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "package/${{ matrix.executable }}"
 
