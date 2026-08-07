@@ -391,6 +391,27 @@ jobs:
           $CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
 
+      - name: macOS reld bridge e2e (sqlite)
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          reld="$GITHUB_WORKSPACE/target/debug/reld"
+          test -x "$reld"
+          # rustc's default flavor for aarch64-apple-darwin is the cc-wrapped "darwin-cc" (clang
+          # driver args). To hand reld raw ld64-native argv (which it forwards straight to
+          # ld64.lld, per the BR-3 bridge), select the direct/non-cc "ld64.lld" flavor. That
+          # string is a valid rustc 1.94 -C linker-flavor value (verified against the compiler's
+          # own accepted list) and emits Mach-O/ld64 args (-syslibroot/-lSystem/-arch/-platform_version).
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$reld"
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-Clinker-flavor=ld64.lld"
+          cd ci/e2e/sqlite-bridge
+          $CARGO_COMMAND build --bin app
+          output=$(./target/debug/app)
+          echo "$output"
+          echo "$output" | grep -q "OK"
+          echo "$output" | grep -q "linked SQLite"
+
       - name: macOS reld-bench smoke
         if: matrix.kind == 'macos-arm64'
         shell: bash

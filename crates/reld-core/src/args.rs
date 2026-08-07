@@ -213,6 +213,23 @@ impl Args {
         matches!(self, Args::Coff(_))
     }
 
+    /// Returns whether these args are for the Mach-O/macOS bridge (see the `bridge` module).
+    /// Callers should check this before calling `parse` (see `bridge_target`).
+    pub fn is_macho(&self) -> bool {
+        matches!(self, Args::MachO(_))
+    }
+
+    /// Returns the `bridge::BridgeTarget` these args should be routed to, if any. Callers should
+    /// check this before calling `parse`, and if it returns `Some`, delegate to
+    /// `crate::run_bridge` instead of parsing/linking natively.
+    pub fn bridge_target(&self) -> Option<crate::bridge::BridgeTarget> {
+        match self {
+            Args::Coff(_) => Some(crate::bridge::BridgeTarget::Coff),
+            Args::MachO(_) => Some(crate::bridge::BridgeTarget::MachO),
+            Args::Elf(_) => None,
+        }
+    }
+
     pub(crate) fn print_emulation_info(&self, stdout: &mut dyn Write) -> Result<()> {
         match self {
             Args::Elf(_) => {

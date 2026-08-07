@@ -1,4 +1,4 @@
-//! Windows/COFF bridge (issue #17, phase BR-1).
+//! Windows/COFF and macOS/Mach-O bridges (issue #17; BR-1 for COFF, BR-3 for Mach-O).
 //!
 //! `Args::new` reuses the ELF/GNU parser for `Args::Coff` because reld doesn't yet have a native
 //! COFF backend. Rather than feeding MSVC-style link arguments (`/OUT:`, `/DEFAULTLIB:`, …) into
@@ -6,8 +6,13 @@
 //! through to `lld-link` (the COFF driver built into `rust-lld`, which ships with every Rust
 //! toolchain). See issue #17 for the full design rationale and issue #18 for this phase's scope.
 //!
-//! This module intentionally never falls back to the closed-source MSVC `link.exe` -- silently
-//! doing so would poison benchmark comparability and mask discovery bugs (issue #17, decision B2).
+//! BR-3 (issue #29) generalizes this module to also bridge Mach-O links to `ld64.lld` (the
+//! Mach-O driver in `rust-lld`), following the exact same discovery + flavor-prefix strategy,
+//! selected by the `BridgeTarget` passed into `run_bridge`/`discover_linker`.
+//!
+//! This module intentionally never falls back to the closed-source MSVC `link.exe` (or to Apple's
+//! `ld64`) -- silently doing so would poison benchmark comparability and mask discovery bugs
+//! (issue #17, decision B2).
 
 use crate::bail;
 use crate::error::Context;
@@ -18,17 +23,53 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// Name of the environment variable that overrides linker discovery. If set, its value is used
-/// verbatim as the path to the COFF-capable linker to bridge to.
+/// verbatim as the path to the format-capable linker to bridge to.
 pub const RELD_BRIDGE_LINKER_ENV: &str = "RELD_BRIDGE_LINKER";
 
-/// Locates the linker binary that the bridge should delegate to.
+/// Which object format the bridge should delegate links for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeTarget {
+    /// Windows PE/COFF, bridged to `lld-link`.
+    Coff,
+    /// macOS Mach-O, bridged to `ld64.lld`.
+    MachO,
+}
+
+impl BridgeTarget {
+    /// The file name (without extension) of the concrete linker driver this target bridges to.
+    fn linker_basename(self) -> &'static str {
+        match self {
+            BridgeTarget::Coff => "lld-link",
+            BridgeTarget::MachO => "ld64.lld",
+        }
+    }
+
+    /// The `-flavor` value to pass to the multi-flavor `rust-lld` dispatcher to select this
+    /// target's driver.
+    fn rust_lld_flavor(self) -> &'static str {
+        match self {
+            BridgeTarget::Coff => "link",
+            BridgeTarget::MachO => "darwin",
+        }
+    }
+
+    /// The human-readable engine label used in the `reld: engine=...` progress note.
+    fn engine_label(self) -> &'static str {
+        match self {
+            BridgeTarget::Coff => "lld-link",
+            BridgeTarget::MachO => "ld64.lld",
+        }
+    }
+}
+
+/// Locates the linker binary that the bridge should delegate to for the given target format.
 ///
 /// Precedence:
 /// 1. `RELD_BRIDGE_LINKER` env var, used verbatim. Errors if the path doesn't exist.
 /// 2. `rust-lld` next to the active toolchain (`rustc --print sysroot`).
-/// 3. `gcc-ld/lld-link` under that same rustlib bin dir, then `lld-link` on `PATH`.
+/// 3. `gcc-ld/<basename>` under that same rustlib bin dir, then `<basename>` on `PATH`.
 /// 4. Otherwise, a hard error naming `RELD_BRIDGE_LINKER` and what to install.
-pub fn discover_linker() -> Result<PathBuf> {
+pub fn discover_linker(target: BridgeTarget) -> Result<PathBuf> {
     if let Ok(value) = std::env::var(RELD_BRIDGE_LINKER_ENV) {
         let path = PathBuf::from(value);
         if !path.exists() {
@@ -44,20 +85,26 @@ pub fn discover_linker() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    if let Some(path) = find_lld_link() {
+    if let Some(path) = find_concrete_linker(target) {
         return Ok(path);
     }
 
-    bail!("{}", not_found_message());
+    bail!("{}", not_found_message(target));
 }
 
-/// The error message shown when no COFF-capable linker can be discovered. Factored out so a test
-/// can assert it names `RELD_BRIDGE_LINKER` without having to defeat real toolchain discovery.
-fn not_found_message() -> String {
+/// The error message shown when no format-capable linker can be discovered. Factored out so a
+/// test can assert it names `RELD_BRIDGE_LINKER` without having to defeat real toolchain
+/// discovery.
+fn not_found_message(target: BridgeTarget) -> String {
+    let basename = target.linker_basename();
     format!(
-        "Could not find a COFF-capable linker to bridge to. Install a Rust toolchain (which \
-         provides `rust-lld`), put `lld-link` on PATH, or set {RELD_BRIDGE_LINKER_ENV} to the \
-         path of a linker to use."
+        "Could not find a {}-capable linker to bridge to. Install a Rust toolchain (which \
+         provides `rust-lld`), put `{basename}` on PATH, or set {RELD_BRIDGE_LINKER_ENV} to the \
+         path of a linker to use.",
+        match target {
+            BridgeTarget::Coff => "COFF",
+            BridgeTarget::MachO => "Mach-O",
+        }
     )
 }
 
@@ -70,17 +117,19 @@ fn find_rust_lld() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-/// Attempts to find `lld-link`: first under the active toolchain's `gcc-ld` directory, then on
-/// `PATH`.
-fn find_lld_link() -> Option<PathBuf> {
+/// Attempts to find the target's concrete linker driver: first under the active toolchain's
+/// `gcc-ld` directory, then on `PATH`.
+fn find_concrete_linker(target: BridgeTarget) -> Option<PathBuf> {
+    let file_name = format!("{}{EXE_SUFFIX}", target.linker_basename());
+
     if let Some(bin) = rustlib_bin_dir() {
-        let candidate = bin.join("gcc-ld").join(format!("lld-link{EXE_SUFFIX}"));
+        let candidate = bin.join("gcc-ld").join(&file_name);
         if candidate.exists() {
             return Some(candidate);
         }
     }
 
-    find_on_path(&format!("lld-link{EXE_SUFFIX}"))
+    find_on_path(&file_name)
 }
 
 /// The `lib/rustlib/<host-triple>/bin` directory of the active toolchain, discovered via `rustc
@@ -143,9 +192,9 @@ fn host_triple() -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Whether the discovered linker needs an explicit `-flavor link` prefix to select the COFF
-/// driver. `rust-lld` is a multi-flavor dispatcher, so it needs telling; `lld-link` is already
-/// the COFF driver by name, so it doesn't.
+/// Whether the discovered linker needs an explicit `-flavor <target>` prefix to select the right
+/// driver. `rust-lld` is a multi-flavor dispatcher, so it needs telling; the concrete driver
+/// (`lld-link`, `ld64.lld`) is already the right driver by name, so it doesn't.
 fn needs_flavor_prefix(linker: &Path) -> bool {
     linker
         .file_stem()
@@ -156,10 +205,10 @@ fn needs_flavor_prefix(linker: &Path) -> bool {
 /// Computes the arguments to forward to the child linker from the full process argv.
 ///
 /// Drops `argv[0]`, and also drops a leading `-flavor <name>` pair if present: when reld is
-/// invoked via the `-flavor link` multi-call convention (see `Args::new`), that selector has
-/// already been consumed by reld's own platform dispatch, so forwarding it would leak a stray
-/// `-flavor` into the child linker (and, for `rust-lld`, collide with the `-flavor link` that
-/// `child_command_line` prepends).
+/// invoked via the `-flavor link`/`-flavor darwin` multi-call convention (see `Args::new`), that
+/// selector has already been consumed by reld's own platform dispatch, so forwarding it would
+/// leak a stray `-flavor` into the child linker (and, for `rust-lld`, collide with the `-flavor
+/// <target>` that `child_command_line` prepends).
 fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
     let mut rest: Vec<OsString> = argv.into_iter().skip(1).collect();
     if rest
@@ -174,30 +223,38 @@ fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
 }
 
 /// Builds the full command line for the child linker: the forwarded args, prefixed with
-/// `-flavor link` when the discovered linker is the multi-flavor `rust-lld` dispatcher.
-fn child_command_line(linker: &Path, forwarded: Vec<OsString>) -> Vec<OsString> {
+/// `-flavor <target>` when the discovered linker is the multi-flavor `rust-lld` dispatcher.
+fn child_command_line(
+    linker: &Path,
+    target: BridgeTarget,
+    forwarded: Vec<OsString>,
+) -> Vec<OsString> {
     let mut args = Vec::with_capacity(forwarded.len() + 2);
     if needs_flavor_prefix(linker) {
         args.push(OsString::from("-flavor"));
-        args.push(OsString::from("link"));
+        args.push(OsString::from(target.rust_lld_flavor()));
     }
     args.extend(forwarded);
     args
 }
 
-/// Runs the bridge: discovers a COFF-capable linker and execs it with the pass-through argv,
-/// bypassing reld's own argument parser entirely.
+/// Runs the bridge: discovers a linker capable of the given target format and execs it with the
+/// pass-through argv, bypassing reld's own argument parser entirely.
 ///
 /// `argv` is the full process argv, including `argv[0]`; `argv[0]` is dropped and the rest is
-/// forwarded as the linker's command line (with `-flavor link` prepended if the discovered
+/// forwarded as the linker's command line (with `-flavor <target>` prepended if the discovered
 /// linker needs it).
-pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I) -> Result<()> {
-    let linker = discover_linker()?;
+pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, target: BridgeTarget) -> Result<()> {
+    let linker = discover_linker(target)?;
 
     let forwarded = forwarded_args(argv);
-    let child_args = child_command_line(&linker, forwarded);
+    let child_args = child_command_line(&linker, target, forwarded);
 
-    eprintln!("reld: engine=lld-link (bridge) -> {}", linker.display());
+    eprintln!(
+        "reld: engine={} (bridge) -> {}",
+        target.engine_label(),
+        linker.display()
+    );
 
     let mut command = std::process::Command::new(&linker);
     command.args(child_args);
@@ -291,7 +348,10 @@ mod tests {
         let fake_linker = TempFile::create("env-override-linker");
         let _guard = EnvVarGuard::set(RELD_BRIDGE_LINKER_ENV, fake_linker.path().to_str().unwrap());
 
-        let discovered = discover_linker().unwrap();
+        let discovered = discover_linker(BridgeTarget::Coff).unwrap();
+        assert_eq!(discovered, fake_linker.path());
+
+        let discovered = discover_linker(BridgeTarget::MachO).unwrap();
         assert_eq!(discovered, fake_linker.path());
     }
 
@@ -301,7 +361,7 @@ mod tests {
         let missing = unique_temp_path("does-not-exist");
         let _guard = EnvVarGuard::set(RELD_BRIDGE_LINKER_ENV, missing.to_str().unwrap());
 
-        let err = discover_linker().unwrap_err();
+        let err = discover_linker(BridgeTarget::Coff).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains(RELD_BRIDGE_LINKER_ENV),
@@ -325,9 +385,10 @@ mod tests {
     }
 
     #[test]
-    fn no_flavor_prefix_for_lld_link() {
+    fn no_flavor_prefix_for_concrete_drivers() {
         assert!(!needs_flavor_prefix(Path::new("/some/path/lld-link")));
         assert!(!needs_flavor_prefix(Path::new("/some/path/lld-link.exe")));
+        assert!(!needs_flavor_prefix(Path::new("/some/path/ld64.lld")));
         #[cfg(windows)]
         assert!(!needs_flavor_prefix(Path::new(
             r"C:\some\path\lld-link.exe"
@@ -336,14 +397,15 @@ mod tests {
 
     #[test]
     fn not_found_message_names_env_var() {
-        // The "no linker discoverable" error must always tell the user about the override knob.
-        // Asserting the message directly is deterministic — unlike defeating real toolchain
-        // discovery, which can't be done hermetically without clobbering process-global PATH.
-        let message = not_found_message();
-        assert!(
-            message.contains(RELD_BRIDGE_LINKER_ENV),
-            "unexpected error message: {message}"
-        );
+        // The "no linker discoverable" error must always tell the user about the override knob,
+        // for both bridge targets.
+        for target in [BridgeTarget::Coff, BridgeTarget::MachO] {
+            let message = not_found_message(target);
+            assert!(
+                message.contains(RELD_BRIDGE_LINKER_ENV),
+                "unexpected error message: {message}"
+            );
+        }
     }
 
     #[test]
@@ -375,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn flavor_route_to_rust_lld_yields_exactly_one_flavor_pair() {
+    fn flavor_route_to_rust_lld_yields_exactly_one_flavor_pair_coff() {
         // The bug this guards against: a `-flavor link` invocation of reld, bridged to the
         // multi-flavor `rust-lld`, must produce a single `-flavor link` — never a doubled pair
         // that leaks into the COFF driver.
@@ -385,7 +447,11 @@ mod tests {
             OsString::from("link"),
             OsString::from("/OUT:a.exe"),
         ];
-        let child = child_command_line(Path::new("/tc/rust-lld.exe"), forwarded_args(argv));
+        let child = child_command_line(
+            Path::new("/tc/rust-lld.exe"),
+            BridgeTarget::Coff,
+            forwarded_args(argv),
+        );
         assert_eq!(
             child,
             vec![
@@ -397,9 +463,69 @@ mod tests {
     }
 
     #[test]
+    fn flavor_route_to_rust_lld_yields_exactly_one_flavor_pair_macho() {
+        // Same guard as above, but for the Mach-O target: a `-flavor darwin` invocation of reld,
+        // bridged to the multi-flavor `rust-lld`, must produce a single `-flavor darwin`.
+        let argv = [
+            OsString::from("reld"),
+            OsString::from("-flavor"),
+            OsString::from("darwin"),
+            OsString::from("-o"),
+            OsString::from("a.out"),
+        ];
+        let child = child_command_line(
+            Path::new("/tc/rust-lld"),
+            BridgeTarget::MachO,
+            forwarded_args(argv),
+        );
+        assert_eq!(
+            child,
+            vec![
+                OsString::from("-flavor"),
+                OsString::from("darwin"),
+                OsString::from("-o"),
+                OsString::from("a.out"),
+            ]
+        );
+    }
+
+    #[test]
+    fn coff_flavor_prefix_is_link() {
+        let forwarded = vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")];
+        let child = child_command_line(Path::new("/tc/rust-lld"), BridgeTarget::Coff, forwarded);
+        assert_eq!(child[0], OsString::from("-flavor"));
+        assert_eq!(child[1], OsString::from("link"));
+    }
+
+    #[test]
+    fn macho_flavor_prefix_is_darwin() {
+        let forwarded = vec![OsString::from("-o"), OsString::from("a.out")];
+        let child = child_command_line(Path::new("/tc/rust-lld"), BridgeTarget::MachO, forwarded);
+        assert_eq!(child[0], OsString::from("-flavor"));
+        assert_eq!(child[1], OsString::from("darwin"));
+    }
+
+    #[test]
     fn lld_link_route_has_no_flavor_prefix() {
         let forwarded = vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")];
-        let child = child_command_line(Path::new("/tc/gcc-ld/lld-link.exe"), forwarded.clone());
-        assert_eq!(child, forwarded);
+        let expected = forwarded.clone();
+        let child = child_command_line(
+            Path::new("/tc/gcc-ld/lld-link.exe"),
+            BridgeTarget::Coff,
+            forwarded,
+        );
+        assert_eq!(child, expected);
+    }
+
+    #[test]
+    fn ld64_lld_route_has_no_flavor_prefix() {
+        let forwarded = vec![OsString::from("-o"), OsString::from("a.out")];
+        let expected = forwarded.clone();
+        let child = child_command_line(
+            Path::new("/tc/gcc-ld/ld64.lld"),
+            BridgeTarget::MachO,
+            forwarded,
+        );
+        assert_eq!(child, expected);
     }
 }

@@ -23,8 +23,8 @@ fn run() -> reld_core::error::Result {
 
     let mut args = reld_core::Args::new(std::env::args)?;
 
-    if args.is_coff() {
-        return reld_core::run_bridge(std::env::args_os());
+    if let Some(target) = args.bridge_target() {
+        return reld_core::run_bridge(std::env::args_os(), target);
     }
 
     args.set_version(VERSION);
