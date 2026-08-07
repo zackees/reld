@@ -25,11 +25,14 @@ means concretely, and what part of it is shipped vs. designed.
 > [#17](https://github.com/zackees/reld/issues/17) for the phase history.
 
 <!-- BENCHMARK:BEGIN -->
-<table><tr>
-<td align="center"><b>x86_64-linux</b><br><a href="https://github.com/zackees/reld/tree/benchmark-stats/x86_64-linux"><img alt="Linux reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-linux/benchmark-link.jpg"></a></td>
-<td align="center"><b>x86_64-pc-windows-msvc</b><br><a href="https://github.com/zackees/reld/tree/benchmark-stats/x86_64-pc-windows-msvc"><img alt="Windows reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-pc-windows-msvc/benchmark-link.jpg"></a></td>
-<td align="center"><b>aarch64-apple-darwin</b><br><a href="https://github.com/zackees/reld/tree/benchmark-stats/aarch64-apple-darwin"><img alt="macOS reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/aarch64-apple-darwin/benchmark-link.jpg"></a></td>
-</tr></table>
+<p align="center"><b>x86_64-linux</b><br>
+<a href="https://github.com/zackees/reld/tree/benchmark-stats/x86_64-linux"><img alt="Linux reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-linux/benchmark-link.jpg" width="100%"></a></p>
+
+<p align="center"><b>x86_64-pc-windows-msvc</b><br>
+<a href="https://github.com/zackees/reld/tree/benchmark-stats/x86_64-pc-windows-msvc"><img alt="Windows reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-pc-windows-msvc/benchmark-link.jpg" width="100%"></a></p>
+
+<p align="center"><b>aarch64-apple-darwin</b><br>
+<a href="https://github.com/zackees/reld/tree/benchmark-stats/aarch64-apple-darwin"><img alt="macOS reld link benchmark" src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/aarch64-apple-darwin/benchmark-link.jpg" width="100%"></a></p>
 
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
