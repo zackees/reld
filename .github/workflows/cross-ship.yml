@@ -47,11 +47,13 @@ jobs:
           - name: windows-msvc
             target: x86_64-pc-windows-msvc
             cross_targets: x86_64-pc-windows-msvc
+            linker: fast
             artifact: reld-windows-x86_64-msvc
             executable: reld.exe
           - name: macos-arm64
             target: aarch64-apple-darwin
             cross_targets: aarch64-apple-darwin
+            linker: fast
             artifact: reld-macos-arm64
             executable: reld
           # windows-gnu cross-from-Linux: soldr provisions the Linux-hosted
@@ -65,9 +67,14 @@ jobs:
           # mingw dir and fails with an empty archive. Skipping the prepare
           # step and letting `soldr build --target` fetch the toolchain works
           # today; `soldr prepare` parity is tracked in soldr#2342.
+          # linker: platform-default — the mingw gcc driver links with its
+          # own bundled `x86_64-w64-mingw32-ld`. soldr's default `fast`
+          # injects `-fuse-ld=lld`, which the cross gcc can't resolve
+          # (collect2: cannot find 'ld').
           - name: windows-gnu
             target: x86_64-pc-windows-gnu
             cross_targets: ""
+            linker: platform-default
             artifact: reld-windows-x86_64-gnu
             executable: reld.exe
     steps:
@@ -90,6 +97,8 @@ jobs:
           # Empty for win-gnu (see matrix note) — `soldr build --target`
           # self-provisions that toolchain.
           cross-targets: ${{ matrix.cross_targets }}
+          # win-gnu links via the mingw gcc's own ld (see matrix note).
+          linker: ${{ matrix.linker }}
           cache: true
           cache-preset: full
           prebuild-deps: soldr-cook
