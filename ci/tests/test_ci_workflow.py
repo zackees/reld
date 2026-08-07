@@ -19,11 +19,14 @@ def test_ci_caches_linux_reference_linkers():
     assert "--link-clang" in text
 
 
-def test_ci_cross_compiles_release_on_linux_with_soldr():
+def test_ci_cross_compiles_release_on_linux():
     text = WORKFLOW.read_text()
 
+    # Release cross-compile of the Windows target on a Linux runner, using the
+    # mingw-w64 cross toolchain. (soldr's cross path is deferred pending
+    # zackees/soldr#2334 / #2335 — see the job comment.)
     assert "cross-release:" in text
-    assert "zackees/setup-soldr@v0" in text
-    assert "soldr cargo build --release" in text
+    assert "cargo build --release" in text
     assert "x86_64-pc-windows-gnu" in text
     assert "gcc-mingw-w64-x86-64" in text
+    assert "CC_x86_64_pc_windows_gnu" in text

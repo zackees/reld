@@ -508,7 +508,16 @@ jobs:
   # Release cross-compilation on cheap, plentiful Linux runners. Building the
   # Windows target from Linux exploits parallel Linux capacity for the compile +
   # link phases (native on-target *test* execution stays on the native matrix
-  # legs above). soldr provides content-addressed build caching across runs.
+  # legs above).
+  #
+  # NOTE: this uses the standard mingw-w64 cross toolchain directly rather than
+  # `soldr cargo`. soldr's current cross-compile path breaks here two ways — its
+  # zccache builds the cc-crate C deps (zstd, blake3) with the host compiler
+  # (host ELF objects -> mingw PE link fails, zackees/soldr#2334) and its
+  # toolchain cache does not rehydrate the target's rust-std on a cache hit
+  # (E0463 can't find crate for std). Once a published soldr cross toolchain
+  # exists (zackees/soldr#2335, `soldr cc --target ...`), this job should switch
+  # to it and drop the mingw CC/CXX/AR wiring. Tracked for reld in follow-up.
   cross-release:
     name: Cross release (linux -> ${{ matrix.target }})
     runs-on: ubuntu-24.04
@@ -529,18 +538,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
-      - name: Set up soldr (build cache)
-        uses: zackees/setup-soldr@v0
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
         with:
-          cache: true
+          targets: ${{ matrix.target }}
 
       - name: Cross-compile reld (release)
         shell: bash
-        # The workspace pulls in cc-built C libraries (zstd, blake3 SIMD). When
-        # cross-compiling, the `cc` crate must build them with the mingw cross
-        # compiler/archiver, not the host gcc — otherwise the C objects are ELF
-        # and the final PE/COFF link fails with undefined references. Point the
-        # target-scoped CC/CXX/AR (and the Rust linker) at the mingw tools.
+        # The workspace pulls in cc-built C libraries (zstd, blake3 SIMD). Point
+        # the cc crate's target-scoped CC/CXX/AR (and the Rust linker) at the
+        # mingw tools so the C objects are built as PE/COFF and link cleanly.
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
           CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
@@ -548,8 +554,7 @@ jobs:
           AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
         run: |
           set -euxo pipefail
-          rustup target add "${{ matrix.target }}"
-          soldr cargo build --release --target "${{ matrix.target }}" -p reld --bin reld
+          cargo build --release --target "${{ matrix.target }}" -p reld --bin reld
 
       - name: Verify cross-compiled artifact
         shell: bash
