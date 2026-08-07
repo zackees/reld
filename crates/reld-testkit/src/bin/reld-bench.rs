@@ -324,8 +324,27 @@ fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
     Ok(cmd.output().map(|o| o.status.success()).unwrap_or(false))
 }
 
+/// Build a filesystem-safe output filename for a linker's benchmark artifact. `linker` is the
+/// `-fuse-ld=` value, which for reld is the **absolute path** to the `ld.reld` shim; embedding it
+/// raw would make `dir.join` interpret the path separators as nested directories that don't
+/// exist, so reld (correctly) fails to open its output. Flatten separators so the artifact lands
+/// directly in `dir`.
+fn bench_output_name(linker: &str) -> String {
+    let safe: String = linker
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    format!("bench-{safe}.bin")
+}
+
 fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Result<Duration> {
-    let out = dir.join(format!("bench-{linker}.bin"));
+    let out = dir.join(bench_output_name(linker));
 
     for _ in 0..args.warmup {
         link_once(args, objects, linker, &out)?;
@@ -454,6 +473,24 @@ mod tests {
         assert_eq!(
             comment,
             "<!-- linker bfd link failed (small (16 units)): undefined symbol: foo -->"
+        );
+    }
+
+    #[test]
+    fn bench_output_name_flattens_path_separators() {
+        // A short name is untouched...
+        assert_eq!(bench_output_name("lld"), "bench-lld.bin");
+        // ...but an absolute path (the reld shim) must not embed separators, or `dir.join` would
+        // create nonexistent nested directories and the link would fail to open its output.
+        let name = bench_output_name("/home/runner/reld/target/release/ld.reld");
+        assert_eq!(name, "bench-_home_runner_reld_target_release_ld.reld.bin");
+        assert!(
+            !name.contains('/'),
+            "no separators in the flattened name: {name}"
+        );
+        assert_eq!(
+            bench_output_name(r"C:\tc\ld.reld"),
+            "bench-C__tc_ld.reld.bin"
         );
     }
 }
