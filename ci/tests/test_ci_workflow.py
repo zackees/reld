@@ -30,3 +30,13 @@ def test_ci_cross_compiles_release_on_linux():
     assert "x86_64-pc-windows-gnu" in text
     assert "gcc-mingw-w64-x86-64" in text
     assert "CC_x86_64_pc_windows_gnu" in text
+
+
+def test_ci_marks_reld_pending_on_windows_and_macos_benchmarks():
+    text = WORKFLOW.read_text()
+
+    # reld has no shim on the Windows/macOS PR benchmark smokes, so it must render an explicit
+    # `pending` (with reason) rather than a silent n/a (#63). Both legs pass --reld-pending.
+    assert "--reld-pending" in text
+    # Both legs assert the pending marker actually appears in the table (windows + macOS).
+    assert text.count("reld must render 'pending'") == 2

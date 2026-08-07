@@ -372,12 +372,17 @@ jobs:
         if: matrix.kind == 'windows-msvc'
         shell: pwsh
         run: |
-          & $env:CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker lld --trials 2 --warmup 1 | Tee-Object benchmark-windows-msvc.md
+          # reld has no shim on this leg, so it is pending-by-design (bridge measurement pending,
+          # #17). Pass --reld-pending so it renders an explicit `pending` rather than a silent
+          # n/a (#63).
+          & $env:CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker lld --trials 2 --warmup 1 --reld-pending "reld bridge measurement pending (rustc-based); see #17" | Tee-Object benchmark-windows-msvc.md
           if ($LASTEXITCODE -ne 0) { throw "reld-bench exited with code $LASTEXITCODE" }
           if (-not (Test-Path benchmark-windows-msvc.md)) { throw "benchmark-windows-msvc.md not produced" }
           $table = Get-Content benchmark-windows-msvc.md -Raw
           if (-not ($table | Select-String -Pattern '## Link Benchmark:' -Quiet)) { throw "benchmark table missing '## Link Benchmark:' heading" }
           if (-not ($table | Select-String -Pattern '\| *reld *\|' -Quiet)) { throw "benchmark table missing reld column" }
+          # reld must be explicitly pending here, never a bare n/a (#63).
+          if (-not ($table | Select-String -Pattern 'pending' -Quiet)) { throw "reld must render 'pending', not a silent n/a" }
 
       - name: Upload Windows MSVC benchmark artifact
         if: always() && matrix.kind == 'windows-msvc'
@@ -441,13 +446,17 @@ jobs:
           set -euo pipefail
           # Exercise ld64.lld specifically: it was silently n/a because clang maps
           # -fuse-ld=ld64.lld to a nonexistent ld.ld64.lld (#60). This asserts it now links.
-          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker ld64.lld --trials 2 --warmup 1 | tee benchmark-macos-arm64.md
+          # reld has no shim here, so it is pending-by-design (#17): --reld-pending renders an
+          # explicit `pending` instead of a silent n/a (#63).
+          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker ld64.lld --trials 2 --warmup 1 --reld-pending "reld bridge measurement pending (rustc-based); see #17" | tee benchmark-macos-arm64.md
           grep -q '## Link Benchmark:' benchmark-macos-arm64.md || { echo "benchmark table missing '## Link Benchmark:' heading" >&2; exit 1; }
           grep -qE '\| *ld64.lld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing ld64.lld column" >&2; exit 1; }
           grep -qE '\| *reld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing reld column" >&2; exit 1; }
           # ld64.lld is the only linker requested (reld has no shim here), so a real timing proves
           # it actually linked rather than reporting n/a.
           grep -qE '[0-9]+\.[0-9]{4}' benchmark-macos-arm64.md || { echo "ld64.lld produced no timing (still n/a?)" >&2; exit 1; }
+          # reld must be explicitly pending here, never a bare n/a (#63).
+          grep -q 'pending' benchmark-macos-arm64.md || { echo "reld must render 'pending', not a silent n/a" >&2; exit 1; }
 
       - name: macOS self-host (link reld with reld)
         if: matrix.kind == 'macos-arm64'

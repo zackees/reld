@@ -84,12 +84,17 @@ def test_write_outputs_produces_all_artifacts(tmp_path):
         assert (tmp_path / name).exists(), name
 
     payload = json.loads((tmp_path / "latest.json").read_text())
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert len(payload["results"]) == 15
     for entry in payload["results"]:
         assert "mode" in entry
+        assert "status" in entry
         if entry["series"] in ("bfd", "lld"):
             assert entry["mode"] == "reference"
+            assert entry["status"] == "measured"
+        if entry["series"] == "reld":
+            # SAMPLE_LOG has reld as a bare n/a (not a pending marker), so it is a failure.
+            assert entry["status"] == "na"
 
 
 def test_series_mode():
@@ -122,3 +127,52 @@ def test_render_refuses_empty(tmp_path):
     r = parse_benchmark_log("nothing")
     with pytest.raises(SystemExit):
         write_outputs(r, collect_metadata(r), tmp_path)
+
+
+PENDING_LOG = """
+## Link Benchmark: aarch64-apple-darwin
+
+| Scenario | ld | ld64.lld | reld |
+|:---------|---:|---------:|----:|
+| small (16 units) | 0.0300 | 0.0120 | pending |
+| medium (128 units) | 0.1500 | 0.0400 | pending |
+| large (512 units) | 0.6000 | 0.1600 | pending |
+
+<!-- linker reld pending: reld bridge measurement pending (rustc-based); see #17 -->
+"""
+
+
+def test_pending_cells_parse_as_pending_not_na():
+    r = parse_benchmark_log(PENDING_LOG)
+    # A pending cell has no timing (like n/a) but is flagged distinctly.
+    assert r.value("small (16 units)", "reld") is None
+    assert r.is_pending("small (16 units)", "reld") is True
+    # A real n/a would not be flagged pending.
+    assert r.is_pending("small (16 units)", "ld") is False
+
+
+def test_series_status_distinguishes_pending_measured_and_na():
+    r = parse_benchmark_log(PENDING_LOG)
+    assert r.series_status("ld") == "measured"
+    assert r.series_status("ld64.lld") == "measured"
+    assert r.series_status("reld") == "pending"
+    # A series absent from the table is treated as na, never pending.
+    assert parse_benchmark_log(SAMPLE_LOG).series_status("reld") == "na"
+
+
+def test_latest_json_carries_pending_status(tmp_path):
+    r = parse_benchmark_log(PENDING_LOG)
+    write_outputs(r, collect_metadata(r), tmp_path)
+    payload = json.loads((tmp_path / "latest.json").read_text())
+    reld = [e for e in payload["results"] if e["series"] == "reld"]
+    assert reld and all(e["status"] == "pending" for e in reld)
+    assert all(e["seconds"] is None for e in reld)
+
+
+def test_html_marks_pending_distinctly():
+    from ci.benchmark_stats import render_html
+
+    report = parse_benchmark_log(PENDING_LOG)
+    html = render_html(report, collect_metadata(report))
+    assert 'class="pending">pending<' in html
+    assert "n/a" not in html  # every reld cell is pending here, no failed cells
