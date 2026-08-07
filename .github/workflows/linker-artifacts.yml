@@ -1,0 +1,118 @@
+name: Linker artifacts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: reld-link-linux-x86_64
+            executable: reld-link
+          - name: macos
+            runner: macos-14
+            target: aarch64-apple-darwin
+            artifact: reld-link-macos-arm64
+            executable: reld-link
+          - name: windows
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            artifact: reld-link-windows-x86_64
+            executable: reld-link.exe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      - name: Setup Soldr target lifecycle
+        id: setup
+        uses: zackees/setup-soldr@main
+        with:
+          cross-targets: ${{ matrix.target }}
+          cache: false
+          prebuild-deps: none
+          linker: platform-default
+
+      - name: Assert target contract
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          CAPABILITIES: ${{ steps.setup.outputs.target-capabilities-json }}
+        run: |
+          set -euo pipefail
+          python -c 'import json, os; p=json.loads(os.environ["CAPABILITIES"]); assert p["canonicalTarget"] == os.environ["TARGET"]; assert "build" in p["supportedOperations"]'
+
+      - name: Build linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          soldr build --locked --release --package reld --bin reld-link --target "${{ matrix.target }}"
+          mkdir -p package
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "package/${{ matrix.executable }}"
+
+      - name: Smoke build artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "package/${{ matrix.executable }}"
+          "package/${{ matrix.executable }}" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/${{ matrix.executable }}
+          if-no-files-found: error
+
+  host:
+    name: Host smoke / ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-24.04
+            artifact: reld-link-linux-x86_64
+            executable: reld-link
+          - name: macos
+            runner: macos-14
+            artifact: reld-link-macos-arm64
+            executable: reld-link
+          - name: windows
+            runner: windows-2022
+            artifact: reld-link-windows-x86_64
+            executable: reld-link.exe
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package
+
+      - name: Run deployed linker on host
+        shell: bash
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          chmod +x "package/${{ matrix.executable }}"
+          "package/${{ matrix.executable }}" --version
+
+      - name: Run deployed linker on host
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          & ".\package\${{ matrix.executable }}" --version
+          if ($LASTEXITCODE -ne 0) { throw "deployed linker exited with $LASTEXITCODE" }
