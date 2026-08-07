@@ -72,7 +72,7 @@ jobs:
           set -euo pipefail
           echo 'CARGO_ENCODED_RUSTFLAGS=' >> "$GITHUB_ENV"
           echo 'RUSTFLAGS=' >> "$GITHUB_ENV"
-          echo 'SOLDR_LINKER=platform-default' >> "$GITHUB_ENV"
+          echo 'SOLDR_LINKER=default' >> "$GITHUB_ENV"
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)
               echo 'SDKROOT=' >> "$GITHUB_ENV"
