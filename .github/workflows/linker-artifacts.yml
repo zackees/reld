@@ -45,7 +45,7 @@ jobs:
           cross-targets: ${{ matrix.target }}
           cache: false
           prebuild-deps: none
-          linker: platform-default
+          linker: fast
 
       - name: Assert target contract
         shell: bash
