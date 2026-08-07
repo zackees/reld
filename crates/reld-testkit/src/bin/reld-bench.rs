@@ -45,6 +45,12 @@ struct Args {
     /// Working directory for generated workloads.
     #[arg(long)]
     workdir: Option<PathBuf>,
+
+    /// Explicit path to the reld driver shim (e.g. `ld.reld`), produced by
+    /// `ci/install-driver-shims.sh`. If omitted, the bench looks for `ld.reld` next to its own
+    /// executable.
+    #[arg(long)]
+    reld: Option<PathBuf>,
 }
 
 /// Workload sizes. Small is where incremental linking will eventually matter most; large is
@@ -71,6 +77,42 @@ fn default_linkers() -> Vec<&'static str> {
     vec!["bfd", "lld", "mold", "wild"]
 }
 
+/// Locate the `ld.reld` driver shim produced by `ci/install-driver-shims.sh`.
+///
+/// Resolution order:
+/// 1. `explicit`, if given and it exists on disk.
+/// 2. `ld.reld` (or `ld.reld.exe` on Windows) next to the running bench binary.
+///
+/// Returns `None` if neither location has a file, so the caller can report reld as `n/a`
+/// honestly rather than pass a bogus path to `-fuse-ld=`.
+fn discover_reld(explicit: &Option<PathBuf>) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    discover_reld_in(explicit, exe.as_deref().and_then(Path::parent))
+}
+
+/// Core of [`discover_reld`], with the "next to the bench binary" directory injected so tests can
+/// exercise the resolution logic hermetically against a temp dir instead of the real executable
+/// directory (which parallel tests would otherwise race on).
+fn discover_reld_in(explicit: &Option<PathBuf>, sibling_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = explicit
+        && p.exists()
+    {
+        return Some(p.clone());
+    }
+
+    let dir = sibling_dir?;
+    let name = if cfg!(windows) {
+        "ld.reld.exe"
+    } else {
+        "ld.reld"
+    };
+    let candidate = dir.join(name);
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    None
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -91,6 +133,26 @@ fn main() -> Result<()> {
     for l in &requested {
         available.push((l.clone(), probe_linker(&args.cc, l, &root).unwrap_or(false)));
     }
+
+    // reld is measured through its `ld.reld` driver shim, invoked via `-fuse-ld=<abs-path>`.
+    // The column's display label ("reld") is decoupled from the `-fuse-ld` value (the shim's
+    // absolute path) so the table stays honest about what's actually being run.
+    let reld_shim = discover_reld(&args.reld).and_then(|p| std::fs::canonicalize(&p).ok());
+    let reld_shim_str = reld_shim.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let reld_unavailable_reason = if reld_shim_str.is_none() {
+        Some("no ld.reld shim discovered (run ci/install-driver-shims.sh)")
+    } else {
+        None
+    };
+    let reld_ok = match &reld_shim_str {
+        Some(linker) => probe_linker(&args.cc, linker, &root).unwrap_or(false),
+        None => false,
+    };
+    let reld_unavailable_reason = if reld_shim_str.is_some() && !reld_ok {
+        Some("probe link failed")
+    } else {
+        reld_unavailable_reason
+    };
 
     println!("## Link Benchmark: {}", target_triple());
     println!();
@@ -122,9 +184,13 @@ fn main() -> Result<()> {
                 Err(_) => print!(" n/a |"),
             }
         }
-        // reld does not exist yet. Publishing the column now, empty, keeps the chart's
-        // shape stable and makes the gap visible rather than implied.
-        println!(" n/a |");
+        match (&reld_shim_str, reld_ok) {
+            (Some(linker), true) => match time_link(&args, &dir, &objects, linker) {
+                Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
+                Err(_) => println!(" n/a |"),
+            },
+            _ => println!(" n/a |"),
+        }
     }
 
     println!();
@@ -132,6 +198,9 @@ fn main() -> Result<()> {
         if !ok {
             println!("<!-- linker {l} not available on this runner -->");
         }
+    }
+    if let Some(reason) = reld_unavailable_reason {
+        println!("<!-- linker reld not available: {reason} -->");
     }
     Ok(())
 }
@@ -228,4 +297,81 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
     }
     samples.sort();
     Ok(samples[samples.len() / 2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unique temp directory per test, so the (hermetic) discovery tests never touch the real
+    /// executable directory or race each other.
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "reld-bench-test-{}-{}-{tag}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn shim_name() -> &'static str {
+        if cfg!(windows) {
+            "ld.reld.exe"
+        } else {
+            "ld.reld"
+        }
+    }
+
+    #[test]
+    fn discover_reld_returns_explicit_path_when_it_exists() {
+        let dir = unique_tmp_dir("explicit");
+        let shim = dir.join("ld.reld");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+
+        // Explicit takes precedence even when a sibling dir would also match.
+        let found = discover_reld_in(&Some(shim.clone()), Some(&dir));
+        assert_eq!(found, Some(shim));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_reld_returns_none_for_missing_explicit_path_and_empty_sibling() {
+        let dir = unique_tmp_dir("missing");
+        let missing = dir.join("ld.reld"); // never created
+        // Explicit does not exist and the sibling dir has no shim → None.
+        let found = discover_reld_in(&Some(missing), Some(&dir));
+        assert_eq!(found, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_reld_falls_back_to_none_without_explicit_or_sibling_shim() {
+        let dir = unique_tmp_dir("empty");
+        let found = discover_reld_in(&None, Some(&dir));
+        assert_eq!(found, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_reld_finds_sibling_shim() {
+        let dir = unique_tmp_dir("sibling");
+        let shim = dir.join(shim_name());
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+
+        let found = discover_reld_in(&None, Some(&dir));
+        assert_eq!(found, Some(shim));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_reld_returns_none_when_no_sibling_dir() {
+        // `current_exe()` failing (sibling dir = None) must degrade to None, not panic.
+        assert_eq!(discover_reld_in(&None, None), None);
+    }
 }
