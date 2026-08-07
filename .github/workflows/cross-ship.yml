@@ -103,13 +103,14 @@ jobs:
           cache-preset: full
           prebuild-deps: soldr-cook
 
-      # Guarantee the target's rust-std is present regardless of cache state.
-      # soldr build normally installs it, but setup-soldr's shared-target-dir
-      # caching can restore a state where it is skipped, yielding E0463
-      # ("can't find crate for core"). Explicit + idempotent.
-      - name: Ensure Rust std for target
+      # Guarantee the target's rust-std in SOLDR's managed toolchain home
+      # (soldr build uses that, not the runner's default rustup). A cache
+      # restore can leave soldr believing std is present when the rlibs are
+      # not, yielding E0463 ("can't find crate for core"); this idempotent
+      # add through soldr's rustup front door repairs that.
+      - name: Ensure Rust std for target (soldr toolchain)
         shell: bash
-        run: rustup target add "${{ matrix.target }}"
+        run: soldr rustup target add "${{ matrix.target }}"
 
       - name: Cross-compile reld (release) via blessed front door
         shell: bash
