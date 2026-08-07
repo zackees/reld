@@ -1,0 +1,175 @@
+name: Cross ship (build off-platform, run on-platform)
+
+# Goal (reld#59): keep the heavy compile/link OFF the scarce Windows/macOS
+# runners. Cross-build the release product on cheap, plentiful ubuntu runners
+# through the BLESSED soldr front door (`soldr build --target <triple>`), which
+# provisions compiler + linker + SDK + sysroot from the soldr-toolchain
+# catalogue with ZERO tools installed on the runner (no apt mingw, no choco
+# llvm, no brew llvm). Then ship only the finished binary to the native runner,
+# which downloads it and runs against it — no product compilation on-target.
+#
+# Blessed cross-from-Linux targets per soldr/ci/canonical-targets.json:
+#   x86_64-pc-windows-msvc  (win-x64,  xwin + auto CC_/CXX_/AR_ injection)
+#   aarch64-apple-darwin    (mac-arm64, zig + catalogue Apple SDK)
+# windows-gnu is intentionally NOT cross-built from Linux (soldr blesses MSVC
+# on Windows; windows-gnu builds on a Windows host with the MinGW bundle).
+#
+# NOTE: additive and DRAFT — this workflow does not touch the existing green
+# jobs. It must be validated against a live CI run before the cross legs in
+# `ci.yml` (cross-release + the native reld-bench build steps) are migrated onto
+# it. See reld#59.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/cross-ship.yml
+
+concurrency:
+  group: cross-ship-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Cross-compile the release product on ubuntu via the blessed soldr front
+  # door. No compiler toolchain is installed here — setup-soldr's `cross-targets`
+  # runs `soldr prepare`, which owns compiler/linker/SDK/sysroot selection.
+  cross-build:
+    name: Cross build (linux -> ${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc
+            target: x86_64-pc-windows-msvc
+            artifact: reld-windows-x86_64-msvc
+            executable: reld.exe
+          - name: macos-arm64
+            target: aarch64-apple-darwin
+            artifact: reld-macos-arm64
+            executable: reld
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      # Provision soldr + the target toolchain from the catalogue. `cross-targets`
+      # runs `soldr prepare` for the triple and exports the compiler/linker/SDK/
+      # sysroot/env plan. Heavy caching is the point (reld#59): this repo has a
+      # large cache budget, so we exercise setup-soldr's caching hard and report
+      # the hit rate below.
+      - name: Setup Soldr (prepare cross toolchain)
+        id: setup
+        uses: zackees/setup-soldr@main
+        with:
+          cross-targets: ${{ matrix.target }}
+          cache: true
+          cache-preset: full
+          prebuild-deps: soldr-cook
+
+      - name: Cross-compile reld (release) via blessed front door
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # `soldr build --target` is the blessed surface: it mounts the
+          # catalogue toolchain and injects target cc-rs env itself. No manual
+          # CC_/CXX_/AR_ and no apt/choco/brew toolchain installs.
+          soldr build --package reld --bin reld --release --locked \
+            --target "${{ matrix.target }}"
+          mkdir -p package
+          built="$(find "target/${{ matrix.target }}/release" -maxdepth 1 -type f \
+            \( -name 'reld' -o -name 'reld.exe' \) -print -quit)"
+          test -n "$built"
+          cp "$built" "package/${{ matrix.executable }}"
+
+      - name: Verify cross artifact format
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s "package/${{ matrix.executable }}"
+          file "package/${{ matrix.executable }}"
+          case "${{ matrix.target }}" in
+            x86_64-pc-windows-msvc) file "package/${{ matrix.executable }}" | grep -q 'PE32' ;;
+            aarch64-apple-darwin)   file "package/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
+          esac
+
+      # Report setup-soldr's caching outcome — reld#59 wants this as the
+      # success metric for "how well setup-soldr caching works".
+      - name: Report soldr cache metrics
+        if: always()
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.setup.outputs.cache-hit }}
+          COMPILE_HITS: ${{ steps.setup.outputs.compile-cache-hits }}
+          COMPILE_MISSES: ${{ steps.setup.outputs.compile-cache-misses }}
+          COMPILE_RATE: ${{ steps.setup.outputs.compile-cache-hit-rate }}
+        run: |
+          {
+            echo "### soldr cache — ${{ matrix.name }} (${{ matrix.target }})"
+            echo ""
+            echo "| metric | value |"
+            echo "|---|---|"
+            echo "| cache-hit | ${CACHE_HIT:-n/a} |"
+            echo "| compile-cache-hits | ${COMPILE_HITS:-n/a} |"
+            echo "| compile-cache-misses | ${COMPILE_MISSES:-n/a} |"
+            echo "| compile-cache-hit-rate | ${COMPILE_RATE:-n/a} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/${{ matrix.executable }}
+          if-no-files-found: error
+
+  # Native runner: download the cross-built binary and exercise it. No product
+  # compilation happens here — this is the whole point.
+  host-run:
+    name: Host run / ${{ matrix.name }}
+    needs: cross-build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc
+            runner: windows-2022
+            artifact: reld-windows-x86_64-msvc
+            executable: reld.exe
+          - name: macos-arm64
+            runner: macos-14
+            artifact: reld-macos-arm64
+            executable: reld
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package
+
+      # On windows-msvc, reld is a normal executable and prints its version.
+      - name: Smoke deployed reld (windows-msvc)
+        if: matrix.name == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $out = & ".\package\${{ matrix.executable }}" --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
+          Write-Output $out
+          if ($out -notmatch 'Reld') { throw "deployed reld --version missing 'Reld' marker" }
+
+      # On macOS, reld is invoked as a linker and bridges every call (incl.
+      # --version) to ld64.lld, so it can't print its own version (see the
+      # macOS self-host note in ci.yml). Confirm the shipped binary is a
+      # well-formed arm64 Mach-O executable instead.
+      - name: Smoke deployed reld (macos-arm64)
+        if: matrix.name == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x "package/${{ matrix.executable }}"
+          file "package/${{ matrix.executable }}"
+          file "package/${{ matrix.executable }}" | grep -q 'Mach-O'
+          file "package/${{ matrix.executable }}" | grep -q 'arm64'
