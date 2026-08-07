@@ -36,40 +36,131 @@ pub enum BridgeTarget {
 }
 
 impl BridgeTarget {
-    /// The file name (without extension) of the concrete linker driver this target bridges to.
-    fn linker_basename(self) -> &'static str {
+    /// The human-readable format label used in error messages.
+    fn format_label(self) -> &'static str {
         match self {
-            BridgeTarget::Coff => "lld-link",
-            BridgeTarget::MachO => "ld64.lld",
-        }
-    }
-
-    /// The `-flavor` value to pass to the multi-flavor `rust-lld` dispatcher to select this
-    /// target's driver.
-    fn rust_lld_flavor(self) -> &'static str {
-        match self {
-            BridgeTarget::Coff => "link",
-            BridgeTarget::MachO => "darwin",
-        }
-    }
-
-    /// The human-readable engine label used in the `reld: engine=...` progress note.
-    fn engine_label(self) -> &'static str {
-        match self {
-            BridgeTarget::Coff => "lld-link",
-            BridgeTarget::MachO => "ld64.lld",
+            BridgeTarget::Coff => "COFF",
+            BridgeTarget::MachO => "Mach-O",
         }
     }
 }
 
-/// Locates the linker binary that the bridge should delegate to for the given target format.
+/// A bundled bridge engine: a name, the object format it links, and how to invoke it.
+///
+/// This is a minimal capability seed (issue #34 / B8a) -- just enough to let `select_engine`
+/// validate an explicit override against the format it's being asked to link. It is deliberately
+/// not an elaborate capability matrix (LTO/GC-sections/etc.); that's later-slice scope per
+/// `agents/docs/polylinker.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Engine {
+    /// The engine name, as accepted by `--engine=<name>` / `RELD_ENGINE`.
+    name: &'static str,
+    /// The object format this engine links.
+    format: BridgeTarget,
+    /// The file name (without extension) of the concrete linker driver this engine bridges to.
+    linker_basename: &'static str,
+    /// The `-flavor` value to pass to the multi-flavor `rust-lld` dispatcher to select this
+    /// engine's driver.
+    rust_lld_flavor: &'static str,
+}
+
+/// The bundled bridge engines. `lld-link` bridges COFF; `ld64.lld` bridges Mach-O.
+const ENGINES: &[Engine] = &[
+    Engine {
+        name: "lld-link",
+        format: BridgeTarget::Coff,
+        linker_basename: "lld-link",
+        rust_lld_flavor: "link",
+    },
+    Engine {
+        name: "ld64.lld",
+        format: BridgeTarget::MachO,
+        linker_basename: "ld64.lld",
+        rust_lld_flavor: "darwin",
+    },
+];
+
+impl Engine {
+    /// Looks up a bundled engine by name.
+    fn find(name: &str) -> Option<&'static Engine> {
+        ENGINES.iter().find(|engine| engine.name == name)
+    }
+
+    /// The default engine for a given target format (today's fixed platform->engine mapping).
+    fn default_for(target: BridgeTarget) -> &'static Engine {
+        ENGINES
+            .iter()
+            .find(|engine| engine.format == target)
+            .expect("every BridgeTarget has a default engine in ENGINES")
+    }
+}
+
+/// Where an engine selection came from, for the observable routing note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionReason {
+    Default,
+    OverrideFlag,
+    OverrideEnv,
+}
+
+impl SelectionReason {
+    fn label(self) -> &'static str {
+        match self {
+            SelectionReason::Default => "default",
+            SelectionReason::OverrideFlag => "override(--engine)",
+            SelectionReason::OverrideEnv => "override(RELD_ENGINE)",
+        }
+    }
+}
+
+/// The reld-specific argv flag that explicitly selects a bridge engine, stripped from the
+/// forwarded argv before it reaches the child linker.
+const ENGINE_FLAG_PREFIX: &str = "--engine=";
+
+/// The environment variable that explicitly selects a bridge engine, checked when no `--engine=`
+/// argv token is present.
+pub const RELD_ENGINE_ENV: &str = "RELD_ENGINE";
+
+/// Selects the bridge engine to use for `target`, honoring an explicit override name if given.
+///
+/// - `override_name` is `None`: returns the target's default engine (today's behavior).
+/// - `override_name` is `Some(name)`: looks the engine up by name. An unknown name is a hard
+///   error listing the valid engine names; a known engine whose format doesn't match `target` is
+///   a hard error naming both the engine and the requested format.
+fn select_engine(target: BridgeTarget, override_name: Option<&str>) -> Result<&'static Engine> {
+    let Some(name) = override_name else {
+        return Ok(Engine::default_for(target));
+    };
+
+    let Some(engine) = Engine::find(name) else {
+        let valid = ENGINES
+            .iter()
+            .map(|engine| engine.name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("Unknown engine `{name}`. Valid engines: {valid}.");
+    };
+
+    if engine.format != target {
+        bail!(
+            "Engine `{name}` links {} but this link is for {}. Choose an engine that supports {}.",
+            engine.format.format_label(),
+            target.format_label(),
+            target.format_label(),
+        );
+    }
+
+    Ok(engine)
+}
+
+/// Locates the linker binary that the bridge should delegate to for the given engine.
 ///
 /// Precedence:
 /// 1. `RELD_BRIDGE_LINKER` env var, used verbatim. Errors if the path doesn't exist.
 /// 2. `rust-lld` next to the active toolchain (`rustc --print sysroot`).
 /// 3. `gcc-ld/<basename>` under that same rustlib bin dir, then `<basename>` on `PATH`.
 /// 4. Otherwise, a hard error naming `RELD_BRIDGE_LINKER` and what to install.
-pub fn discover_linker(target: BridgeTarget) -> Result<PathBuf> {
+pub fn discover_linker(engine: &Engine) -> Result<PathBuf> {
     if let Ok(value) = std::env::var(RELD_BRIDGE_LINKER_ENV) {
         let path = PathBuf::from(value);
         if !path.exists() {
@@ -85,26 +176,23 @@ pub fn discover_linker(target: BridgeTarget) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    if let Some(path) = find_concrete_linker(target) {
+    if let Some(path) = find_concrete_linker(engine) {
         return Ok(path);
     }
 
-    bail!("{}", not_found_message(target));
+    bail!("{}", not_found_message(engine));
 }
 
 /// The error message shown when no format-capable linker can be discovered. Factored out so a
 /// test can assert it names `RELD_BRIDGE_LINKER` without having to defeat real toolchain
 /// discovery.
-fn not_found_message(target: BridgeTarget) -> String {
-    let basename = target.linker_basename();
+fn not_found_message(engine: &Engine) -> String {
     format!(
         "Could not find a {}-capable linker to bridge to. Install a Rust toolchain (which \
-         provides `rust-lld`), put `{basename}` on PATH, or set {RELD_BRIDGE_LINKER_ENV} to the \
+         provides `rust-lld`), put `{}` on PATH, or set {RELD_BRIDGE_LINKER_ENV} to the \
          path of a linker to use.",
-        match target {
-            BridgeTarget::Coff => "COFF",
-            BridgeTarget::MachO => "Mach-O",
-        }
+        engine.format.format_label(),
+        engine.linker_basename,
     )
 }
 
@@ -117,10 +205,10 @@ fn find_rust_lld() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-/// Attempts to find the target's concrete linker driver: first under the active toolchain's
+/// Attempts to find the engine's concrete linker driver: first under the active toolchain's
 /// `gcc-ld` directory, then on `PATH`.
-fn find_concrete_linker(target: BridgeTarget) -> Option<PathBuf> {
-    let file_name = format!("{}{EXE_SUFFIX}", target.linker_basename());
+fn find_concrete_linker(engine: &Engine) -> Option<PathBuf> {
+    let file_name = format!("{}{EXE_SUFFIX}", engine.linker_basename);
 
     if let Some(bin) = rustlib_bin_dir() {
         let candidate = bin.join("gcc-ld").join(&file_name);
@@ -209,6 +297,10 @@ fn needs_flavor_prefix(linker: &Path) -> bool {
 /// selector has already been consumed by reld's own platform dispatch, so forwarding it would
 /// leak a stray `-flavor` into the child linker (and, for `rust-lld`, collide with the `-flavor
 /// <target>` that `child_command_line` prepends).
+///
+/// Also strips any `--engine=<name>` token, wherever it appears: that's a reld-specific flag
+/// (see `select_engine`), not a linker flag, so it must never leak into the child linker's
+/// command line.
 fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
     let mut rest: Vec<OsString> = argv.into_iter().skip(1).collect();
     if rest
@@ -219,20 +311,31 @@ fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
         let drop = rest.len().min(2);
         rest.drain(0..drop);
     }
+    rest.retain(|arg| {
+        arg.to_str()
+            .is_none_or(|s| !s.starts_with(ENGINE_FLAG_PREFIX))
+    });
     rest
+}
+
+/// Extracts the `--engine=<name>` override from the process argv, if present. Skips `argv[0]`
+/// (the program path) to mirror `forwarded_args`, so a program invoked from a path that happens
+/// to start with `--engine=` can never be misread as an override.
+fn engine_override_from_argv<'a, I: IntoIterator<Item = &'a OsString>>(argv: I) -> Option<String> {
+    argv.into_iter().skip(1).find_map(|arg| {
+        arg.to_str()
+            .and_then(|s| s.strip_prefix(ENGINE_FLAG_PREFIX))
+            .map(str::to_owned)
+    })
 }
 
 /// Builds the full command line for the child linker: the forwarded args, prefixed with
 /// `-flavor <target>` when the discovered linker is the multi-flavor `rust-lld` dispatcher.
-fn child_command_line(
-    linker: &Path,
-    target: BridgeTarget,
-    forwarded: Vec<OsString>,
-) -> Vec<OsString> {
+fn child_command_line(linker: &Path, engine: &Engine, forwarded: Vec<OsString>) -> Vec<OsString> {
     let mut args = Vec::with_capacity(forwarded.len() + 2);
     if needs_flavor_prefix(linker) {
         args.push(OsString::from("-flavor"));
-        args.push(OsString::from(target.rust_lld_flavor()));
+        args.push(OsString::from(engine.rust_lld_flavor));
     }
     args.extend(forwarded);
     args
@@ -245,14 +348,26 @@ fn child_command_line(
 /// forwarded as the linker's command line (with `-flavor <target>` prepended if the discovered
 /// linker needs it).
 pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, target: BridgeTarget) -> Result<()> {
-    let linker = discover_linker(target)?;
+    let argv: Vec<OsString> = argv.into_iter().collect();
+
+    let (override_name, reason) = match engine_override_from_argv(&argv) {
+        Some(name) => (Some(name), SelectionReason::OverrideFlag),
+        None => match std::env::var(RELD_ENGINE_ENV) {
+            Ok(name) => (Some(name), SelectionReason::OverrideEnv),
+            Err(_) => (None, SelectionReason::Default),
+        },
+    };
+
+    let engine = select_engine(target, override_name.as_deref())?;
+    let linker = discover_linker(engine)?;
 
     let forwarded = forwarded_args(argv);
-    let child_args = child_command_line(&linker, target, forwarded);
+    let child_args = child_command_line(&linker, engine, forwarded);
 
     eprintln!(
-        "reld: engine={} (bridge) -> {}",
-        target.engine_label(),
+        "reld: engine={} (bridge, reason={}) -> {}",
+        engine.name,
+        reason.label(),
         linker.display()
     );
 
@@ -348,10 +463,10 @@ mod tests {
         let fake_linker = TempFile::create("env-override-linker");
         let _guard = EnvVarGuard::set(RELD_BRIDGE_LINKER_ENV, fake_linker.path().to_str().unwrap());
 
-        let discovered = discover_linker(BridgeTarget::Coff).unwrap();
+        let discovered = discover_linker(Engine::default_for(BridgeTarget::Coff)).unwrap();
         assert_eq!(discovered, fake_linker.path());
 
-        let discovered = discover_linker(BridgeTarget::MachO).unwrap();
+        let discovered = discover_linker(Engine::default_for(BridgeTarget::MachO)).unwrap();
         assert_eq!(discovered, fake_linker.path());
     }
 
@@ -361,7 +476,7 @@ mod tests {
         let missing = unique_temp_path("does-not-exist");
         let _guard = EnvVarGuard::set(RELD_BRIDGE_LINKER_ENV, missing.to_str().unwrap());
 
-        let err = discover_linker(BridgeTarget::Coff).unwrap_err();
+        let err = discover_linker(Engine::default_for(BridgeTarget::Coff)).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains(RELD_BRIDGE_LINKER_ENV),
@@ -400,7 +515,7 @@ mod tests {
         // The "no linker discoverable" error must always tell the user about the override knob,
         // for both bridge targets.
         for target in [BridgeTarget::Coff, BridgeTarget::MachO] {
-            let message = not_found_message(target);
+            let message = not_found_message(Engine::default_for(target));
             assert!(
                 message.contains(RELD_BRIDGE_LINKER_ENV),
                 "unexpected error message: {message}"
@@ -449,7 +564,7 @@ mod tests {
         ];
         let child = child_command_line(
             Path::new("/tc/rust-lld.exe"),
-            BridgeTarget::Coff,
+            Engine::default_for(BridgeTarget::Coff),
             forwarded_args(argv),
         );
         assert_eq!(
@@ -475,7 +590,7 @@ mod tests {
         ];
         let child = child_command_line(
             Path::new("/tc/rust-lld"),
-            BridgeTarget::MachO,
+            Engine::default_for(BridgeTarget::MachO),
             forwarded_args(argv),
         );
         assert_eq!(
@@ -492,7 +607,11 @@ mod tests {
     #[test]
     fn coff_flavor_prefix_is_link() {
         let forwarded = vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")];
-        let child = child_command_line(Path::new("/tc/rust-lld"), BridgeTarget::Coff, forwarded);
+        let child = child_command_line(
+            Path::new("/tc/rust-lld"),
+            Engine::default_for(BridgeTarget::Coff),
+            forwarded,
+        );
         assert_eq!(child[0], OsString::from("-flavor"));
         assert_eq!(child[1], OsString::from("link"));
     }
@@ -500,7 +619,11 @@ mod tests {
     #[test]
     fn macho_flavor_prefix_is_darwin() {
         let forwarded = vec![OsString::from("-o"), OsString::from("a.out")];
-        let child = child_command_line(Path::new("/tc/rust-lld"), BridgeTarget::MachO, forwarded);
+        let child = child_command_line(
+            Path::new("/tc/rust-lld"),
+            Engine::default_for(BridgeTarget::MachO),
+            forwarded,
+        );
         assert_eq!(child[0], OsString::from("-flavor"));
         assert_eq!(child[1], OsString::from("darwin"));
     }
@@ -511,7 +634,7 @@ mod tests {
         let expected = forwarded.clone();
         let child = child_command_line(
             Path::new("/tc/gcc-ld/lld-link.exe"),
-            BridgeTarget::Coff,
+            Engine::default_for(BridgeTarget::Coff),
             forwarded,
         );
         assert_eq!(child, expected);
@@ -523,9 +646,158 @@ mod tests {
         let expected = forwarded.clone();
         let child = child_command_line(
             Path::new("/tc/gcc-ld/ld64.lld"),
-            BridgeTarget::MachO,
+            Engine::default_for(BridgeTarget::MachO),
             forwarded,
         );
         assert_eq!(child, expected);
+    }
+
+    #[test]
+    fn select_engine_default_for_coff_is_lld_link() {
+        let engine = select_engine(BridgeTarget::Coff, None).unwrap();
+        assert_eq!(engine.name, "lld-link");
+        assert_eq!(engine.format, BridgeTarget::Coff);
+    }
+
+    #[test]
+    fn select_engine_default_for_macho_is_ld64_lld() {
+        let engine = select_engine(BridgeTarget::MachO, None).unwrap();
+        assert_eq!(engine.name, "ld64.lld");
+        assert_eq!(engine.format, BridgeTarget::MachO);
+    }
+
+    #[test]
+    fn select_engine_valid_override_matches_target() {
+        let engine = select_engine(BridgeTarget::Coff, Some("lld-link")).unwrap();
+        assert_eq!(engine.name, "lld-link");
+
+        let engine = select_engine(BridgeTarget::MachO, Some("ld64.lld")).unwrap();
+        assert_eq!(engine.name, "ld64.lld");
+    }
+
+    #[test]
+    fn select_engine_unknown_name_errors_listing_valid_engines() {
+        let err = select_engine(BridgeTarget::Coff, Some("bogus")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("bogus"), "unexpected message: {message}");
+        assert!(
+            message.contains("lld-link"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("ld64.lld"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn select_engine_format_mismatch_errors() {
+        // ld64.lld links Mach-O; requesting it for a COFF link is a format mismatch.
+        let err = select_engine(BridgeTarget::Coff, Some("ld64.lld")).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("ld64.lld"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("COFF"), "unexpected message: {message}");
+
+        // Symmetric direction: lld-link links COFF; requesting it for a Mach-O link mismatches.
+        let err = select_engine(BridgeTarget::MachO, Some("lld-link")).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("lld-link"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("Mach-O"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn forwarded_args_strips_engine_flag_at_start() {
+        let argv = [
+            OsString::from("reld"),
+            OsString::from("--engine=lld-link"),
+            OsString::from("/OUT:a.exe"),
+            OsString::from("foo.obj"),
+        ];
+        assert_eq!(
+            forwarded_args(argv),
+            vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")]
+        );
+    }
+
+    #[test]
+    fn forwarded_args_strips_engine_flag_in_middle() {
+        let argv = [
+            OsString::from("reld"),
+            OsString::from("/OUT:a.exe"),
+            OsString::from("--engine=ld64.lld"),
+            OsString::from("foo.obj"),
+        ];
+        assert_eq!(
+            forwarded_args(argv),
+            vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")]
+        );
+    }
+
+    #[test]
+    fn forwarded_args_strips_engine_flag_at_end() {
+        let argv = [
+            OsString::from("reld"),
+            OsString::from("/OUT:a.exe"),
+            OsString::from("foo.obj"),
+            OsString::from("--engine=lld-link"),
+        ];
+        assert_eq!(
+            forwarded_args(argv),
+            vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")]
+        );
+    }
+
+    #[test]
+    fn forwarded_args_unchanged_when_no_engine_flag() {
+        let argv = [
+            OsString::from("reld"),
+            OsString::from("/OUT:a.exe"),
+            OsString::from("foo.obj"),
+        ];
+        assert_eq!(
+            forwarded_args(argv),
+            vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")]
+        );
+    }
+
+    #[test]
+    fn forwarded_args_strips_both_flavor_pair_and_engine_flag() {
+        let argv = [
+            OsString::from("reld"),
+            OsString::from("-flavor"),
+            OsString::from("link"),
+            OsString::from("--engine=lld-link"),
+            OsString::from("/OUT:a.exe"),
+            OsString::from("foo.obj"),
+        ];
+        assert_eq!(
+            forwarded_args(argv),
+            vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")]
+        );
+    }
+
+    #[test]
+    fn engine_override_from_argv_finds_token_anywhere() {
+        let argv = vec![
+            OsString::from("reld"),
+            OsString::from("/OUT:a.exe"),
+            OsString::from("--engine=ld64.lld"),
+        ];
+        assert_eq!(
+            engine_override_from_argv(&argv),
+            Some("ld64.lld".to_string())
+        );
+    }
+
+    #[test]
+    fn engine_override_from_argv_none_when_absent() {
+        let argv = vec![OsString::from("reld"), OsString::from("/OUT:a.exe")];
+        assert_eq!(engine_override_from_argv(&argv), None);
     }
 }
