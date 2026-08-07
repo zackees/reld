@@ -125,6 +125,38 @@ fn display_linker(linker: &str) -> &str {
     }
 }
 
+/// Search `PATH` for an executable named `name`, returning its absolute path.
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|cand| cand.is_file())
+}
+
+/// Translate a linker token into the value handed to clang's `-fuse-ld=`.
+///
+/// clang maps `-fuse-ld=NAME` to a linker named `ld.NAME` (the GNU convention — `bfd` -> `ld.bfd`,
+/// `gold` -> `ld.gold`), with `lld` the one special-cased name. So the bare token `ld64.lld`
+/// resolves to a nonexistent `ld.ld64.lld` and the link fails (macOS showed `ld64.lld` as `n/a`).
+/// Rewrite that token to the absolute path of `ld64.lld` on `PATH` — matching ci.yml's proven
+/// macOS invocation and pinning the exact binary — falling back to `lld` (clang selects `ld64.lld`
+/// for Mach-O). Every other token, including reld's absolute-path shim, passes through unchanged.
+fn fuse_ld_value(token: &str) -> String {
+    resolve_fuse_ld(token, which_on_path)
+}
+
+/// Core of [`fuse_ld_value`] with the PATH lookup injected, so the mapping is unit-testable
+/// without depending on what is actually installed on the test machine.
+fn resolve_fuse_ld(token: &str, lookup: impl Fn(&str) -> Option<PathBuf>) -> String {
+    if token == "ld64.lld" {
+        if let Some(path) = lookup("ld64.lld") {
+            return path.to_string_lossy().into_owned();
+        }
+        return "lld".to_string();
+    }
+    token.to_string()
+}
+
 /// Locate the `ld.reld` driver shim produced by `ci/install-driver-shims.sh`.
 ///
 /// Resolution order:
@@ -340,7 +372,7 @@ fn link_once(args: &Args, objects: &[PathBuf], linker: &str, out: &Path) -> Resu
     let mut cmd = Command::new(&args.cc);
     cmd.args(objects).arg("-o").arg(out);
     if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={linker}"));
+        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
     }
     let status = cmd
         .stdout(Stdio::null())
@@ -375,7 +407,7 @@ fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
     let mut cmd = Command::new(cc);
     cmd.arg(&obj).arg("-o").arg(&exe);
     if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={linker}"));
+        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
     }
     Ok(cmd.output().map(|o| o.status.success()).unwrap_or(false))
 }
@@ -432,7 +464,7 @@ fn link_once_replay(
     let mut cmd = Command::new(cc);
     cmd.args(objects).args(extra).arg("-o").arg(out);
     if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={linker}"));
+        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
     }
     let status = cmd
         .stdout(Stdio::null())
@@ -591,6 +623,34 @@ mod tests {
         );
         assert_eq!(corpus.extra_link_args, vec!["-lm".to_string()]);
         assert_eq!(corpus.configuration.as_deref(), Some("quick"));
+    }
+
+    #[test]
+    fn ld64_lld_token_maps_to_abs_path_when_found() {
+        // The bug: bare `ld64.lld` makes clang look for `ld.ld64.lld`. The fix rewrites it to
+        // the resolved absolute path of ld64.lld on PATH.
+        let resolved = resolve_fuse_ld("ld64.lld", |name| {
+            assert_eq!(name, "ld64.lld");
+            Some(PathBuf::from("/opt/homebrew/opt/lld/bin/ld64.lld"))
+        });
+        assert_eq!(resolved, "/opt/homebrew/opt/lld/bin/ld64.lld");
+    }
+
+    #[test]
+    fn ld64_lld_token_falls_back_to_lld_when_not_found() {
+        let resolved = resolve_fuse_ld("ld64.lld", |_| None);
+        assert_eq!(resolved, "lld");
+    }
+
+    #[test]
+    fn other_linker_tokens_pass_through_unchanged() {
+        // Reference linkers and reld's absolute-path shim must be untouched.
+        for token in ["bfd", "lld", "mold", "wild", "/abs/path/to/ld.reld"] {
+            assert_eq!(
+                resolve_fuse_ld(token, |_| panic!("lookup must not run")),
+                token
+            );
+        }
     }
 
     #[test]

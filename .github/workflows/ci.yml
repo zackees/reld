@@ -439,9 +439,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker lld --trials 2 --warmup 1 | tee benchmark-macos-arm64.md
+          # Exercise ld64.lld specifically: it was silently n/a because clang maps
+          # -fuse-ld=ld64.lld to a nonexistent ld.ld64.lld (#60). This asserts it now links.
+          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- --cc clang --linker ld64.lld --trials 2 --warmup 1 | tee benchmark-macos-arm64.md
           grep -q '## Link Benchmark:' benchmark-macos-arm64.md || { echo "benchmark table missing '## Link Benchmark:' heading" >&2; exit 1; }
+          grep -qE '\| *ld64.lld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing ld64.lld column" >&2; exit 1; }
           grep -qE '\| *reld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing reld column" >&2; exit 1; }
+          # ld64.lld is the only linker requested (reld has no shim here), so a real timing proves
+          # it actually linked rather than reporting n/a.
+          grep -qE '[0-9]+\.[0-9]{4}' benchmark-macos-arm64.md || { echo "ld64.lld produced no timing (still n/a?)" >&2; exit 1; }
 
       - name: macOS self-host (link reld with reld)
         if: matrix.kind == 'macos-arm64'
