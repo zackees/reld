@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
@@ -143,6 +143,15 @@ def parse_benchmark_log(text: str) -> Report:
             report.rows.append(Row(scenario=scenario, series=series, seconds=value))
 
     return report
+
+
+def series_mode(series: str, runner_os: str) -> str:
+    """How a benchmark series was produced. reld is the subject; everything else is a
+    reference linker. reld links natively (wild ELF) on Linux and via the lld bridge
+    elsewhere."""
+    if series == "reld":
+        return "native" if runner_os == "Linux" else "bridge"
+    return "reference"
 
 
 def _tool_version(cmd: list[str]) -> str | None:
@@ -316,11 +325,17 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
     # line for a run that never produced a chart corrupts the series permanently.
     render_jpg(report, meta, out_dir / IMAGE_NAME)
 
+    runner_os = meta.get("runner", {}).get("os", "")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "metadata": meta,
         "results": [
-            {"scenario": r.scenario, "series": r.series, "seconds": r.seconds}
+            {
+                "scenario": r.scenario,
+                "series": r.series,
+                "seconds": r.seconds,
+                "mode": series_mode(r.series, runner_os),
+            }
             for r in report.rows
         ],
     }
@@ -333,6 +348,7 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
             {
                 "ts": meta["generated_at"],
                 "sha": meta.get("git_sha", ""),
+                "target": meta.get("target", ""),
                 "results": payload["results"],
             },
             separators=(",", ":"),
