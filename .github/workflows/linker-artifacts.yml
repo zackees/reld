@@ -91,7 +91,9 @@ jobs:
           set -euo pipefail
           soldr cargo build --locked --release --package reld --bin reld-link
           mkdir -p package
-          cp "target/release/${{ matrix.executable }}" "package/${{ matrix.executable }}"
+          built="$(find target -type f \( -name 'reld-link' -o -name 'reld-link.exe' \) -print -quit)"
+          test -n "$built"
+          cp "$built" "package/${{ matrix.executable }}"
 
       - name: Smoke build artifact
         shell: bash
