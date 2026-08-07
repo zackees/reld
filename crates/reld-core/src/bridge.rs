@@ -315,14 +315,20 @@ mod tests {
 
     #[test]
     fn needs_flavor_prefix_for_rust_lld() {
+        // Forward-slash paths so `file_stem()` behaves identically on every host (backslashes
+        // are not path separators off Windows). The backslash form is covered under cfg(windows).
         assert!(needs_flavor_prefix(Path::new("/some/path/rust-lld")));
-        assert!(needs_flavor_prefix(Path::new(r"C:\some\path\rust-lld.exe")));
+        assert!(needs_flavor_prefix(Path::new("/some/path/rust-lld.exe")));
         assert!(needs_flavor_prefix(Path::new("RUST-LLD")));
+        #[cfg(windows)]
+        assert!(needs_flavor_prefix(Path::new(r"C:\some\path\rust-lld.exe")));
     }
 
     #[test]
     fn no_flavor_prefix_for_lld_link() {
         assert!(!needs_flavor_prefix(Path::new("/some/path/lld-link")));
+        assert!(!needs_flavor_prefix(Path::new("/some/path/lld-link.exe")));
+        #[cfg(windows)]
         assert!(!needs_flavor_prefix(Path::new(
             r"C:\some\path\lld-link.exe"
         )));
@@ -379,7 +385,7 @@ mod tests {
             OsString::from("link"),
             OsString::from("/OUT:a.exe"),
         ];
-        let child = child_command_line(Path::new(r"C:\tc\rust-lld.exe"), forwarded_args(argv));
+        let child = child_command_line(Path::new("/tc/rust-lld.exe"), forwarded_args(argv));
         assert_eq!(
             child,
             vec![
@@ -393,7 +399,7 @@ mod tests {
     #[test]
     fn lld_link_route_has_no_flavor_prefix() {
         let forwarded = vec![OsString::from("/OUT:a.exe"), OsString::from("foo.obj")];
-        let child = child_command_line(Path::new(r"C:\tc\gcc-ld\lld-link.exe"), forwarded.clone());
+        let child = child_command_line(Path::new("/tc/gcc-ld/lld-link.exe"), forwarded.clone());
         assert_eq!(child, forwarded);
     }
 }
