@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-08T10:05:41Z",
+  "corpus_version": "demo-v1",
+  "assets": [
+    {
+      "platform": "aarch64-apple-darwin",
+      "configuration": "quick",
+      "archive_path": "aarch64-apple-darwin/quick/corpus.tar.zst",
+      "sha256": "aa9665d0ad9061e6c26d5d3133b29674a06ac903ea0a245e100ba54538bf01e0",
+      "bytes": 919,
+      "corpus_json": "corpus.json",
+      "archive_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-assets/aarch64-apple-darwin/quick/corpus.tar.zst",
+      "toolchain": {}
+    },
+    {
+      "platform": "x86_64-linux",
+      "configuration": "quick",
+      "archive_path": "x86_64-linux/quick/corpus.tar.zst",
+      "sha256": "3f3e4ed75b7ecd5e3f8e404d880a137afc50d03bc376f657d9d2cdfdf589b027",
+      "bytes": 1063,
+      "corpus_json": "corpus.json",
+      "archive_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-assets/x86_64-linux/quick/corpus.tar.zst",
+      "toolchain": {}
+    },
+    {
+      "platform": "x86_64-pc-windows-msvc",
+      "configuration": "quick",
+      "archive_path": "x86_64-pc-windows-msvc/quick/corpus.tar.zst",
+      "sha256": "bc2f27ca646099bb4ebc0277fd1c4a60eda82615b054c1de40754c3a967609c6",
+      "bytes": 956,
+      "corpus_json": "corpus.json",
+      "archive_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-assets/x86_64-pc-windows-msvc/quick/corpus.tar.zst",
+      "toolchain": {}
+    }
+  ]
+}
