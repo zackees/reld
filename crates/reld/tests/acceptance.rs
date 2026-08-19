@@ -3152,6 +3152,8 @@ fn build_obj(
 
             command
                 .env("RELD_SAVE_SKIP_LINKING", "1")
+                .env(reld_core::bridge::RELD_ENGINE_ENV, "reld")
+                .env(reld_core::args::RELD_UNSUPPORTED_ENV, "ignore")
                 .args(config.rustc_channel.as_arg())
                 .args(["-C", "linker=clang"])
                 .args(["-C", &format!("link-arg=--ld-path={reld}")]);
@@ -3808,6 +3810,8 @@ impl LinkCommand {
         }
 
         if linker.is_reld() {
+            command.env(reld_core::bridge::RELD_ENGINE_ENV, "reld");
+            command.env(reld_core::args::RELD_UNSUPPORTED_ENV, "ignore");
             if matches!(config.linker_driver, LinkerDriver::Direct(_)) {
                 command.arg("--validate-output");
                 // TODO: Add a flag or do something so that unsupported flags get ignored. i.e. the
@@ -3815,7 +3819,6 @@ impl LinkCommand {
                 // than printing warnings, reld_core should return them, then we as the caller can
                 // just choose to not print them.
             } else {
-                command.env(reld_core::args::RELD_UNSUPPORTED_ENV, "ignore");
                 command.env(reld_core::args::VALIDATE_ENV, "1");
             }
 

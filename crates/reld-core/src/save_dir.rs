@@ -29,12 +29,6 @@ const SKIP_LINKING_ENV: &str = "RELD_SAVE_SKIP_LINKING";
 
 const PRELUDE: &str = include_str!("save-dir-prelude.sh");
 
-/// Whether this invocation exists only to capture a replayable native-link command.
-pub(crate) fn capture_only_requested() -> bool {
-    std::env::var_os(SKIP_LINKING_ENV).is_some()
-        && (std::env::var_os(SAVE_DIR_ENV).is_some() || std::env::var_os(SAVE_BASE_ENV).is_some())
-}
-
 #[derive(Debug)]
 struct SaveDirState {
     dir: PathBuf,

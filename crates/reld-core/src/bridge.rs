@@ -73,6 +73,7 @@ pub struct Engine {
 /// Capabilities that affect engine selection rather than merely argument spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Capability {
+    NativeControl,
     Lto,
     Icf,
     DiscardAll,
@@ -85,6 +86,7 @@ enum Capability {
 impl Capability {
     fn label(self) -> &'static str {
         match self {
+            Capability::NativeControl => "reld-only validation or diagnostic output",
             Capability::Lto => "LTO",
             Capability::Icf => "identical code folding",
             Capability::DiscardAll => "discarding local symbols",
@@ -96,7 +98,7 @@ impl Capability {
     }
 }
 
-const NO_CAPABILITIES: &[Capability] = &[];
+const NATIVE_RELD_CAPABILITIES: &[Capability] = &[Capability::NativeControl];
 const LLD_CAPABILITIES: &[Capability] = &[
     Capability::Lto,
     Capability::Icf,
@@ -113,7 +115,7 @@ const NATIVE_RELD_ENGINE: Engine = Engine {
     linker_basename: "",
     rust_lld_flavor: "",
     native: true,
-    capabilities: NO_CAPABILITIES,
+    capabilities: NATIVE_RELD_CAPABILITIES,
 };
 const ELF_LLD_ENGINE: Engine = Engine {
     name: "lld",
@@ -181,7 +183,6 @@ struct Requirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionReason {
     Default,
-    SaveOnly,
     OverrideFlag,
     OverrideEnv,
     Capability(&'static str),
@@ -191,7 +192,6 @@ impl SelectionReason {
     fn label(self) -> &'static str {
         match self {
             SelectionReason::Default => "default",
-            SelectionReason::SaveOnly => "save-only(RELD_SAVE_SKIP_LINKING)",
             SelectionReason::OverrideFlag => "override(--engine)",
             SelectionReason::OverrideEnv => "override(RELD_ENGINE)",
             SelectionReason::Capability(trigger) => trigger,
@@ -333,7 +333,15 @@ fn collect_requested_capabilities(
         }
 
         let lower = arg.to_ascii_lowercase();
-        let requirement = if is_driver_lto_flag(&lower) {
+        let requirement = if matches!(
+            lower.as_str(),
+            "--validate-output" | "--write-layout" | "--write-trace"
+        ) {
+            Some(Requirement {
+                capability: Capability::NativeControl,
+                trigger: "flag:reld-only-control",
+            })
+        } else if is_driver_lto_flag(&lower) {
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "flag:-flto",
@@ -432,22 +440,41 @@ fn override_from_request(
     }
 }
 
-fn select_route_with_env(
+fn select_route_with_policy(
     argv: &[OsString],
     target: BridgeTarget,
     env_override: Option<&str>,
+    allow_unsupported_native: bool,
+    native_control_env: bool,
 ) -> Result<Route> {
     // COFF and Mach-O each have a single bundled engine today, so parsing their response files
     // cannot affect selection. More importantly, their response grammars and encodings differ
     // from ELF/GNU (MSVC commonly emits UTF-16). Leave them byte-for-byte for the destination
     // driver instead of eagerly feeding them through reld's UTF-8 GNU response parser.
-    let requirements = if target == BridgeTarget::Elf {
+    let mut requirements = if target == BridgeTarget::Elf {
         requested_capabilities(argv)?
     } else {
         Vec::new()
     };
+    if target == BridgeTarget::Elf
+        && native_control_env
+        && !requirements
+            .iter()
+            .any(|requirement| requirement.capability == Capability::NativeControl)
+    {
+        requirements.push(Requirement {
+            capability: Capability::NativeControl,
+            trigger: "environment:reld-only-control",
+        });
+    }
     let (override_name, override_reason) = override_from_request(argv, env_override);
-    let engine = select_engine(target, override_name.as_deref(), &requirements)?;
+    let checked_requirements =
+        if allow_unsupported_native && override_name.as_deref() == Some(NATIVE_RELD_ENGINE.name) {
+            &[][..]
+        } else {
+            requirements.as_slice()
+        };
+    let engine = select_engine(target, override_name.as_deref(), checked_requirements)?;
     let default = Engine::default_for(target);
     let reason = if override_name.is_some() {
         override_reason
@@ -463,31 +490,35 @@ fn select_route_with_env(
     Ok(Route { engine, reason })
 }
 
-fn select_route_with_context(
+#[cfg(test)]
+fn select_route_with_env(
     argv: &[OsString],
     target: BridgeTarget,
     env_override: Option<&str>,
-    capture_only: bool,
 ) -> Result<Route> {
-    // Save-dir capture must parse the original invocation and write its native replay artifact.
-    // Capability routing is irrelevant because RELD_SAVE_SKIP_LINKING exits before the final link.
-    if capture_only && target == BridgeTarget::Elf {
-        return Ok(Route {
-            engine: &NATIVE_RELD_ENGINE,
-            reason: SelectionReason::SaveOnly,
-        });
-    }
-
-    select_route_with_env(argv, target, env_override)
+    select_route_with_policy(argv, target, env_override, false, false)
 }
 
 /// Selects the engine for one raw linker invocation.
 pub fn select_route(argv: &[OsString], target: BridgeTarget) -> Result<Route> {
-    select_route_with_context(
+    let native_control_env = [
+        crate::args::VALIDATE_ENV,
+        crate::args::WRITE_LAYOUT_ENV,
+        crate::args::WRITE_TRACE_ENV,
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some());
+    let allow_unsupported_native = std::env::var(crate::args::RELD_UNSUPPORTED_ENV)
+        .ok()
+        .as_deref()
+        == Some("ignore");
+
+    select_route_with_policy(
         argv,
         target,
         std::env::var(RELD_ENGINE_ENV).ok().as_deref(),
-        crate::save_dir::capture_only_requested(),
+        allow_unsupported_native,
+        native_control_env,
     )
 }
 
@@ -1130,21 +1161,51 @@ mod tests {
     }
 
     #[test]
-    fn elf_capture_only_lto_stays_native_for_save_dir_replay() {
-        let route = select_route_with_context(
+    fn explicit_native_override_can_accept_capabilities_with_ignore_policy() {
+        let route = select_route_with_policy(
             &[
                 OsString::from("ld.reld"),
                 OsString::from("-flto"),
                 OsString::from("foo.o"),
             ],
             BridgeTarget::Elf,
-            None,
+            Some("reld"),
             true,
+            false,
         )
         .unwrap();
         assert_eq!(route.engine.name, "reld");
         assert!(!route.is_bridge());
-        assert_eq!(route.reason, SelectionReason::SaveOnly);
+        assert_eq!(route.reason, SelectionReason::OverrideEnv);
+    }
+
+    #[test]
+    fn ignore_policy_does_not_suppress_conflicting_lld_override() {
+        let error = select_route_with_policy(
+            &[
+                OsString::from("ld.reld"),
+                OsString::from("--validate-output"),
+            ],
+            BridgeTarget::Elf,
+            Some("lld"),
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("reld-only validation"));
+    }
+
+    #[test]
+    fn ignore_policy_does_not_suppress_unknown_override() {
+        let error = select_route_with_policy(
+            &[OsString::from("ld.reld"), OsString::from("foo.o")],
+            BridgeTarget::Elf,
+            Some("bogus"),
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Unknown engine `bogus`"));
     }
 
     #[test]
