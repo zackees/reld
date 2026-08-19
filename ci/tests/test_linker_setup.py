@@ -9,6 +9,7 @@ import pytest
 from ci.linker_setup import (
     Artifact,
     _append_github_path,
+    _download,
     _extract_member,
     _member_matches,
     _url_suffix,
@@ -19,7 +20,6 @@ from ci.linker_setup import (
     resolve_artifacts,
     sha256_file,
 )
-
 
 ENV = {
     "MOLD_VERSION": "2.41.0",
@@ -48,6 +48,20 @@ def test_sha256_file(tmp_path: Path) -> None:
     blob = tmp_path / "blob"
     blob.write_bytes(b"hello")
     assert sha256_file(blob) == hashlib.sha256(b"hello").hexdigest()
+
+
+def test_download_sends_a_user_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str | None] = {}
+
+    def fake_urlopen(request):
+        seen["user_agent"] = request.get_header("User-agent")
+        return io.BytesIO(b"payload")
+
+    monkeypatch.setattr("ci.linker_setup.urllib.request.urlopen", fake_urlopen)
+    destination = tmp_path / "download"
+    _download("https://example.invalid/artifact", destination)
+    assert seen["user_agent"] == "reld-ci/1.0"
+    assert destination.read_bytes() == b"payload"
 
 
 def _deb_artifact(sha: str) -> Artifact:

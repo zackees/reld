@@ -7,10 +7,10 @@
 > Mach-O codegen in reld's own engine is still future work. Every performance figure in this
 > document is a *target*, not a measurement, except the Linux `reld` column in the published
 > benchmark, which is now a real CI-generated measurement (§6). reld's bundling of multiple real
-> linkers per platform is the basis for the **polylinker** framing in §4.5 — a flag-aware router
-> that would pick the right bundled engine per requested link configuration (e.g. LTO). That
-> router is **design only** ([#30](https://github.com/zackees/reld/issues/30)); today's routing
-> is by platform/format alone.
+> linkers per platform is the basis for the **polylinker** framing in §4.5. Its initial ELF
+> implementation routes LTO, ICF, and compatibility-policy requests to a capable bundled engine;
+> see [#30](https://github.com/zackees/reld/issues/30). Native COFF/Mach-O engines and the broader
+> capability matrix remain future work.
 
 ## 1. Position
 
@@ -99,15 +99,15 @@ linker across all target platforms, because a fast non-LTO linker is what the in
 actually needs and because LTO interacts with almost every other subsystem — sequencing it
 early would slow down the thing the project exists to deliver.
 
-**[DESIGN] Routing framing (not yet implemented).** reld does not plan to implement LTO natively
+**[SHIPPED routing; native codegen remains future work.]** reld does not plan to implement LTO natively
 in its own engine as the primary path. Instead, per the polylinker model (§4.5) and
 [#30](https://github.com/zackees/reld/issues/30), an LTO-shaped link request
 (`-flto`, `--plugin`, `/LTCG`, `/GL`) is meant to be **routed to whichever bundled engine already
 has real LTO support** — today that would be the `lld` bridge (§4.4), which does. This makes LTO
 *delegated*, not rejected, at the product level, while reld's own engine still owns zero LTO
-codegen. **The flag-aware router that would make this real does not exist yet** — see §4.5 for
-status. Until it lands, current behavior stands: LTO flags are **rejected or ignored with a
-clear, specific diagnostic** — never silently mislinked. Note that `wild` already has a
+codegen. The flag-aware router implements this for ELF today; see §4.5 for the exact capability
+set. Forcing the native engine for an LTO request is a clear capability error, never a silent
+mislink. Note that `wild` already has a
 linker-plugin LTO implementation with known issues; the fork inherits it, so on ELF the starting
 position is "partially works", not "absent". Do not delete that code. See
 [D13](docs/plan/01-DECISIONS.md) for the locked-decision record of this reframing.
@@ -155,8 +155,9 @@ must be the multiplier on an already-good serial path, not a substitute for one.
 Native codegen for PE/COFF (§4.1, §2.1) and Mach-O is not yet built. In the meantime, reld
 **bridges** Windows and macOS links by delegating to `lld` — `lld-link` for COFF, `ld64.lld` for
 Mach-O — both drivers built into the `rust-lld` binary that ships with every Rust toolchain.
-reld discovers the linker, execs it with the original argv, and propagates its exit code and
-diagnostics verbatim; the bridge does no parsing or layout of its own. This is proven by CI
+reld discovers the linker, classifies argv for routing, execs it with the compatible linker
+arguments, and propagates its exit code and diagnostics verbatim; the bridge does no layout of
+its own. This is proven by CI
 end-to-end builds on the windows-msvc and macos-arm64 runners that link and run a real
 multi-crate program with a C dependency (`rusqlite` bundled/SQLite).
 
@@ -169,14 +170,14 @@ fidelity). See [issue #17](https://github.com/zackees/reld/issues/17) for the ph
 
 ### 4.5 Polylinker: flag-aware routing over bundled engines
 
-**[DESIGN — not yet implemented.]** §4.4 establishes that reld already bundles more than one
+**[INITIAL IMPLEMENTATION SHIPPED.]** §4.4 establishes that reld bundles more than one
 real linker per platform (native engine + lld bridge) and already routes between them — but only
 on the platform/format axis, decided once at dispatch. [#30](https://github.com/zackees/reld/issues/30)
 proposes generalizing that into a **polylinker**: a router that also inspects the *requested
 configuration* (argv flags, env) and picks the bundled engine whose capabilities cover it. This
-section specifies that design so it can be implemented against (B8 in
-[#17](https://github.com/zackees/reld/issues/17), and the daemon router in
-[#19](https://github.com/zackees/reld/issues/19)); none of it is built yet.
+section specifies the policy implemented by the initial ELF router (B8 in
+[#17](https://github.com/zackees/reld/issues/17)) and to be extended by the daemon router in
+[#19](https://github.com/zackees/reld/issues/19).
 
 **Capability model.** Each bundled engine declares, in a static table (plus a cheap runtime
 probe where useful), which configurations it supports: LTO/ThinLTO, plugin interface,
@@ -196,8 +197,8 @@ Engine::LldBridge{ formats: [Coff, MachO, Elf],    lto: true,  incremental: fals
 3. Escalate to a more capable bundled engine when the requested configuration demands it (e.g.
    `-flto` on a platform where the native engine exists but doesn't support LTO → route to the
    lld bridge instead).
-4. `--engine=<name>` / `RELD_ENGINE` forces a specific bundled engine, bypassing routing
-   entirely — for benchmarking and as an escape hatch.
+4. `--engine=<name>` / `RELD_ENGINE` bypasses automatic engine selection for benchmarking and
+   as an escape hatch; the requested engine is still format- and capability-validated.
 
 **Fallback ordering.** If the default (fastest) engine can't satisfy a requested capability, fall
 back to a capable bundled engine rather than failing outright, ordered by (capability match, then
@@ -209,7 +210,9 @@ correctness-affecting flag or produce a silent mislink.
 spirit as the bridge's existing `reld: delegating to <linker> (bridge mode)` line (§4.4, B5):
 `reld: engine=<name> (reason: default|flag:-flto|fallback:<cap>|override)`. The benchmark harness
 already records *which* engine produced a number (§6, the `mode`/`engine` field) — routing
-generalizes that same discipline to ordinary links, not just benchmarks.
+generalizes that same discipline to ordinary links, not just benchmarks. The line is enabled by
+setting `RELD_LOG_ENGINE`; normal linker invocations keep stderr clean for compiler-driver and
+build-system compatibility.
 
 **Interaction with incremental linking.** LTO and the incremental daemon path (§4.2) are mutually
 exclusive on a given link (same as gold and MSVC). The router must select one engine and must not
@@ -228,11 +231,11 @@ not by forking a new routing path per engine; see
 |---|---|
 | Multiple real linkers bundled per platform | Shipped (§4.4) |
 | Routing by platform/format at dispatch | Shipped (§4.4) |
-| Capability table | Design only |
-| Flag/config classification + routing | Design only |
-| Fallback-on-missing-capability | Design only |
-| `--engine=` / `RELD_ENGINE` override | Design only |
-| Per-decision routing log | Design only |
+| Capability table | Shipped: initial ELF/LTO/ICF and compatibility-policy set |
+| Flag/config classification + routing | Shipped for ELF, including nested response-file plugin detection |
+| Fallback-on-missing-capability | Shipped: native ELF → ELF `lld` |
+| `--engine=` / `RELD_ENGINE` override | Shipped |
+| Per-decision routing log | Shipped |
 
 ## 5. Honest risks
 

@@ -126,13 +126,18 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # GitHub's Azure mirror can accept the connection and then stall
+          # indefinitely while fetching package indexes. Use Ubuntu's HTTPS
+          # archive directly and keep network failures bounded.
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+          APT_OPTIONS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=30)
           curl -fsSL -o "${RUNNER_TEMP}/llvm-snapshot.gpg.key" https://apt.llvm.org/llvm-snapshot.gpg.key
           echo '8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d  '${RUNNER_TEMP}'/llvm-snapshot.gpg.key' | sha256sum --check
           gpg --dearmor < "${RUNNER_TEMP}/llvm-snapshot.gpg.key" > "${RUNNER_TEMP}/llvm-snapshot.gpg"
           sudo install -m 644 "${RUNNER_TEMP}/llvm-snapshot.gpg" /usr/share/keyrings/llvm-snapshot.gpg
           echo 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/llvm-22.list
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get "${APT_OPTIONS[@]}" update
+          sudo apt-get "${APT_OPTIONS[@]}" install -y \
             "clang-22=${CLANG_PACKAGE_VERSION}" \
             "llvm-22-linker-tools=${CLANG_PACKAGE_VERSION}"
 
@@ -271,7 +276,9 @@ jobs:
             malfunction-elf-relocation-target-plus-one \
             --test-threads=1 2>&1 | tee malfunction-tests.log
 
-      - name: Linux LTO fixture compatibility
+      # Reld's routed LTO modes are exercised by linker-modes.yml. These native acceptance
+      # fixtures retain coverage for the pinned reference linker and its compiler plugin.
+      - name: Linux LTO reference fixture compatibility
         if: matrix.kind == 'linux-gnu'
         shell: bash
         env:
@@ -550,8 +557,11 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+          # Avoid indefinite hangs from GitHub's Azure Ubuntu mirror.
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+          APT_OPTIONS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=30)
+          sudo apt-get "${APT_OPTIONS[@]}" update
+          sudo apt-get "${APT_OPTIONS[@]}" install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
       - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
         with:

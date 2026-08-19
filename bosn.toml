@@ -1,0 +1,20 @@
+[stack.linux]
+dockerfile = "docker/bosn.Dockerfile"
+family = "rust"
+default = true
+
+[stack.linux.volumes]
+target = { scope = "stack" }
+cargo-home = { scope = "machine" }
+
+[task.route]
+stack = "linux"
+cmd = "cargo test -p reld-core bridge::tests --no-default-features"
+
+[task.smoke]
+stack = "linux"
+cmd = "python3 ci/linker_modes.py --platform linux --cargo-command cargo --report /tmp/linker-modes-linux.json"
+
+[task.test]
+stack = "linux"
+cmd = "RELD_TEST_CONFIG=/reld/test-config-ci.toml cargo test --workspace"

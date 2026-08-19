@@ -230,6 +230,15 @@ impl Args {
         }
     }
 
+    /// Returns the object format selected by argv[0], `-flavor`, or the host default.
+    pub fn link_target(&self) -> crate::bridge::BridgeTarget {
+        match self {
+            Args::Elf(_) => crate::bridge::BridgeTarget::Elf,
+            Args::Coff(_) => crate::bridge::BridgeTarget::Coff,
+            Args::MachO(_) => crate::bridge::BridgeTarget::MachO,
+        }
+    }
+
     pub(crate) fn print_emulation_info(&self, stdout: &mut dyn Write) -> Result<()> {
         match self {
             Args::Elf(_) => {
@@ -1365,6 +1374,14 @@ impl std::str::FromStr for CounterKind {
 }
 
 fn declare_common_args<T: platform::Args>(parser: &mut ArgumentParser<T>) {
+    // Routing consumes this option before native argument parsing. Declaring it here prevents a
+    // forced native route (`--engine=reld`) from being reported as an unknown linker option.
+    parser
+        .declare_with_param()
+        .long("engine")
+        .help("Force a bundled linker engine")
+        .execute(|_args, _modifier_stack, _value| Ok(()));
+
     parser
         .declare()
         .long("write-layout")
@@ -1517,6 +1534,11 @@ mod tests {
 
         let args = Args::new(|| ["reld", "-flavor", "link"].into_iter()).unwrap();
         assert!(matches!(args, Args::Coff(_)));
+
+        let mut args = Args::new(|| ["ld.reld", "--engine=reld"].into_iter()).unwrap();
+        args.parse(|| ["ld.reld", "--engine=reld"].into_iter())
+            .unwrap();
+        assert!(args.common().unrecognized_options.is_empty());
 
         // -flavor has priority
         let args = Args::new(|| ["ld.reld", "-flavor", "darwin"].into_iter()).unwrap();

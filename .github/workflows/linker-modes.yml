@@ -1,0 +1,62 @@
+name: Linker modes
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linker-modes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exercise:
+    name: ${{ matrix.platform }} / fast + ThinLTO + LTO
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            install_llvm: false
+          - platform: windows
+            runner: windows-2022
+            install_llvm: true
+          - platform: macos
+            runner: macos-14
+            install_llvm: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+      - if: matrix.install_llvm
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
+        with:
+          version: 18.1.8
+      - name: Install upstream clang for macOS LTO
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          brew install llvm@18
+          echo "$(brew --prefix llvm@18)/bin" >> "${GITHUB_PATH}"
+      - name: Exercise every linker mode
+        run: >-
+          uv run --no-project python ci/linker_modes.py
+          --platform ${{ matrix.platform }}
+          --report linker-modes-${{ matrix.platform }}.json
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linker-modes-${{ matrix.platform }}
+          path: linker-modes-${{ matrix.platform }}.json
+          if-no-files-found: warn

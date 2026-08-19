@@ -21,11 +21,14 @@ fn run() -> reld_core::error::Result {
 
     reld_core::init_timing()?;
 
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let mut args = reld_core::Args::new(std::env::args)?;
+    let route = reld_core::select_route(&raw_args, args.link_target())?;
 
-    if let Some(target) = args.bridge_target() {
-        return reld_core::run_bridge(std::env::args_os(), target);
+    if route.is_bridge() {
+        return reld_core::run_bridge(raw_args, route);
     }
+    route.log_native();
 
     args.set_version(VERSION);
     args.parse(std::env::args)?;

@@ -6,6 +6,8 @@
 # Local scratch
 /.tmp/
 /dist/
+/.bosn-state/
+/linker-modes*.json
 
 # Editors
 .vscode/

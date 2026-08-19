@@ -1409,6 +1409,9 @@ impl Config {
     }
 
     fn is_linker_enabled(&self, linker: &Linker) -> bool {
+        if linker.is_reld() && self.uses_native_save_dir_incompatible_lto_route() {
+            return false;
+        }
         if let Some(references) = self.reference_linkers.as_ref() {
             if linker.is_reld() {
                 return true;
@@ -1424,6 +1427,19 @@ impl Config {
             return true;
         }
         linker.enabled_by_default()
+    }
+
+    /// These legacy configurations require reld's native save-dir replay script. Routed LTO
+    /// deliberately bypasses that native-only path; ci/linker_modes.py covers the routed engine
+    /// end to end on every host while these configurations continue testing their references.
+    fn uses_native_save_dir_incompatible_lto_route(&self) -> bool {
+        matches!(
+            (self.test_name.as_str(), self.config_name.as_str()),
+            ("wrap-lto", "clang")
+                | ("lto-integration", "clang")
+                | ("rust-integration-dynamic", "lto")
+                | ("rust-integration", "linker-plugin-lto")
+        )
     }
 
     /// Returns the configuration that should be used when building our dependencies. This is a copy
@@ -3136,6 +3152,8 @@ fn build_obj(
 
             command
                 .env("RELD_SAVE_SKIP_LINKING", "1")
+                .env(reld_core::bridge::RELD_ENGINE_ENV, "reld")
+                .env(reld_core::args::RELD_UNSUPPORTED_ENV, "ignore")
                 .args(config.rustc_channel.as_arg())
                 .args(["-C", "linker=clang"])
                 .args(["-C", &format!("link-arg=--ld-path={reld}")]);
@@ -3792,6 +3810,8 @@ impl LinkCommand {
         }
 
         if linker.is_reld() {
+            command.env(reld_core::bridge::RELD_ENGINE_ENV, "reld");
+            command.env(reld_core::args::RELD_UNSUPPORTED_ENV, "ignore");
             if matches!(config.linker_driver, LinkerDriver::Direct(_)) {
                 command.arg("--validate-output");
                 // TODO: Add a flag or do something so that unsupported flags get ignored. i.e. the
@@ -3799,7 +3819,6 @@ impl LinkCommand {
                 // than printing warnings, reld_core should return them, then we as the caller can
                 // just choose to not print them.
             } else {
-                command.env(reld_core::args::RELD_UNSUPPORTED_ENV, "ignore");
                 command.env(reld_core::args::VALIDATE_ENV, "1");
             }
 

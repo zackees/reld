@@ -26,16 +26,16 @@ an LTO-capable link.
 | Layer | Status |
 |---|---|
 | Bundling more than one real linker engine per platform | **Shipped.** Native engine (Linux) + lld bridge (Windows, macOS). |
-| Routing by platform/format, decided once at dispatch | **Shipped.** This is today's entire routing logic — it is not flag-aware. |
-| Capability table (per-engine declared support for LTO, GC-sections, ICF, PDB/DWARF, incremental, formats, ...) | **Design only.** No such table exists in code yet. |
-| Flag-aware router (inspect argv/env, classify requested config, pick engine) | **Design only.** Not implemented. Tracked as B8 (#17) / #30 / #19. |
-| Fallback ordering when the default engine lacks a capability | **Design only.** |
-| `--engine=` / `RELD_ENGINE` explicit override | **Design only.** |
-| Per-decision routing log line (`reld: engine=<name> (reason: ...)`) | **Design only.** The bridge does log a `reld: delegating to <linker> (bridge mode)` note today (§4.4) — that's the shipped precedent the design generalizes, not the routing log itself. |
-| LTO delegated to a capable engine on request | **Design only.** Today, LTO flags are rejected/ignored with a diagnostic (D13); they are not routed anywhere yet. |
+| Routing by platform/format, decided once at dispatch | **Shipped.** |
+| Capability table | **Shipped, initial set.** ELF native-vs-lld capabilities cover LTO, ICF, discard-all, warning/color policy, version-script policy, and Cortex-A53 erratum 843419. Extend this table as new native gaps are routed. |
+| Flag-aware router | **Shipped for ELF.** Direct argv and nested response-file flags are classified before native parsing. |
+| Fallback ordering when the default engine lacks a capability | **Shipped.** Native ELF is fastest/default; ELF `lld` is the capable fallback. |
+| `--engine=` / `RELD_ENGINE` explicit override | **Shipped.** A forced engine is still capability-validated. |
+| Per-decision routing log line (`reld: engine=<name> (reason=...)`) | **Shipped.** Set `RELD_LOG_ENGINE=1` to enable it without changing normal linker stderr. |
+| LTO delegated to a capable engine on request | **Shipped for ELF.** `-flto` and linker-plugin requests select `lld`; compiler-only `-flto` is not forwarded because raw `ld.lld` rejects it and consumes bitcode directly. |
 
-If you're implementing B8/#19: this table is your scope. If you're just reading the docs to
-understand what reld does *today*, only the first two rows are real.
+If you're extending B8/#19, keep the table and classifier centralized in `bridge.rs`; do not
+recreate capability decisions in individual drivers.
 
 ## The rule for new backends
 
