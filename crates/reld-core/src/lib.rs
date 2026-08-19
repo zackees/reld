@@ -6,6 +6,7 @@ pub mod args;
 pub mod bridge;
 pub use bridge::BridgeTarget;
 pub use bridge::run_bridge;
+pub use bridge::select_route;
 pub(crate) mod compression;
 pub(crate) mod debug_trace;
 pub(crate) mod diagnostics;

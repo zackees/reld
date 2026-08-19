@@ -280,30 +280,27 @@ Once that's true, "reject LTO" is no longer the honest best available answer —
   linker across all three platforms — unchanged from the original rationale in `DESIGN.md` §3.1.
   The revision is about *how the user's LTO request is handled today*, not about reld growing
   native LTO sooner.
-- **The flag-aware router itself is not yet implemented.** This decision records the target
-  policy for B8/#17 and the daemon router (#19) to implement against; it does not claim the
-  routing exists. **Until the router lands, current behavior is unchanged from the original
-  text**: LTO flags are rejected or ignored with a specific diagnostic naming the feature — never
-  silently mislinked.
+- **The initial flag-aware router is implemented for ELF.** `-flto` and linker-plugin requests
+  route from the native engine to the ELF `lld` bridge. B8/#17 can extend the capability set and
+  the daemon router (#19) can reuse the same policy; native LTO remains future work.
 
 Consequences for every phase:
 
 - **Do not delete wild's linker-plugin LTO.** The fork inherits a working-with-known-issues
   implementation on ELF (`linker_plugins.rs`, ~1467 LOC, driven from `lib.rs:325` and
   `lib.rs:374`). P2 must not regress it; pin current behaviour with a smoke test.
-- **Until the flag-aware router (B8) is implemented, LTO flags are rejected or ignored with a
-  specific diagnostic naming the feature** — never silently mislinked. This matters most where
-  build systems pass the flag unconditionally: rustc passes `-plugin` on the MinGW gcc path
-  (unless `-fno-use-linker-plugin`), and MSBuild passes `/LTCG`. Once B8 lands, the same flags
-  route to a capable bundled engine instead of producing that diagnostic.
+- **LTO requests route to a capable bundled engine.** This matters most where build systems pass
+  the flag unconditionally: rustc passes `-plugin` on GNU linker paths (unless
+  `-fno-use-linker-plugin`), and MSBuild passes `/LTCG`. An explicit request for an incapable
+  engine is rejected with a feature-specific diagnostic.
 - When native LTO does land in reld's own engine it will still be **incompatible with the
   incremental path** — gold and MSVC both fall back to a full link for it — so trigger 13 in
   `09-INCREMENTAL.md` §I1 stays permanent. Routing an LTO link to the `lld` bridge is likewise
   incompatible with the incremental path, for the same reason.
 
 Do not treat "LTO is a non-goal" as current. Earlier drafts of `DESIGN.md` and `README.md` said
-that; both have been corrected. Do not treat "the flag-aware router routes LTO today" as current
-either — see `agents/docs/polylinker.md` for the shipped-vs-designed summary.
+that; both have been corrected. The product-level ELF LTO route is shipped; native LTO codegen is
+still future work. See `agents/docs/polylinker.md` for the current capability boundary.
 
 ## D12 — Test oracle. **Locked: semantic differential, not byte comparison.**
 

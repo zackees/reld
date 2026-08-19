@@ -6,10 +6,9 @@
 Linux, and macOS as co-equal targets, incremental linking as the architecture, and a mandate to
 beat `wild` in every measured category.
 
-`reld` is a **polylinker**: it bundles multiple real linkers per platform (today: its own native
-engine plus an `lld` bridge) behind a single dispatch point, so it can run everywhere *and*,
-eventually, satisfy every requested link configuration by routing to whichever bundled engine
-supports it — fast by default, escalating only when the flags demand it. See
+`reld` is a **polylinker**: it puts multiple real linker engines behind a single dispatch point,
+so it can run everywhere and route a request to whichever engine supports it — fast by default,
+escalating only when the flags demand it. See
 ["Polylinker" below](#polylinker-runs-everywhere-supports-everything-by-routing) for what that
 means concretely, and what part of it is shipped vs. designed.
 
@@ -17,10 +16,10 @@ means concretely, and what part of it is shipped vs. designed.
 > (inherited from wild). Windows/COFF and macOS/Mach-O link via a **bridge** to `lld` (the
 > `rust-lld` that ships with every Rust toolchain) — proven by CI end-to-end builds on the
 > windows-msvc and macos-arm64 runners. Native COFF/Mach-O codegen in reld's own engine is still
-> **future work**. This bridge is today's *only* routing: it dispatches by platform/format, not
-> by requested flags. The flag-aware router described below (LTO/optimized links → a capable
-> bundled engine) is **design, not yet implemented** — see
-> [#30](https://github.com/zackees/reld/issues/30). Every performance number below remains a
+> **future work**. Linux also routes LTO/plugin, ICF, and several compatibility-policy flags to
+> the ELF `lld` bridge when the native engine cannot honor them. Every decision is logged with
+> the selected engine and reason. See [#30](https://github.com/zackees/reld/issues/30) and
+> decision B8 in [#17](https://github.com/zackees/reld/issues/17). Every performance number below remains a
 > **target**, not a measurement, except where noted. See [DESIGN.md](DESIGN.md) and
 > [#17](https://github.com/zackees/reld/issues/17) for the phase history.
 
@@ -99,14 +98,14 @@ Concretely (per [#30](https://github.com/zackees/reld/issues/30)):
 |---|---|
 | Bundling multiple real linkers per platform | **Shipped** — native ELF engine + lld bridge, see "Bridge status" above |
 | Routing by platform/format (dispatch to native vs. bridge) | **Shipped** |
-| Routing by requested *flags/config* (e.g. `-flto` → capable engine) | **Design only** — not implemented. Tracked by [#30](https://github.com/zackees/reld/issues/30), decision **B8** in [#17](https://github.com/zackees/reld/issues/17), and the daemon router in [#19](https://github.com/zackees/reld/issues/19) |
-| Capability table per bundled engine | **Design only** |
-| Fallback ordering when the fast engine lacks a capability | **Design only** |
-| `--engine=` / `RELD_ENGINE` override | **Design only** |
-| Per-decision routing log line | **Design only** |
+| Routing by requested *flags/config* | **Shipped for ELF** — LTO/plugin, ICF, discard-all, warning/color policy, version-script policy, and Cortex-A53 erratum 843419 route to `lld` |
+| Capability table per bundled engine | **Shipped, initial set** — extended as more native gaps are identified |
+| Fallback ordering when the fast engine lacks a capability | **Shipped** — native ELF first, capable ELF `lld` fallback |
+| `--engine=` / `RELD_ENGINE` override | **Shipped** — `reld` or `lld` on ELF; format-specific lld drivers elsewhere |
+| Per-decision routing log line | **Shipped** |
 
-Today, an `-flto` link is **not** automatically routed anywhere — see the Stretch goals section
-below for the current, honest state of LTO handling. See [DESIGN.md](DESIGN.md) for the full
+An ELF LTO link is automatically routed to `lld` when reld sees `-flto` or a linker plugin
+request, including plugin options found in response files. See [DESIGN.md](DESIGN.md) for the full
 routing design and [`agents/docs/polylinker.md`](agents/docs/polylinker.md) for the contributor-
 facing summary.
 
@@ -114,7 +113,7 @@ facing summary.
 
 1. **Runs and targets everywhere** — Windows, Linux, macOS. Not "Linux plus ports." The
    polylinker framing extends this claim toward "and supports every requested link
-   configuration," via routing — see above; that extension is design-stage, not shipped.
+   configuration," via routing — see above for the capability set shipped today.
 2. **Incremental** — a one-object change reflows the image instead of rebuilding it.
    Target: **warm relink in low single-digit milliseconds**, largely independent of binary size.
 3. **Faster than `wild` in every category** — cold link, warm full link, warm incremental,
@@ -156,14 +155,11 @@ day, not the one that goes to customers.
 on all three platforms. The inner loop is the priority; LTO touches nearly every subsystem and
 would slow down the thing this project exists to deliver.
 
-The framing for *how* LTO gets supported has changed: rather than reld ever implementing LTO
-natively in its own engine, `-flto`/`--plugin`/`/LTCG` links are meant to be **routed to a
-bundled engine that already does LTO** (the polylinker model above) — strictly better for the
-user than rejection, and still zero LTO codegen owned by reld. **That flag-aware router is
-design-stage, not implemented** ([#30](https://github.com/zackees/reld/issues/30), decision B8
-in [#17](https://github.com/zackees/reld/issues/17)); until it lands, LTO flags are rejected or
-ignored with a clear diagnostic rather than silently mislinked, per
-[D13](docs/plan/01-DECISIONS.md).
+The product-level LTO path is shipped: `-flto`/`--plugin`/`/LTCG` requests select a bundled
+`lld` driver with real LTO support (the polylinker model above), while reld's native engine owns
+zero LTO codegen. Implementing native LTO remains the stretch goal. An explicit
+`--engine=reld` on an LTO request fails with a capability-specific diagnostic rather than
+silently mislinking; see [D13](docs/plan/01-DECISIONS.md).
 
 ## Honest risks
 
