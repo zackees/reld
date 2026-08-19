@@ -271,7 +271,9 @@ jobs:
             malfunction-elf-relocation-target-plus-one \
             --test-threads=1 2>&1 | tee malfunction-tests.log
 
-      - name: Linux LTO fixture compatibility
+      # Reld's routed LTO modes are exercised by linker-modes.yml. These native acceptance
+      # fixtures retain coverage for the pinned reference linker and its compiler plugin.
+      - name: Linux LTO reference fixture compatibility
         if: matrix.kind == 'linux-gnu'
         shell: bash
         env:

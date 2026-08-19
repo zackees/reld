@@ -1409,6 +1409,9 @@ impl Config {
     }
 
     fn is_linker_enabled(&self, linker: &Linker) -> bool {
+        if linker.is_reld() && self.uses_native_save_dir_incompatible_lto_route() {
+            return false;
+        }
         if let Some(references) = self.reference_linkers.as_ref() {
             if linker.is_reld() {
                 return true;
@@ -1424,6 +1427,19 @@ impl Config {
             return true;
         }
         linker.enabled_by_default()
+    }
+
+    /// These legacy configurations require reld's native save-dir replay script. Routed LTO
+    /// deliberately bypasses that native-only path; ci/linker_modes.py covers the routed engine
+    /// end to end on every host while these configurations continue testing their references.
+    fn uses_native_save_dir_incompatible_lto_route(&self) -> bool {
+        matches!(
+            (self.test_name.as_str(), self.config_name.as_str()),
+            ("wrap-lto", "clang")
+                | ("lto-integration", "clang")
+                | ("rust-integration-dynamic", "lto")
+                | ("rust-integration", "linker-plugin-lto")
+        )
     }
 
     /// Returns the configuration that should be used when building our dependencies. This is a copy
