@@ -31,7 +31,7 @@ an LTO-capable link.
 | Flag-aware router | **Shipped for ELF.** Direct argv and nested response-file flags are classified before native parsing. |
 | Fallback ordering when the default engine lacks a capability | **Shipped.** Native ELF is fastest/default; ELF `lld` is the capable fallback. |
 | `--engine=` / `RELD_ENGINE` explicit override | **Shipped.** A forced engine is still capability-validated. |
-| Per-decision routing log line (`reld: engine=<name> (reason=...)`) | **Shipped.** |
+| Per-decision routing log line (`reld: engine=<name> (reason=...)`) | **Shipped.** Set `RELD_LOG_ENGINE=1` to enable it without changing normal linker stderr. |
 | LTO delegated to a capable engine on request | **Shipped for ELF.** `-flto` and linker-plugin requests select `lld`; compiler-only `-flto` is not forwarded because raw `ld.lld` rejects it and consumes bitcode directly. |
 
 If you're extending B8/#19, keep the table and classifier centralized in `bridge.rs`; do not

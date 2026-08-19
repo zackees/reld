@@ -205,6 +205,13 @@ const ENGINE_FLAG_PREFIX: &str = "--engine=";
 /// argv token is present.
 pub const RELD_ENGINE_ENV: &str = "RELD_ENGINE";
 
+/// Enables one routing-decision line on stderr when present in the environment.
+pub const RELD_LOG_ENGINE_ENV: &str = "RELD_LOG_ENGINE";
+
+fn route_logging_enabled() -> bool {
+    std::env::var_os(RELD_LOG_ENGINE_ENV).is_some()
+}
+
 /// The selected engine and the reason it was selected for one link request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
@@ -222,6 +229,9 @@ impl Route {
     /// Emits the observable routing decision for a native link.
     pub fn log_native(self) {
         debug_assert!(self.engine.native);
+        if !route_logging_enabled() {
+            return;
+        }
         eprintln!(
             "reld: engine={} (native, reason={})",
             self.engine.name,
@@ -709,12 +719,14 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
     let forwarded = forwarded_args_for_engine(argv, engine)?;
     let child_args = child_command_line(&linker, engine, forwarded);
 
-    eprintln!(
-        "reld: engine={} (bridge, reason={}) -> {}",
-        engine.name,
-        route.reason.label(),
-        linker.display()
-    );
+    if route_logging_enabled() {
+        eprintln!(
+            "reld: engine={} (bridge, reason={}) -> {}",
+            engine.name,
+            route.reason.label(),
+            linker.display()
+        );
+    }
 
     let mut command = std::process::Command::new(&linker);
     command.args(child_args);

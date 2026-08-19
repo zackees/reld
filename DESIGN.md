@@ -210,7 +210,9 @@ correctness-affecting flag or produce a silent mislink.
 spirit as the bridge's existing `reld: delegating to <linker> (bridge mode)` line (§4.4, B5):
 `reld: engine=<name> (reason: default|flag:-flto|fallback:<cap>|override)`. The benchmark harness
 already records *which* engine produced a number (§6, the `mode`/`engine` field) — routing
-generalizes that same discipline to ordinary links, not just benchmarks.
+generalizes that same discipline to ordinary links, not just benchmarks. The line is enabled by
+setting `RELD_LOG_ENGINE`; normal linker invocations keep stderr clean for compiler-driver and
+build-system compatibility.
 
 **Interaction with incremental linking.** LTO and the incremental daemon path (§4.2) are mutually
 exclusive on a given link (same as gold and MSVC). The router must select one engine and must not

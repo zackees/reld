@@ -17,8 +17,8 @@ means concretely, and what part of it is shipped vs. designed.
 > `rust-lld` that ships with every Rust toolchain) — proven by CI end-to-end builds on the
 > windows-msvc and macos-arm64 runners. Native COFF/Mach-O codegen in reld's own engine is still
 > **future work**. Linux also routes LTO/plugin, ICF, and several compatibility-policy flags to
-> the ELF `lld` bridge when the native engine cannot honor them. Every decision is logged with
-> the selected engine and reason. See [#30](https://github.com/zackees/reld/issues/30) and
+> the ELF `lld` bridge when the native engine cannot honor them. Set `RELD_LOG_ENGINE=1` to log
+> each selected engine and reason. See [#30](https://github.com/zackees/reld/issues/30) and
 > decision B8 in [#17](https://github.com/zackees/reld/issues/17). Every performance number below remains a
 > **target**, not a measurement, except where noted. See [DESIGN.md](DESIGN.md) and
 > [#17](https://github.com/zackees/reld/issues/17) for the phase history.
@@ -89,8 +89,9 @@ Concretely (per [#30](https://github.com/zackees/reld/issues/30)):
   back to a capable bundled engine. If *no* bundled engine supports the configuration, that's a
   loud, specific error — never a silent mislink.
 - **Explicit override.** `--engine=<name>` / `RELD_ENGINE` will force a specific bundled engine.
-- **Always observable.** Every routing decision is meant to be logged, so a user can always tell
-  which real linker ran and why.
+- **Observable on demand.** Set `RELD_LOG_ENGINE=1` to log each routing decision, so diagnostics
+  and benchmark harnesses can tell which real linker ran and why without polluting normal linker
+  stderr.
 
 **What's shipped today vs. designed:**
 
@@ -102,7 +103,7 @@ Concretely (per [#30](https://github.com/zackees/reld/issues/30)):
 | Capability table per bundled engine | **Shipped, initial set** — extended as more native gaps are identified |
 | Fallback ordering when the fast engine lacks a capability | **Shipped** — native ELF first, capable ELF `lld` fallback |
 | `--engine=` / `RELD_ENGINE` override | **Shipped** — `reld` or `lld` on ELF; format-specific lld drivers elsewhere |
-| Per-decision routing log line | **Shipped** |
+| Per-decision routing log line | **Shipped** — opt in with `RELD_LOG_ENGINE=1` |
 
 An ELF LTO link is automatically routed to `lld` when reld sees `-flto` or a linker plugin
 request, including plugin options found in response files. See [DESIGN.md](DESIGN.md) for the full

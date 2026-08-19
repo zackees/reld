@@ -15,9 +15,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -119,8 +119,7 @@ def run_checked(
         cwd=cwd,
         env=None if env is None else dict(env),
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         errors="replace",
         check=False,
     )
@@ -244,7 +243,7 @@ def write_fixture(directory: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     main.write_text(
-        "#include <stdio.h>\n" "int linker_mode_value(void);\n" "int main(void) {\n" "  if (linker_mode_value() != 42) return 1;\n" '  puts("reld-link-mode-ok");\n' "  return 0;\n" "}\n",
+        '#include <stdio.h>\nint linker_mode_value(void);\nint main(void) {\n  if (linker_mode_value() != 42) return 1;\n  puts("reld-link-mode-ok");\n  return 0;\n}\n',
         encoding="utf-8",
     )
     return main, value
@@ -262,6 +261,7 @@ def exercise_mode(
     mode_dir = root / mode.name
     mode_dir.mkdir(parents=True)
     command_env = dict(env)
+    command_env["RELD_LOG_ENGINE"] = "1"
     if host.name == "windows":
         command_env["PATH"] = os.pathsep.join([str(linker.parent), command_env.get("PATH", "")])
     sources = write_fixture(mode_dir)
@@ -312,7 +312,7 @@ def publish_summary(results: Sequence[ModeResult]) -> None:
         "| Platform | Mode | Engine | Route | Reason |",
         "|---|---|---|---|---|",
     ]
-    rows.extend(f"| {result.platform} | {result.mode} | {result.engine} | " f"{result.route_kind} | `{result.reason}` |" for result in results)
+    rows.extend(f"| {result.platform} | {result.mode} | {result.engine} | {result.route_kind} | `{result.reason}` |" for result in results)
     summary = "\n".join(rows) + "\n"
     print(summary)
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
