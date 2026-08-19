@@ -50,11 +50,20 @@ fn run_mold_test(mold_test: &Path) -> Result<Output> {
         None
     };
 
-    let env_vars: Vec<(&str, &str)> = if let Some(ref triple_value) = triple {
+    let mut env_vars: Vec<(&str, &str)> = if let Some(ref triple_value) = triple {
         vec![("TRIPLE", triple_value.as_str())]
     } else {
         vec![]
     };
+
+    // This corpus measures reld's native ELF compatibility. Routed LLD coverage lives in the
+    // dedicated linker-mode matrix, so keep the native regression ratchet on the native engine.
+    if !using_third_party_linker() {
+        env_vars.extend([
+            (reld_core::bridge::RELD_ENGINE_ENV, "reld"),
+            (reld_core::args::RELD_UNSUPPORTED_ENV, "ignore"),
+        ]);
+    }
 
     run_external_test(mold_test, &env_vars)
 }
