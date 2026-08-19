@@ -27,11 +27,9 @@ import os
 import shutil
 import subprocess
 import tarfile
-import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-
 
 CHUNK = 1 << 20
 
@@ -143,7 +141,8 @@ def needs_download(artifact: Artifact, cache_dir: Path) -> bool:
 
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as response, dest.open("wb") as handle:  # noqa: S310
+    request = urllib.request.Request(url, headers={"User-Agent": "reld-ci/1.0"})
+    with urllib.request.urlopen(request) as response, dest.open("wb") as handle:
         shutil.copyfileobj(response, handle)
 
 

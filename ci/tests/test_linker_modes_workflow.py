@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "linker-modes.yml"
 
 
@@ -24,6 +23,16 @@ def test_workflow_is_a_thin_uv_invoker() -> None:
     assert "-flto" not in text
     assert "fuse-ld" not in text
     assert "reld: engine=" not in text
+
+
+def test_workflow_uses_compatible_platform_clang_toolchains() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    linux = text.index("platform: linux")
+    windows = text.index("platform: windows")
+    macos = text.index("platform: macos")
+    assert "install_llvm: false" in text[linux:windows]
+    assert "install_llvm: true" in text[windows:macos]
+    assert "brew install llvm@18" in text
 
 
 def test_python_pipeline_owns_every_required_mode() -> None:

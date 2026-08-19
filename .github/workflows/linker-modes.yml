@@ -24,7 +24,7 @@ jobs:
         include:
           - platform: linux
             runner: ubuntu-24.04
-            install_llvm: true
+            install_llvm: false
           - platform: windows
             runner: windows-2022
             install_llvm: true
@@ -43,6 +43,12 @@ jobs:
         uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
         with:
           version: 18.1.8
+      - name: Install upstream clang for macOS LTO
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          brew install llvm@18
+          echo "$(brew --prefix llvm@18)/bin" >> "${GITHUB_PATH}"
       - name: Exercise every linker mode
         run: >-
           uv run --no-project python ci/linker_modes.py
