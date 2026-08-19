@@ -181,6 +181,7 @@ struct Requirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionReason {
     Default,
+    SaveOnly,
     OverrideFlag,
     OverrideEnv,
     Capability(&'static str),
@@ -190,6 +191,7 @@ impl SelectionReason {
     fn label(self) -> &'static str {
         match self {
             SelectionReason::Default => "default",
+            SelectionReason::SaveOnly => "save-only(RELD_SAVE_SKIP_LINKING)",
             SelectionReason::OverrideFlag => "override(--engine)",
             SelectionReason::OverrideEnv => "override(RELD_ENGINE)",
             SelectionReason::Capability(trigger) => trigger,
@@ -461,9 +463,32 @@ fn select_route_with_env(
     Ok(Route { engine, reason })
 }
 
+fn select_route_with_context(
+    argv: &[OsString],
+    target: BridgeTarget,
+    env_override: Option<&str>,
+    capture_only: bool,
+) -> Result<Route> {
+    // Save-dir capture must parse the original invocation and write its native replay artifact.
+    // Capability routing is irrelevant because RELD_SAVE_SKIP_LINKING exits before the final link.
+    if capture_only && target == BridgeTarget::Elf {
+        return Ok(Route {
+            engine: &NATIVE_RELD_ENGINE,
+            reason: SelectionReason::SaveOnly,
+        });
+    }
+
+    select_route_with_env(argv, target, env_override)
+}
+
 /// Selects the engine for one raw linker invocation.
 pub fn select_route(argv: &[OsString], target: BridgeTarget) -> Result<Route> {
-    select_route_with_env(argv, target, std::env::var(RELD_ENGINE_ENV).ok().as_deref())
+    select_route_with_context(
+        argv,
+        target,
+        std::env::var(RELD_ENGINE_ENV).ok().as_deref(),
+        crate::save_dir::capture_only_requested(),
+    )
 }
 
 /// Locates the linker binary that the bridge should delegate to for the given engine.
@@ -1102,6 +1127,24 @@ mod tests {
         assert_eq!(route.engine.name, "reld");
         assert!(!route.is_bridge());
         assert_eq!(route.reason, SelectionReason::Default);
+    }
+
+    #[test]
+    fn elf_capture_only_lto_stays_native_for_save_dir_replay() {
+        let route = select_route_with_context(
+            &[
+                OsString::from("ld.reld"),
+                OsString::from("-flto"),
+                OsString::from("foo.o"),
+            ],
+            BridgeTarget::Elf,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(route.engine.name, "reld");
+        assert!(!route.is_bridge());
+        assert_eq!(route.reason, SelectionReason::SaveOnly);
     }
 
     #[test]
