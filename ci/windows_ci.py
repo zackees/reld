@@ -135,8 +135,23 @@ def _capture_allow_failure(args: Sequence[str]) -> str:
     return completed.stdout
 
 
+def _msvc_linker() -> Path:
+    """Resolve MSVC's linker without colliding with Git Bash's GNU ``link.exe``."""
+
+    tools = Path(_required_env("VCToolsInstallDir"))
+    return _require_file(tools / "bin" / "HostX64" / "x64" / "link.exe", "MSVC link.exe")
+
+
+def _msvc_path_env() -> dict[str, str]:
+    env = os.environ.copy()
+    linker_dir = str(_msvc_linker().parent)
+    inherited = env.get("PATH")
+    env["PATH"] = os.pathsep.join((linker_dir, inherited)) if inherited else linker_dir
+    return env
+
+
 def verify_msvc_linkers() -> None:
-    link_output = _capture_allow_failure(["link.exe"])
+    link_output = _capture_allow_failure([str(_msvc_linker())])
     lld_output = _run(["lld-link", "--version"])
     expected_msvc = _required_env("MSVC_LINK_VERSION")
     expected_lld = _required_env("LLD_VERSION")
@@ -169,11 +184,13 @@ def install_benchmark_linkers() -> None:
     llvm_bin = program_files / "LLVM" / "bin"
     _require_file(llvm_bin / "clang.exe", "clang.exe")
     _require_file(llvm_bin / "lld-link.exe", "lld-link.exe")
-    if shutil.which("link.exe") is None:
-        raise WindowsCiError("link.exe is missing from PATH")
+    msvc_bin = _msvc_linker().parent
     github_path = Path(_required_env("GITHUB_PATH"))
     with github_path.open("a", encoding="utf-8", newline="") as handle:
         handle.write(str(llvm_bin) + "\n")
+        # GITHUB_PATH entries take effect for subsequent steps. Write MSVC last so its link.exe
+        # wins over both LLVM/Git additions when Actions prepends the entries.
+        handle.write(str(msvc_bin) + "\n")
 
 
 def native_tests() -> None:
@@ -270,6 +287,7 @@ def _coverage(log: Path, *, canonical: bool) -> None:
 def benchmark_smoke() -> None:
     workspace = _workspace()
     runner_temp = _runner_temp()
+    benchmark_env = _msvc_path_env()
     _run(_cargo("build", "-p", "reld", "--bin", "reld-link"))
     reld = _require_file(workspace / "target" / "debug" / "reld-link.exe", "reld-link.exe")
 
@@ -298,6 +316,7 @@ def benchmark_smoke() -> None:
             str(generated),
         ),
         generated_log,
+        env=benchmark_env,
     )
     require_generated_table(generated_text)
     _coverage(generated_log, canonical=True)
@@ -329,6 +348,7 @@ def benchmark_smoke() -> None:
             str(replay_workdir),
         ),
         replay_log,
+        env=benchmark_env,
     )
     require_measured_row(replay_text, "large replay (512 units)")
     _coverage(replay_log, canonical=False)

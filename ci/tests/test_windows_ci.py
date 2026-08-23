@@ -1,10 +1,13 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from ci.windows_ci import (
     WindowsCiError,
+    _msvc_linker,
+    _msvc_path_env,
     freeze_large_corpus,
     require_generated_table,
     require_measured_row,
@@ -80,3 +83,21 @@ def test_freeze_large_corpus_refuses_to_reset_runner_temp(tmp_path: Path):
 
     with pytest.raises(WindowsCiError, match="refusing to reset"):
         freeze_large_corpus(generated, tmp_path, tmp_path)
+
+
+def test_msvc_linker_uses_visual_studio_tools_instead_of_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    tools = tmp_path / "MSVC" / "14.44"
+    expected = tools / "bin" / "HostX64" / "x64" / "link.exe"
+    expected.parent.mkdir(parents=True)
+    expected.write_bytes(b"msvc")
+
+    git_bin = tmp_path / "Git" / "usr" / "bin"
+    git_bin.mkdir(parents=True)
+    (git_bin / "link.exe").write_bytes(b"gnu")
+    monkeypatch.setenv("PATH", str(git_bin))
+    monkeypatch.setenv("VCToolsInstallDir", str(tools))
+
+    assert _msvc_linker() == expected
+    assert _msvc_path_env()["PATH"].split(os.pathsep)[0] == str(expected.parent)
