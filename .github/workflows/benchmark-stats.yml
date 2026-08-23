@@ -39,6 +39,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
+
       - uses: dtolnay/rust-toolchain@1.94.1
 
       - name: Install Linux linkers
@@ -59,7 +67,7 @@ jobs:
       - name: Install Windows linkers
         if: runner.os == 'Windows'
         shell: bash
-        run: python -m ci.windows_ci install-benchmark-linkers
+        run: uv run --no-sync python -m ci.windows_ci install-benchmark-linkers
 
       - name: Install macOS linkers
         if: runner.os == 'macOS'
@@ -92,7 +100,7 @@ jobs:
         shell: bash
         env:
           CARGO_COMMAND: cargo
-        run: python -m ci.windows_ci build-benchmark-driver
+        run: uv run --no-sync python -m ci.windows_ci build-benchmark-driver
 
       - name: Build macOS Mach-O reld front door
         if: runner.os == 'macOS'
@@ -132,9 +140,7 @@ jobs:
           # Fails the build if any expected linker for this platform reports n/a, or if a
           # pending-by-design linker slipped to a bare n/a. Prints the expected-vs-measured
           # table to the log and the job step summary (#63).
-          PY=python3
-          command -v "$PY" >/dev/null 2>&1 || PY=python
-          "$PY" -m ci.benchmark_coverage \
+          uv run --no-sync python -m ci.benchmark_coverage \
             --input-log "benchmark-output/benchmark.log" --target "$TARGET"
 
       - name: Report per-target timings and metadata
@@ -143,9 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f benchmark-output/benchmark.log
-          PY=python3
-          command -v "$PY" >/dev/null 2>&1 || PY=python
-          "$PY" -m ci.benchmark_stats \
+          uv run --no-sync python -m ci.benchmark_stats \
             --input-log benchmark-output/benchmark.log --summary-only \
             --publish-outcome "raw benchmark artifact uploaded; aggregation pending"
 
@@ -165,12 +169,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Install renderer dependencies
-        run: python -m pip install --disable-pip-version-check pillow
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
 
       - name: Download benchmark logs
         uses: actions/download-artifact@v4
@@ -185,14 +194,14 @@ jobs:
           RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
         run: |
           set -euo pipefail
-          mapfile -t targets < <(python -m ci.benchmark_stats --print-targets)
+          mapfile -t targets < <(uv run --no-sync python -m ci.benchmark_stats --print-targets)
           for target in "${targets[@]}"; do
             mkdir -p "benchmark-stats/$target"
             curl --fail --silent --location --max-time 30 \
               -o "benchmark-stats/$target/history.jsonl" \
               "$RELD_BENCHMARK_RAW_BASE_URL/$target/history.jsonl" \
               || : > "benchmark-stats/$target/history.jsonl"
-            python -m ci.benchmark_stats \
+            uv run --no-sync python -m ci.benchmark_stats \
               --input-log "benchmark-input/benchmark-log-$target/benchmark.log" \
               --output-dir "benchmark-stats/$target"
           done
@@ -201,8 +210,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m ci.benchmark_stats --check-readme README.md
-          python -m ci.benchmark_stats \
+          uv run --no-sync python -m ci.benchmark_stats --check-readme README.md
+          uv run --no-sync python -m ci.benchmark_stats \
             --verify-current-outputs benchmark-stats --expected-sha "$GITHUB_SHA" \
             --max-age-seconds 7200
 
@@ -272,16 +281,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
 
       - name: Check published latest.json age and status
         env:
           RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
         run: |
           set -euo pipefail
-          python -m ci.benchmark_stats \
+          uv run --no-sync python -m ci.benchmark_stats \
             --check-remote-freshness \
             --remote-base-url "$RELD_BENCHMARK_RAW_BASE_URL" \
             --expected-sha "$GITHUB_SHA" \

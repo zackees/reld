@@ -13,7 +13,7 @@ def test_ci_caches_linux_reference_linkers():
     assert "key: linkers-${{ runner.os }}-mold${{ env.MOLD_VERSION }}" in text
 
     # The heavy download work is delegated to the Python cache-gated script.
-    assert "python3 ci/linker_setup.py" in text
+    assert "uv run --no-sync python ci/linker_setup.py" in text
     assert "--cache-dir" in text
     assert "--install-debs" in text
     assert "--link-clang" in text
@@ -38,7 +38,7 @@ def test_ci_measures_target_correct_reld_drivers_in_windows_and_macos_benchmarks
     # The PR smokes measure the real platform bridge drivers; there is no permanent pending
     # marker once #17's Windows/macOS benchmark slice is present.
     assert "--reld-pending" not in text
-    assert "python -m ci.windows_ci benchmark-smoke" in text
+    assert "uv run --no-sync python -m ci.windows_ci benchmark-smoke" in text
     assert "target/debug/ld64.reld" in text
     assert "bash ci/install-driver-shims.sh debug" in text
     assert '--reld "$reld" --workdir "$workdir"' in text
@@ -49,7 +49,7 @@ def test_ci_windows_benchmark_gates_generated_and_replayed_large_response_file_p
 
     # The generated 512-unit path produces the large frozen-object replay fixture. Both tables
     # must prove link.exe, lld, and reld timed successfully, and both run the coverage gate.
-    assert "python -m ci.windows_ci benchmark-smoke" in text
+    assert "uv run --no-sync python -m ci.windows_ci benchmark-smoke" in text
     assert "benchmark-windows-msvc.md" in text
     assert "benchmark-windows-msvc-replay.md" in text
 
@@ -68,7 +68,7 @@ def test_ci_uses_bash_to_invoke_python_for_every_windows_msvc_script():
         "benchmark-smoke",
         "self-host",
     ):
-        assert f"shell: bash\n        run: python -m ci.windows_ci {command}" in text
+        assert f"shell: bash\n        run: uv run --no-sync python -m ci.windows_ci {command}" in text
 
 
 def test_ci_macos_benchmark_requires_measured_rows_and_coverage():
@@ -76,7 +76,18 @@ def test_ci_macos_benchmark_requires_measured_rows_and_coverage():
 
     assert '"macOS benchmark produced no complete measured rows"' in text
     assert "aarch64-apple-darwin" in text
-    assert "python3 -m ci.benchmark_coverage" in text
+    assert "uv run --no-sync python -m ci.benchmark_coverage" in text
+
+
+def test_ci_provisions_uv_and_has_no_bare_python_script_invocations():
+    text = WORKFLOW.read_text()
+
+    assert text.count("astral-sh/setup-uv@") == 2
+    assert text.count("uv sync --extra dev") == 2
+    assert "uv run --no-project" not in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith(("python ", "python3 "))
 
 
 def test_phase1_summary_only_relaxes_missing_log_validation_after_failure():

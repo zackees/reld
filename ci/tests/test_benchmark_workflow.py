@@ -36,8 +36,8 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     assert '--reld "$RELD_DRIVER"' in text
     assert "pwsh" not in text.lower()
     assert "powershell" not in text.lower()
-    assert "python -m ci.windows_ci install-benchmark-linkers" in text
-    assert "python -m ci.windows_ci build-benchmark-driver" in text
+    assert "uv run --no-sync python -m ci.windows_ci install-benchmark-linkers" in text
+    assert "uv run --no-sync python -m ci.windows_ci build-benchmark-driver" in text
 
 
 def test_benchmark_workflow_reports_and_guards_generated_artifacts():
@@ -62,3 +62,14 @@ def test_freshness_watchdog_runs_after_failures_only_on_schedule_or_default_bran
     assert "--check-remote-freshness" in text
     assert '--remote-base-url "$RELD_BENCHMARK_RAW_BASE_URL"' in text
     assert '--expected-sha "$GITHUB_SHA"' in text
+
+
+def test_benchmark_workflow_provisions_uv_and_has_no_bare_python_invocations():
+    text = WORKFLOW.read_text()
+
+    assert text.count("astral-sh/setup-uv@") == 3
+    assert text.count("uv sync --extra dev") == 3
+    assert "uv run --no-project" not in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith(("python ", "python3 "))
