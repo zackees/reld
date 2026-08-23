@@ -159,6 +159,42 @@ fn fuse_ld_value(token: &str) -> String {
     resolve_fuse_ld(token, which_on_path)
 }
 
+/// Select the `-fuse-ld` token clang can actually execute, plus an optional directory to prepend
+/// to the child PATH. Windows clang treats an absolute `-fuse-ld=C:\...\reld-link.exe` as a
+/// linker *name* and prefixes it with the target triple, producing a nonexistent executable.
+/// A basename on PATH is the supported form there. Unix clang accepts absolute linker paths.
+fn compiler_driver_linker(linker: &str, windows: bool) -> Result<(String, Option<PathBuf>)> {
+    let path = Path::new(linker);
+    if windows && path.is_absolute() {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("linker path has no UTF-8 file name: {}", path.display()))?;
+        let parent = path
+            .parent()
+            .with_context(|| format!("linker path has no parent: {}", path.display()))?;
+        return Ok((name.to_owned(), Some(parent.to_path_buf())));
+    }
+    Ok((fuse_ld_value(linker), None))
+}
+
+fn select_compiler_driver_linker(cmd: &mut Command, linker: &str) -> Result<()> {
+    if linker.is_empty() {
+        return Ok(());
+    }
+    let (value, search_dir) = compiler_driver_linker(linker, cfg!(windows))?;
+    if let Some(search_dir) = search_dir {
+        let mut paths = vec![search_dir];
+        if let Some(current_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current_path));
+        }
+        let joined = std::env::join_paths(paths).context("prepending linker directory to PATH")?;
+        cmd.env("PATH", joined);
+    }
+    cmd.arg(format!("-fuse-ld={value}"));
+    Ok(())
+}
+
 /// Core of [`fuse_ld_value`] with the PATH lookup injected, so the mapping is unit-testable
 /// without depending on what is actually installed on the test machine.
 fn resolve_fuse_ld(token: &str, lookup: impl Fn(&str) -> Option<PathBuf>) -> String {
@@ -575,9 +611,7 @@ fn link_once(args: &Args, inputs: &PreparedLinkInputs<'_>, linker: &str, out: &P
     let mut cmd = Command::new(&args.cc);
     add_prepared_link_inputs(&mut cmd, inputs);
     cmd.arg("-o").arg(out);
-    if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
-    }
+    select_compiler_driver_linker(&mut cmd, linker)?;
     let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -610,9 +644,7 @@ fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
     let exe = dir.join(if cfg!(windows) { "p.exe" } else { "p.out" });
     let mut cmd = Command::new(cc);
     cmd.arg(&obj).arg("-o").arg(&exe);
-    if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
-    }
+    select_compiler_driver_linker(&mut cmd, linker)?;
     Ok(cmd.output().map(|o| o.status.success()).unwrap_or(false))
 }
 
@@ -625,7 +657,7 @@ fn bench_output_name(linker: &str) -> String {
     let safe: String = linker
         .chars()
         .map(|c| {
-            if matches!(c, '/' | '\\' | ':') {
+            if matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') {
                 '_'
             } else {
                 c
@@ -730,9 +762,7 @@ fn link_once_replay(
     let mut cmd = Command::new(cc);
     add_prepared_link_inputs(&mut cmd, inputs);
     cmd.arg("-o").arg(out);
-    if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
-    }
+    select_compiler_driver_linker(&mut cmd, linker)?;
     let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -968,6 +998,26 @@ mod tests {
             "must never stay a bare ld64.lld token"
         );
         assert_eq!(fallback, "lld");
+    }
+
+    #[test]
+    fn windows_absolute_custom_linker_uses_basename_and_parent_path() {
+        let absolute = if cfg!(windows) {
+            r"C:\bench tools\reld-link.exe"
+        } else {
+            "/bench tools/reld-link.exe"
+        };
+        let (value, search_dir) = compiler_driver_linker(absolute, true).unwrap();
+        assert_eq!(value, "reld-link.exe");
+        assert_eq!(search_dir.unwrap(), Path::new(absolute).parent().unwrap());
+    }
+
+    #[test]
+    fn unix_absolute_custom_linker_remains_an_absolute_fuse_ld_value() {
+        let absolute = "/opt/reld drivers/ld64.reld";
+        let (value, search_dir) = compiler_driver_linker(absolute, false).unwrap();
+        assert_eq!(value, absolute);
+        assert!(search_dir.is_none());
     }
 
     #[test]
@@ -1293,6 +1343,10 @@ mod tests {
         assert_eq!(
             bench_output_name(r"C:\tc\ld.reld"),
             "bench-C__tc_ld.reld.bin"
+        );
+        assert_eq!(
+            bench_output_name(r"\\?\C:\tc\reld-link.exe"),
+            "bench-____C__tc_reld-link.exe.bin"
         );
     }
 }
