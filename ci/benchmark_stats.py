@@ -20,6 +20,7 @@ running a real benchmark.
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import platform
@@ -27,13 +28,39 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
+
+# One canonical manifest for the README, workflow aggregation, and generated artifacts. Keeping
+# this in the renderer makes a target added to one consumer but not another a testable drift,
+# rather than a quietly stale README panel.
+BENCHMARK_TARGETS = (
+    ("x86_64-linux", "Linux"),
+    ("x86_64-pc-windows-msvc", "Windows"),
+    ("aarch64-apple-darwin", "macOS"),
+)
+
+# The public synthetic workload is deliberately stable. Missing, duplicate, or renamed rows are
+# incomparable to history and must never reach the published branch.
+CANONICAL_SCENARIOS = (
+    "small (16 units)",
+    "medium (128 units)",
+    "large (512 units)",
+)
+
+# Shared public-artifact contract for the coverage gate and remote freshness watchdog.
+EXPECTED_SERIES = {
+    "x86_64-linux": ("bfd", "lld", "mold", "wild", "reld"),
+    "x86_64-pc-windows-msvc": ("link.exe", "lld", "reld"),
+    "aarch64-apple-darwin": ("ld", "ld64.lld", "reld"),
+}
 
 # Rendered at SCALE x then downsampled; cheap supersampling beats fighting PIL's aliasing.
 WIDTH = 900
@@ -155,7 +182,7 @@ def parse_benchmark_log(text: str) -> Report:
         line = raw.strip().lstrip("﻿")
 
         if line.startswith(HEADING_PREFIX):
-            report.label = line[len(HEADING_PREFIX):].strip()
+            report.label = line[len(HEADING_PREFIX) :].strip()
             in_table = True
             header = []
             continue
@@ -183,9 +210,7 @@ def parse_benchmark_log(text: str) -> Report:
             continue
         for idx, series in enumerate(report.series, start=1):
             value, pending = _classify(cells[idx]) if idx < len(cells) else (None, False)
-            report.rows.append(
-                Row(scenario=scenario, series=series, seconds=value, pending=pending)
-            )
+            report.rows.append(Row(scenario=scenario, series=series, seconds=value, pending=pending))
 
     return report
 
@@ -210,6 +235,34 @@ def series_mode(series: str, runner_os: str, target: str = "") -> str:
         effective_os = target_os(target) or runner_os
         return "native" if effective_os == "Linux" else "bridge"
     return "reference"
+
+
+def series_engine(series: str, runner_os: str, target: str = "") -> str:
+    """Concrete linker engine behind a series.
+
+    `reld` is a native ELF engine on Linux and deliberately routes its COFF/Mach-O front doors
+    to lld.  Persisting this beside ``mode`` prevents a bridge measurement from being mistaken
+    for native COFF/Mach-O throughput by a JSON or chart consumer.
+    """
+    if series != "reld":
+        return series
+    if series_mode(series, runner_os, target) == "native":
+        return "reld"
+    effective_os = target_os(target) or runner_os
+    if effective_os == "Windows":
+        return "lld-link"
+    if effective_os == "Darwin":
+        return "ld64.lld"
+    return "lld"
+
+
+def series_label(series: str, runner_os: str, target: str = "") -> str:
+    """Human-facing series label that makes reld's execution mode visible in charts."""
+    if series != "reld":
+        return series
+    mode = series_mode(series, runner_os, target)
+    engine = series_engine(series, runner_os, target)
+    return f"reld ({mode}/{engine})"
 
 
 def _tool_version(cmd: list[str]) -> str | None:
@@ -253,6 +306,206 @@ def collect_metadata(report: Report) -> dict[str, Any]:
     }
 
 
+def render_summary(report: Report, meta: dict[str, Any], publish_outcome: str = "rendered") -> str:
+    """Render the concise, per-target Actions/log report required to diagnose publication.
+
+    It intentionally derives statuses from every scenario, not only a series-level success: an
+    expected linker with one missing timing remains visibly incomplete before coverage rejects it.
+    """
+    scenarios = report.scenarios()
+    headings = " | ".join(scenarios) if scenarios else "(none parsed)"
+    lines = [
+        f"### Benchmark report: {meta.get('target') or report.label or 'unknown'}",
+        "",
+        "| Field | Value |",
+        "|:------|:------|",
+        f"| source SHA | {meta.get('git_sha') or 'local/unset'} |",
+        f"| generated at | {meta.get('generated_at') or 'unknown'} |",
+        f"| publish outcome | {publish_outcome} |",
+        "",
+        f"Timings by scenario: {headings}",
+        "",
+        "| Series | Mode | Engine | Status | Timings (seconds) |",
+        "|:-------|:-----|:-------|:-------|:------------------|",
+    ]
+    runner_os = meta.get("runner", {}).get("os", "")
+    target = meta.get("target", report.label)
+    for series in report.series:
+        cells: list[str] = []
+        rows = [r for r in report.rows if r.series == series]
+        for row in rows:
+            if row.seconds is not None:
+                cells.append(f"{row.scenario}: {row.seconds:.4f}")
+            else:
+                cells.append(f"{row.scenario}: {'pending' if row.pending else 'n/a'}")
+        lines.append(f"| {series} | {series_mode(series, runner_os, target)} | {series_engine(series, runner_os, target)} | {report.series_status(series)} | {' ; '.join(cells) or 'n/a'} |")
+    return "\n".join(lines) + "\n"
+
+
+def render_readme_block() -> str:
+    """Generate the entire README benchmark region, not merely its image panels."""
+    panels = []
+    for target, title in BENCHMARK_TARGETS:
+        panels.append(
+            f'<p align="center"><b>{target}</b><br>\n'
+            f'<a href="https://github.com/zackees/reld/tree/benchmark-stats/{target}"><img '
+            f'alt="{title} reld link benchmark" '
+            f'src="https://raw.githubusercontent.com/zackees/reld/benchmark-stats/{target}/'
+            f'benchmark-link.jpg" width="100%"></a></p>'
+        )
+    prose = (
+        "*Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and\n"
+        "published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),\n"
+        "with independent `latest.json` and `history.jsonl` per target. Linux measures reld's native\n"
+        "engine; Windows and macOS measure reld through their target-correct `lld` **bridge** front doors.\n"
+        "`latest.json` records both the series `mode` (`native` or `bridge`) and concrete `engine` (`reld`\n"
+        "on Linux, `lld-link` on Windows, `ld64.lld` on macOS), and the charts label bridge results so they\n"
+        "are never presented as native COFF/Mach-O throughput. Each platform gates its **expected** linkers\n"
+        "in CI (Linux `bfd`/`lld`/`mold`/`wild`/`reld`, Windows `link.exe`/`lld`/`reld`, macOS\n"
+        "`ld`/`ld64.lld`/`reld`): a missing timing or a missing/duplicate/unexpected synthetic scenario\n"
+        "fails the build, so coverage can never silently understate itself (see\n"
+        "[#63](https://github.com/zackees/reld/issues/63)). The generated artifact freshness guard also\n"
+        "requires every published chart to name the source SHA and current generation time.*"
+    )
+    return "\n\n".join([*panels, prose]) + "\n"
+
+
+def check_readme_block(path: Path) -> bool:
+    """Return whether README's generated benchmark section exactly matches the manifest."""
+    text = path.read_text(encoding="utf-8")
+    begin = "<!-- BENCHMARK:BEGIN -->"
+    end = "<!-- BENCHMARK:END -->"
+    if text.count(begin) != 1 or text.count(end) != 1:
+        return False
+    actual = text.split(begin, 1)[1].split(end, 1)[0].strip()
+    return actual == render_readme_block().strip()
+
+
+def write_readme_block(path: Path) -> None:
+    """Replace exactly the marker-delimited README section with canonical contents."""
+    text = path.read_text(encoding="utf-8")
+    begin = "<!-- BENCHMARK:BEGIN -->"
+    end = "<!-- BENCHMARK:END -->"
+    if text.count(begin) != 1 or text.count(end) != 1:
+        raise ValueError("README must contain exactly one BENCHMARK:BEGIN and BENCHMARK:END marker")
+    before, remainder = text.split(begin, 1)
+    _, after = remainder.split(end, 1)
+    path.write_text(f"{before}{begin}\n{render_readme_block()}{end}{after}", encoding="utf-8")
+
+
+def verify_current_outputs(out_root: Path, expected_sha: str, max_age_seconds: int) -> list[str]:
+    """Validate local generated artifacts before they are force-published.
+
+    A successful force-push of this tree therefore cannot publish a chart from a different source
+    SHA or an accidentally reused, stale renderer directory.
+    """
+    errors: list[str] = []
+    now = time.time()
+    for target, _ in BENCHMARK_TARGETS:
+        latest = out_root / target / "latest.json"
+        if not latest.is_file():
+            errors.append(f"{target}: latest.json is missing")
+            continue
+        try:
+            payload = json.loads(latest.read_text(encoding="utf-8"))
+            meta = payload["metadata"]
+            stamp = time.strptime(meta["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            errors.append(f"{target}: invalid latest.json metadata ({error})")
+            continue
+        if meta.get("target") != target:
+            errors.append(f"{target}: metadata target is {meta.get('target')!r}")
+        if expected_sha and meta.get("git_sha") != expected_sha:
+            errors.append(f"{target}: source SHA {meta.get('git_sha')!r} != {expected_sha!r}")
+        age = now - calendar.timegm(stamp)
+        if age < -300 or age > max_age_seconds:
+            errors.append(f"{target}: generated timestamp is {age:.0f}s old (limit {max_age_seconds}s)")
+    return errors
+
+
+def _parse_timestamp(value: object) -> float:
+    if not isinstance(value, str):
+        raise ValueError("generated_at is absent or not a string")
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
+
+def _fetch_json(url: str) -> dict[str, Any]:
+    with urlopen(url, timeout=30) as response:  # nosec B310: explicit workflow/test input
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("JSON root is not an object")
+    return payload
+
+
+def verify_remote_freshness(
+    base_url: str,
+    max_age_seconds: int,
+    *,
+    expected_sha: str = "",
+    fetch_json: Any = _fetch_json,
+    now: float | None = None,
+) -> list[str]:
+    """Validate every public ``latest.json`` without depending on the aggregate job.
+
+    Both the base URL and fetcher are injectable to make the watchdog unit-testable against local
+    fixture data. This job intentionally has no dependency on benchmark/aggregate, so a failed
+    nightly benchmark cannot conceal an old or incomplete public branch.
+    """
+    errors: list[str] = []
+    checked_at = time.time() if now is None else now
+    root = base_url.rstrip("/")
+    for target, _ in BENCHMARK_TARGETS:
+        url = f"{root}/{target}/latest.json"
+        try:
+            payload = fetch_json(url)
+            if payload.get("schema_version") != SCHEMA_VERSION:
+                errors.append(f"{target}: schema version {payload.get('schema_version')!r} != {SCHEMA_VERSION}")
+            meta = payload["metadata"]
+            if not isinstance(meta, dict):
+                raise ValueError("metadata is not an object")
+            age = checked_at - _parse_timestamp(meta.get("generated_at"))
+            if age < -300 or age > max_age_seconds:
+                errors.append(f"{target}: latest.json is {age:.0f}s old (limit {max_age_seconds}s)")
+            if meta.get("target") != target:
+                errors.append(f"{target}: metadata target is {meta.get('target')!r}")
+            if expected_sha and meta.get("git_sha") != expected_sha:
+                errors.append(f"{target}: source SHA {meta.get('git_sha')!r} != {expected_sha!r}")
+            results = payload.get("results")
+            if not isinstance(results, list):
+                errors.append(f"{target}: results is missing or not a list")
+                continue
+            cells: dict[tuple[str, str], dict[str, Any]] = {}
+            for result in results:
+                if not isinstance(result, dict):
+                    errors.append(f"{target}: result entry is not an object")
+                    continue
+                key = (str(result.get("scenario", "")), str(result.get("series", "")))
+                if key in cells:
+                    errors.append(f"{target}: duplicate result for {key[0]!r}/{key[1]!r}")
+                cells[key] = result
+            actual_scenarios = {scenario for scenario, _ in cells}
+            unexpected = sorted(actual_scenarios - set(CANONICAL_SCENARIOS))
+            if unexpected:
+                errors.append(f"{target}: unexpected synthetic scenario(s): {', '.join(unexpected)}")
+            for series in EXPECTED_SERIES[target]:
+                for scenario in CANONICAL_SCENARIOS:
+                    cell = cells.get((scenario, series))
+                    if cell is None:
+                        errors.append(f"{target}: {series} missing {scenario}")
+                    elif cell.get("status") != "measured" or cell.get("seconds") is None:
+                        errors.append(f"{target}: {series} {scenario} is not measured")
+                    else:
+                        expected_mode = series_mode(series, "", target)
+                        expected_engine = series_engine(series, "", target)
+                        if cell.get("mode") != expected_mode:
+                            errors.append(f"{target}: {series} {scenario} mode {cell.get('mode')!r} != {expected_mode!r}")
+                        if cell.get("engine") != expected_engine:
+                            errors.append(f"{target}: {series} {scenario} engine {cell.get('engine')!r} != {expected_engine!r}")
+        except Exception as error:  # malformed/unreachable remote artifacts are freshness failures
+            errors.append(f"{target}: cannot validate {url}: {error}")
+    return errors
+
+
 def _font(size: int):
     from PIL import ImageFont
 
@@ -294,7 +547,7 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
     d.rectangle([0, 0, WIDTH * SCALE, header_h * SCALE], fill=PANEL)
     d.text((20 * SCALE, 16 * SCALE), "reld - link benchmark", font=f_title, fill=FG)
     sha = (meta.get("git_sha") or "")[:12]
-    sub = f"{meta['generated_at']}  |  {meta.get('target','')}  |  {meta['runner']['platform']}"
+    sub = f"{meta['generated_at']}  |  {meta.get('target', '')}  |  {meta['runner']['platform']}"
     if sha:
         sub += f"  |  sha {sha}"
     d.text((20 * SCALE, 46 * SCALE), sub, font=f_meta, fill=MUTED)
@@ -314,7 +567,12 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
 
         for s, v in zip(series, values):
             color = SERIES_COLORS.get(s, FALLBACK_COLOR)
-            d.text((34 * SCALE, (y + 5) * SCALE), s, font=f_meta, fill=MUTED)
+            d.text(
+                (34 * SCALE, (y + 5) * SCALE),
+                series_label(s, meta["runner"]["os"], meta.get("target", "")),
+                font=f_meta,
+                fill=MUTED,
+            )
 
             if v is None:
                 pending = report.is_pending(scenario, s)
@@ -345,8 +603,7 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
 
     d.text(
         (20 * SCALE, (height - 24) * SCALE),
-        "lower is better  |  median of N trials, link step only  |  "
-        "n/a = linker failed/unavailable  |  pending = unsupported-by-design (documented)",
+        "lower is better  |  median of N trials, link step only  |  n/a = linker failed/unavailable  |  pending = unsupported-by-design (documented)",
         font=f_meta,
         fill=MUTED,
     )
@@ -356,7 +613,9 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
 
 
 def render_html(report: Report, meta: dict[str, Any]) -> str:
-    head = "".join(f"<th>{s}</th>" for s in report.series)
+    runner_os = meta.get("runner", {}).get("os", "")
+    target = meta.get("target", "")
+    head = "".join(f"<th>{series_label(s, runner_os, target)}</th>" for s in report.series)
     body = ""
     for sc in report.scenarios():
         cells = ""
@@ -378,10 +637,10 @@ th:first-child,td:first-child{{text-align:left}}img{{max-width:100%}}a{{color:#5
 td.na{{color:#7d8590}}td.pending{{color:#bb8009}}
 </style></head><body>
 <h1>reld &mdash; link benchmark</h1>
-<p>{meta['generated_at']} &middot; {meta.get('target','')} &middot; {meta['runner']['platform']}</p>
+<p>{meta["generated_at"]} &middot; {meta.get("target", "")} &middot; {meta["runner"]["platform"]}</p>
 <img src="{IMAGE_NAME}" alt="benchmark chart">
 <table><thead><tr><th>Scenario</th>{head}</tr></thead><tbody>{body}</tbody></table>
-<p><a href="https://github.com/{meta['repository']}">{meta['repository']}</a></p>
+<p><a href="https://github.com/{meta["repository"]}">{meta["repository"]}</a></p>
 </body></html>
 """
 
@@ -407,6 +666,7 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
                 # regression. See issue #63.
                 "status": r.status(),
                 "mode": series_mode(r.series, runner_os, meta.get("target", "")),
+                "engine": series_engine(r.series, runner_os, meta.get("target", "")),
             }
             for r in report.rows
         ],
@@ -436,10 +696,110 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ci.benchmark_stats")
     p.add_argument("--output-dir", type=Path, default=Path("benchmark-stats"))
     p.add_argument("--log-path", type=Path)
-    src = p.add_mutually_exclusive_group(required=True)
+    p.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="parse and print the per-target report without rendering artifacts",
+    )
+    p.add_argument(
+        "--publish-outcome",
+        default=os.environ.get("RELD_BENCHMARK_PUBLISH_OUTCOME", "rendered; publication pending"),
+        help="outcome shown in the log/Actions summary report",
+    )
+    p.add_argument(
+        "--print-targets",
+        action="store_true",
+        help="print the canonical target labels, one per line",
+    )
+    p.add_argument(
+        "--check-readme",
+        type=Path,
+        help="fail unless README's BENCHMARK block matches the canonical target manifest",
+    )
+    p.add_argument(
+        "--write-readme",
+        type=Path,
+        help="replace README's marker-delimited BENCHMARK block with canonical generated contents",
+    )
+    p.add_argument(
+        "--verify-current-outputs",
+        type=Path,
+        metavar="ROOT",
+        help="verify generated per-target latest.json files match --expected-sha and freshness",
+    )
+    p.add_argument("--expected-sha", default=os.environ.get("GITHUB_SHA", ""))
+    p.add_argument("--max-age-seconds", type=int, default=2 * 60 * 60)
+    p.add_argument(
+        "--check-remote-freshness",
+        action="store_true",
+        help="check published per-target latest.json age and measured status",
+    )
+    p.add_argument(
+        "--remote-base-url",
+        default=os.environ.get(
+            "RELD_BENCHMARK_RAW_BASE_URL",
+            "https://raw.githubusercontent.com/zackees/reld/benchmark-stats",
+        ),
+        help="base URL containing <target>/latest.json (injectable for local tests)",
+    )
+    src = p.add_mutually_exclusive_group()
     src.add_argument("--run-benchmarks", action="store_true")
     src.add_argument("--input-log", type=Path)
     args = p.parse_args(argv)
+
+    # These maintenance operations deliberately need no benchmark input. Keep them in this
+    # module so every workflow consumer draws target identity from one source of truth.
+    if args.print_targets:
+        print("\n".join(target for target, _ in BENCHMARK_TARGETS))
+        return 0
+    if args.check_readme:
+        if not check_readme_block(args.check_readme):
+            sys.stderr.write(f"{args.check_readme}: BENCHMARK block drifted from ci.benchmark_stats manifest\n")
+            return 1
+        print(f"{args.check_readme}: generated BENCHMARK block matches target manifest")
+        return 0
+    if args.write_readme:
+        try:
+            write_readme_block(args.write_readme)
+        except ValueError as error:
+            sys.stderr.write(f"{args.write_readme}: {error}\n")
+            return 1
+        print(f"{args.write_readme}: wrote canonical generated BENCHMARK block")
+        return 0
+    if args.verify_current_outputs:
+        errors = verify_current_outputs(args.verify_current_outputs, args.expected_sha, args.max_age_seconds)
+        if errors:
+            sys.stderr.write("benchmark artifact freshness check failed:\n")
+            sys.stderr.write("\n".join(f"- {error}" for error in errors) + "\n")
+            return 1
+        print(f"benchmark artifacts are current for {args.expected_sha or 'local/unset SHA'} (max age {args.max_age_seconds}s)")
+        return 0
+    if args.check_remote_freshness:
+        errors = verify_remote_freshness(
+            args.remote_base_url,
+            args.max_age_seconds,
+            expected_sha=args.expected_sha,
+        )
+        lines = [
+            "### Published benchmark freshness",
+            "",
+            "| Field | Value |",
+            "|:------|:------|",
+            f"| base URL | {args.remote_base_url} |",
+            f"| maximum age | {args.max_age_seconds}s |",
+            f"| status | {'current' if not errors else 'stale or incomplete'} |",
+        ]
+        if errors:
+            lines.extend(["", "**Freshness check failed:**", *[f"- {error}" for error in errors]])
+        summary = "\n".join(lines) + "\n"
+        print(summary)
+        if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with Path(summary_path).open("a", encoding="utf-8") as handle:
+                handle.write(summary)
+        return 1 if errors else 0
+
+    if not args.run_benchmarks and args.input_log is None:
+        p.error("one of --run-benchmarks or --input-log is required")
 
     if args.run_benchmarks:
         cmd = ["cargo", "run", "--release", "--bin", "reld-bench", "--"]
@@ -455,8 +815,22 @@ def main(argv: list[str] | None = None) -> int:
         text = args.input_log.read_text(encoding="utf-8")
 
     report = parse_benchmark_log(text)
-    write_outputs(report, collect_metadata(report), args.output_dir)
+    meta = collect_metadata(report)
+    if args.summary_only:
+        summary = render_summary(report, meta, args.publish_outcome)
+        print(summary)
+        if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with Path(summary_path).open("a", encoding="utf-8") as handle:
+                handle.write(summary)
+        return 0
+
+    write_outputs(report, meta, args.output_dir)
     print(f"wrote {args.output_dir}")
+    summary = render_summary(report, meta, args.publish_outcome)
+    print(summary)
+    if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(summary_path).open("a", encoding="utf-8") as handle:
+            handle.write(summary)
     return 0
 
 

@@ -12,6 +12,7 @@
 //! missing competitor is visible in the published chart instead of quietly improving our
 //! numbers.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -88,6 +89,11 @@ struct Corpus {
     /// Configuration label for the table row (e.g. `quick` / `thin-lto` / `full-lto`).
     #[serde(default)]
     configuration: Option<String>,
+    /// Optional process exit-code oracle for the linked corpus. When present, the benchmark
+    /// executes each final output once after timing and requires this code. A corpus without an
+    /// oracle still has its final artifact checked for existence and nonzero length.
+    #[serde(default)]
+    expected_exit_code: Option<i32>,
 }
 
 /// Workload sizes. Small is where incremental linking will eventually matter most; large is
@@ -151,6 +157,42 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 /// for Mach-O). Every other token, including reld's absolute-path shim, passes through unchanged.
 fn fuse_ld_value(token: &str) -> String {
     resolve_fuse_ld(token, which_on_path)
+}
+
+/// Select the `-fuse-ld` token clang can actually execute, plus an optional directory to prepend
+/// to the child PATH. Windows clang treats an absolute `-fuse-ld=C:\...\reld-link.exe` as a
+/// linker *name* and prefixes it with the target triple, producing a nonexistent executable.
+/// A basename on PATH is the supported form there. Unix clang accepts absolute linker paths.
+fn compiler_driver_linker(linker: &str, windows: bool) -> Result<(String, Option<PathBuf>)> {
+    let path = Path::new(linker);
+    if windows && path.is_absolute() {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("linker path has no UTF-8 file name: {}", path.display()))?;
+        let parent = path
+            .parent()
+            .with_context(|| format!("linker path has no parent: {}", path.display()))?;
+        return Ok((name.to_owned(), Some(parent.to_path_buf())));
+    }
+    Ok((fuse_ld_value(linker), None))
+}
+
+fn select_compiler_driver_linker(cmd: &mut Command, linker: &str) -> Result<()> {
+    if linker.is_empty() {
+        return Ok(());
+    }
+    let (value, search_dir) = compiler_driver_linker(linker, cfg!(windows))?;
+    if let Some(search_dir) = search_dir {
+        let mut paths = vec![search_dir];
+        if let Some(current_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current_path));
+        }
+        let joined = std::env::join_paths(paths).context("prepending linker directory to PATH")?;
+        cmd.env("PATH", joined);
+    }
+    cmd.arg(format!("-fuse-ld={value}"));
+    Ok(())
 }
 
 /// Core of [`fuse_ld_value`] with the PATH lookup injected, so the mapping is unit-testable
@@ -285,10 +327,16 @@ fn main() -> Result<()> {
                 print!(" n/a |");
                 continue;
             }
-            match time_link(&args, &dir, &objects, linker) {
+            match time_link(&args, &dir, &objects, linker).and_then(|d| {
+                validate_generated_output(
+                    &bench_output_path(&dir, linker),
+                    workload.expected_exit_code(),
+                )?;
+                Ok(d)
+            }) {
                 Ok(d) => print!(" {:.4} |", d.as_secs_f64()),
                 Err(e) => {
-                    failures.push((linker.clone(), name.clone(), e.to_string()));
+                    failures.push((linker.clone(), name.clone(), format!("{e:#}")));
                     print!(" n/a |");
                 }
             }
@@ -297,10 +345,16 @@ fn main() -> Result<()> {
             let linker = reld_shim_str
                 .as_ref()
                 .expect("measured implies a shim path");
-            match time_link(&args, &dir, &objects, linker) {
+            match time_link(&args, &dir, &objects, linker).and_then(|d| {
+                validate_generated_output(
+                    &bench_output_path(&dir, linker),
+                    workload.expected_exit_code(),
+                )?;
+                Ok(d)
+            }) {
                 Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
                 Err(e) => {
-                    failures.push(("reld".to_string(), name.clone(), e.to_string()));
+                    failures.push(("reld".to_string(), name.clone(), format!("{e:#}")));
                     println!(" n/a |");
                 }
             }
@@ -412,17 +466,157 @@ fn compile_all(args: &Args, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathB
     Ok(objects)
 }
 
-fn link_once(args: &Args, objects: &[PathBuf], linker: &str, out: &Path) -> Result<()> {
-    let mut cmd = Command::new(&args.cc);
-    cmd.args(objects).arg("-o").arg(out);
-    if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
+/// Response-file tokenization grammar used by the compiler driver on each platform. Keeping the
+/// formatting independent of the host lets the Windows-specific path be regression-tested on
+/// every developer machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseFileSyntax {
+    Gnu,
+    Windows,
+}
+
+fn compiler_driver_response_syntax(cc: &str) -> ResponseFileSyntax {
+    let driver = cc
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(cc)
+        .to_ascii_lowercase();
+    let driver = driver.strip_suffix(".exe").unwrap_or(&driver);
+    if matches!(driver, "clang-cl" | "cl") {
+        ResponseFileSyntax::Windows
+    } else {
+        ResponseFileSyntax::Gnu
     }
+}
+
+/// Quote one response-file argument for clang's active driver-mode parser.
+///
+/// The `clang` driver uses GNU tokenization even on Windows, while `clang-cl` uses the Windows
+/// CommandLineToArgvW rules. GNU response files treat every backslash as an escape; Windows only
+/// gives special meaning to runs of backslashes immediately before a quote (or the closing quote).
+/// Always quoting each argument makes whitespace, quotes, and non-ASCII paths unambiguous.
+fn quote_response_file_argument(arg: &str, syntax: ResponseFileSyntax) -> String {
+    match syntax {
+        ResponseFileSyntax::Gnu => {
+            let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        }
+        ResponseFileSyntax::Windows => {
+            let mut quoted = String::with_capacity(arg.len() + 2);
+            quoted.push('"');
+            let mut backslashes = 0;
+            for ch in arg.chars() {
+                if ch == '\\' {
+                    backslashes += 1;
+                    continue;
+                }
+                if ch == '"' {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                } else {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes));
+                }
+                backslashes = 0;
+                quoted.push(ch);
+            }
+            // Backslashes immediately before the closing quote must be doubled.
+            quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+            quoted.push('"');
+            quoted
+        }
+    }
+}
+
+/// Produce UTF-8 contents for a clang compiler-driver response file. One quoted argument per
+/// line also keeps the artifact inspectable when diagnosing a benchmark runner failure.
+fn compiler_driver_response_file_contents(args: &[String], syntax: ResponseFileSyntax) -> String {
+    let mut contents = args
+        .iter()
+        .map(|arg| quote_response_file_argument(arg, syntax))
+        .collect::<Vec<_>>()
+        .join("\n");
+    contents.push('\n');
+    contents
+}
+
+fn write_compiler_driver_response_file(path: &Path, args: &[String], cc: &str) -> Result<()> {
+    let contents =
+        compiler_driver_response_file_contents(args, compiler_driver_response_syntax(cc));
+    std::fs::write(path, contents)
+        .with_context(|| format!("writing compiler-driver response file {}", path.display()))
+}
+
+/// Add all linker inputs to `cmd`. Windows receives them through an `@response-file`, avoiding
+/// the CreateProcess command-line limit for the large generated and frozen-corpus benchmarks.
+/// Other platforms retain the existing direct-argument invocation.
+enum PreparedLinkInputs<'a> {
+    Direct {
+        objects: &'a [PathBuf],
+        extra: &'a [String],
+    },
+    ResponseFile(PathBuf),
+}
+
+/// Prepare the linker's input list once before the warmup/timed loop. In particular, response
+/// file creation is deliberately excluded from benchmark timing.
+fn prepare_link_inputs<'a>(
+    objects: &'a [PathBuf],
+    extra: &'a [String],
+    response_file: &Path,
+    cc: &str,
+) -> Result<PreparedLinkInputs<'a>> {
+    if cfg!(windows) {
+        let mut inputs = Vec::with_capacity(objects.len() + extra.len());
+        inputs.extend(
+            objects
+                .iter()
+                .map(|object| response_file_path_argument(object))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        inputs.extend(extra.iter().cloned());
+        write_compiler_driver_response_file(response_file, &inputs, cc)?;
+        Ok(PreparedLinkInputs::ResponseFile(
+            response_file.to_path_buf(),
+        ))
+    } else {
+        Ok(PreparedLinkInputs::Direct { objects, extra })
+    }
+}
+
+/// Convert a filesystem path into the UTF-8 response-file format used by clang. Never use a
+/// lossy conversion here: changing one byte of an object path would turn a benchmark harness
+/// failure into a misleading linker result.
+fn response_file_path_argument(path: &Path) -> Result<String> {
+    path.to_str().map(str::to_owned).with_context(|| {
+        format!(
+            "cannot write non-UTF-8 linker input path to a compiler-driver response file: {}",
+            path.display()
+        )
+    })
+}
+
+fn add_prepared_link_inputs(cmd: &mut Command, inputs: &PreparedLinkInputs<'_>) {
+    match inputs {
+        PreparedLinkInputs::Direct { objects, extra } => {
+            cmd.args(*objects).args(*extra);
+        }
+        PreparedLinkInputs::ResponseFile(path) => {
+            let mut response_arg = OsString::from("@");
+            response_arg.push(path);
+            cmd.arg(response_arg);
+        }
+    }
+}
+
+fn link_once(args: &Args, inputs: &PreparedLinkInputs<'_>, linker: &str, out: &Path) -> Result<()> {
+    let mut cmd = Command::new(&args.cc);
+    add_prepared_link_inputs(&mut cmd, inputs);
+    cmd.arg("-o").arg(out);
+    select_compiler_driver_linker(&mut cmd, linker)?;
     let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .context("spawning linker")?;
+        .with_context(|| format!("spawning linker via {}", args.cc))?;
     if !status.status.success() {
         bail!("link failed: {}", String::from_utf8_lossy(&status.stderr));
     }
@@ -450,9 +644,7 @@ fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
     let exe = dir.join(if cfg!(windows) { "p.exe" } else { "p.out" });
     let mut cmd = Command::new(cc);
     cmd.arg(&obj).arg("-o").arg(&exe);
-    if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
-    }
+    select_compiler_driver_linker(&mut cmd, linker)?;
     Ok(cmd.output().map(|o| o.status.success()).unwrap_or(false))
 }
 
@@ -465,7 +657,7 @@ fn bench_output_name(linker: &str) -> String {
     let safe: String = linker
         .chars()
         .map(|c| {
-            if matches!(c, '/' | '\\' | ':') {
+            if matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') {
                 '_'
             } else {
                 c
@@ -475,11 +667,74 @@ fn bench_output_name(linker: &str) -> String {
     format!("bench-{safe}.bin")
 }
 
+fn bench_output_path(dir: &Path, linker: &str) -> PathBuf {
+    dir.join(bench_output_name(linker))
+}
+
+/// Confirm that a link left behind a real output artifact before attempting to execute it. This
+/// makes a successful process spawn impossible to mistake for a usable benchmark result.
+fn validate_nonempty_output_artifact(out: &Path) -> Result<()> {
+    let metadata = std::fs::metadata(out)
+        .with_context(|| format!("benchmark output artifact is missing: {}", out.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "benchmark output artifact is not a regular file: {}",
+            out.display()
+        );
+    }
+    if metadata.len() == 0 {
+        bail!("benchmark output artifact is empty: {}", out.display());
+    }
+    Ok(())
+}
+
+/// Check a process result against an exit-code oracle. Kept separate from process execution so
+/// corpus-validation behavior is unit-testable without a compiler or generated binary.
+fn validate_output_exit_code(actual: Option<i32>, expected: i32) -> Result<()> {
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => bail!("unexpected exit code: expected {expected}, got {actual}"),
+        None => bail!("output did not exit normally; expected exit code {expected}"),
+    }
+}
+
+/// Run a final linked program after timing and verify its exit-code oracle. Execution is never
+/// part of the timed interval: the caller invokes this only after [`time_link`] succeeds.
+fn run_and_validate_output(out: &Path, expected_exit_code: i32) -> Result<()> {
+    validate_nonempty_output_artifact(out)?;
+    let run = Command::new(out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("running benchmark output {}", out.display()))?;
+    validate_output_exit_code(run.status.code(), expected_exit_code)
+        .with_context(|| format!("benchmark output {} failed validation", out.display()))
+}
+
+/// Validate a generated workload's final output after timing. Every generated workload has a
+/// deterministic oracle, unlike arbitrary frozen corpora.
+fn validate_generated_output(out: &Path, expected_exit_code: i32) -> Result<()> {
+    run_and_validate_output(out, expected_exit_code)
+}
+
+/// Validate a frozen corpus output after timing. A corpus may opt into an execution oracle; old
+/// corpora that omit it are still rejected if the linker failed to create a nonempty artifact.
+fn validate_replay_output(out: &Path, expected_exit_code: Option<i32>) -> Result<()> {
+    match expected_exit_code {
+        Some(expected) => run_and_validate_output(out, expected),
+        None => validate_nonempty_output_artifact(out).context(
+            "corpus.json has no expected_exit_code, so replay validation can only require a \
+             nonempty output artifact",
+        ),
+    }
+}
+
 fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Result<Duration> {
-    let out = dir.join(bench_output_name(linker));
+    let out = bench_output_path(dir, linker);
+    let inputs = prepare_link_inputs(objects, &[], &out.with_extension("rsp"), &args.cc)?;
 
     for _ in 0..args.warmup {
-        link_once(args, objects, linker, &out)?;
+        link_once(args, &inputs, linker, &out)?;
     }
 
     let mut samples = Vec::with_capacity(args.trials);
@@ -488,7 +743,7 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
         // up-to-date target.
         let _ = std::fs::remove_file(&out);
         let t = Instant::now();
-        link_once(args, objects, linker, &out)?;
+        link_once(args, &inputs, linker, &out)?;
         samples.push(t.elapsed());
     }
     samples.sort();
@@ -500,21 +755,19 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
 /// explicitly so the corpus can carry its own toolchain, independent of `--cc`.
 fn link_once_replay(
     cc: &str,
-    objects: &[PathBuf],
-    extra: &[String],
+    inputs: &PreparedLinkInputs<'_>,
     linker: &str,
     out: &Path,
 ) -> Result<()> {
     let mut cmd = Command::new(cc);
-    cmd.args(objects).args(extra).arg("-o").arg(out);
-    if !linker.is_empty() {
-        cmd.arg(format!("-fuse-ld={}", fuse_ld_value(linker)));
-    }
+    add_prepared_link_inputs(&mut cmd, inputs);
+    cmd.arg("-o").arg(out);
+    select_compiler_driver_linker(&mut cmd, linker)?;
     let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .context("spawning linker")?;
+        .with_context(|| format!("spawning linker via {cc}"))?;
     if !status.status.success() {
         bail!("link failed: {}", String::from_utf8_lossy(&status.stderr));
     }
@@ -532,15 +785,16 @@ fn time_link_replay(
     warmup: usize,
     trials: usize,
 ) -> Result<Duration> {
-    let out = out_dir.join(bench_output_name(linker));
+    let out = bench_output_path(out_dir, linker);
+    let inputs = prepare_link_inputs(objects, extra, &out.with_extension("rsp"), cc)?;
     for _ in 0..warmup {
-        link_once_replay(cc, objects, extra, linker, &out)?;
+        link_once_replay(cc, &inputs, linker, &out)?;
     }
     let mut samples = Vec::with_capacity(trials);
     for _ in 0..trials {
         let _ = std::fs::remove_file(&out);
         let t = Instant::now();
-        link_once_replay(cc, objects, extra, linker, &out)?;
+        link_once_replay(cc, &inputs, linker, &out)?;
         samples.push(t.elapsed());
     }
     samples.sort();
@@ -612,6 +866,7 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
     }
     println!("----:|");
 
+    let mut failures: Vec<(String, String, String)> = Vec::new();
     print!("| {scenario} |");
     for (linker, ok) in &available {
         if !ok {
@@ -626,9 +881,16 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
             &root,
             args.warmup,
             args.trials,
-        ) {
+        )
+        .and_then(|d| {
+            validate_replay_output(&bench_output_path(&root, linker), corpus.expected_exit_code)?;
+            Ok(d)
+        }) {
             Ok(d) => print!(" {:.4} |", d.as_secs_f64()),
-            Err(_) => print!(" n/a |"),
+            Err(e) => {
+                failures.push((linker.clone(), scenario.clone(), format!("{e:#}")));
+                print!(" n/a |");
+            }
         }
     }
     if reld_measured {
@@ -643,9 +905,16 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
             &root,
             args.warmup,
             args.trials,
-        ) {
+        )
+        .and_then(|d| {
+            validate_replay_output(&bench_output_path(&root, linker), corpus.expected_exit_code)?;
+            Ok(d)
+        }) {
             Ok(d) => println!(" {:.4} |", d.as_secs_f64()),
-            Err(_) => println!(" n/a |"),
+            Err(e) => {
+                failures.push(("reld".to_string(), scenario.clone(), format!("{e:#}")));
+                println!(" n/a |");
+            }
         }
     } else if reld_pending.is_some() {
         println!(" pending |");
@@ -655,6 +924,9 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
     println!();
     if let Some(reason) = &reld_pending {
         println!("{}", format_pending_comment("reld", reason));
+    }
+    for (linker, scenario, error) in &failures {
+        println!("{}", format_failure_comment(linker, scenario, error));
     }
     Ok(())
 }
@@ -672,6 +944,7 @@ mod tests {
             "cc": "clang",
             "objects": ["objs/a.o", "objs/b.o"],
             "extra_link_args": ["-lm"],
+            "expected_exit_code": 17,
             "output_name": "app"
         }"#;
         let corpus: Corpus = serde_json::from_str(json).unwrap();
@@ -682,6 +955,7 @@ mod tests {
         );
         assert_eq!(corpus.extra_link_args, vec!["-lm".to_string()]);
         assert_eq!(corpus.configuration.as_deref(), Some("quick"));
+        assert_eq!(corpus.expected_exit_code, Some(17));
     }
 
     #[test]
@@ -727,6 +1001,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_absolute_custom_linker_uses_basename_and_parent_path() {
+        let absolute = if cfg!(windows) {
+            r"C:\bench tools\reld-link.exe"
+        } else {
+            "/bench tools/reld-link.exe"
+        };
+        let (value, search_dir) = compiler_driver_linker(absolute, true).unwrap();
+        assert_eq!(value, "reld-link.exe");
+        assert_eq!(search_dir.unwrap(), Path::new(absolute).parent().unwrap());
+    }
+
+    #[test]
+    fn unix_absolute_custom_linker_remains_an_absolute_fuse_ld_value() {
+        let absolute = "/opt/reld drivers/ld64.reld";
+        let (value, search_dir) = compiler_driver_linker(absolute, false).unwrap();
+        assert_eq!(value, absolute);
+        assert!(search_dir.is_none());
+    }
+
+    #[test]
     fn format_pending_comment_is_single_line_and_safe() {
         // The reason is caller-supplied, so it gets the same one-line / `-->`-safe treatment as a
         // failure comment: no embedded newline, exactly one `-->` (the closing delimiter).
@@ -762,7 +1056,59 @@ mod tests {
         assert!(corpus.cc.is_none());
         assert!(corpus.extra_link_args.is_empty());
         assert!(corpus.configuration.is_none());
+        assert!(corpus.expected_exit_code.is_none());
         assert_eq!(corpus.objects, vec!["a.o".to_string()]);
+    }
+
+    #[test]
+    fn output_exit_code_validation_reports_wrong_and_abnormal_exits() {
+        validate_output_exit_code(Some(16), 16).unwrap();
+
+        let wrong = validate_output_exit_code(Some(15), 16)
+            .unwrap_err()
+            .to_string();
+        assert!(wrong.contains("expected 16, got 15"), "{wrong}");
+
+        let abnormal = validate_output_exit_code(None, 16).unwrap_err().to_string();
+        assert!(abnormal.contains("did not exit normally"), "{abnormal}");
+    }
+
+    #[test]
+    fn replay_validation_without_oracle_requires_nonempty_artifact() {
+        let dir = unique_tmp_dir("replay-output-validation");
+        let empty = dir.join("empty-output");
+        std::fs::write(&empty, []).unwrap();
+
+        let error = validate_replay_output(&empty, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no expected_exit_code"), "{error}");
+        assert!(error.contains("empty"), "{error}");
+
+        let nonempty = dir.join("nonempty-output");
+        std::fs::write(&nonempty, [0_u8]).unwrap();
+        validate_replay_output(&nonempty, None).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn response_file_path_argument_preserves_unicode_paths() {
+        let path = PathBuf::from("objects/日本語/🦀.o");
+        assert_eq!(
+            response_file_path_argument(&path).unwrap(),
+            "objects/日本語/🦀.o"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn response_file_path_argument_rejects_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'o', b'.', 0xFF]));
+        let error = response_file_path_argument(&path).unwrap_err().to_string();
+        assert!(error.contains("non-UTF-8"), "{error}");
     }
 
     /// Unique temp directory per test, so the (hermetic) discovery tests never touch the real
@@ -875,6 +1221,114 @@ mod tests {
     }
 
     #[test]
+    fn failure_comments_keep_the_full_anyhow_cause_chain() {
+        let error = anyhow::anyhow!("The filename or extension is too long (os error 206)")
+            .context("spawning linker via clang");
+        let comment = format_failure_comment("lld", "large (512 units)", &format!("{error:#}"));
+        assert!(comment.contains("spawning linker via clang"), "{comment}");
+        assert!(comment.contains("os error 206"), "{comment}");
+    }
+
+    #[test]
+    fn gnu_response_file_escapes_spaces_quotes_backslashes_and_unicode() {
+        let args = vec![
+            "plain.o".to_string(),
+            "dir with spaces/object file.o".to_string(),
+            "quote\"name.o".to_string(),
+            r"C:\bench\object.o".to_string(),
+            "日本語/🦀.o".to_string(),
+        ];
+        assert_eq!(
+            compiler_driver_response_file_contents(&args, ResponseFileSyntax::Gnu),
+            concat!(
+                "\"plain.o\"\n",
+                "\"dir with spaces/object file.o\"\n",
+                "\"quote\\\"name.o\"\n",
+                "\"C:\\\\bench\\\\object.o\"\n",
+                "\"日本語/🦀.o\"\n",
+            )
+        );
+    }
+
+    #[test]
+    fn windows_response_file_uses_windows_quote_rules() {
+        let args = vec![
+            "dir with spaces/object file.o".to_string(),
+            "quote\"name.o".to_string(),
+            r"C:\bench\object.o".to_string(),
+            r"C:\trailing slash\\".to_string(),
+            "日本語/🦀.o".to_string(),
+        ];
+        assert_eq!(
+            compiler_driver_response_file_contents(&args, ResponseFileSyntax::Windows),
+            concat!(
+                "\"dir with spaces/object file.o\"\n",
+                "\"quote\\\"name.o\"\n",
+                "\"C:\\bench\\object.o\"\n",
+                "\"C:\\trailing slash\\\\\\\\\"\n",
+                "\"日本語/🦀.o\"\n",
+            )
+        );
+    }
+
+    #[test]
+    fn response_file_syntax_follows_clang_driver_mode_not_host_os() {
+        assert_eq!(
+            compiler_driver_response_syntax("clang.exe"),
+            ResponseFileSyntax::Gnu
+        );
+        assert_eq!(
+            compiler_driver_response_syntax(r"C:\Program Files\LLVM\bin\clang.exe"),
+            ResponseFileSyntax::Gnu
+        );
+        assert_eq!(
+            compiler_driver_response_syntax("clang-cl.exe"),
+            ResponseFileSyntax::Windows
+        );
+        assert_eq!(
+            compiler_driver_response_syntax(r"C:\Program Files\LLVM\bin\clang-cl.exe"),
+            ResponseFileSyntax::Windows
+        );
+        assert_eq!(
+            compiler_driver_response_syntax(r"C:\LLVM\CLANG-CL.EXE"),
+            ResponseFileSyntax::Windows
+        );
+    }
+
+    #[test]
+    fn prepared_link_inputs_writes_windows_response_file_before_linking() {
+        let dir = unique_tmp_dir("prepared-inputs");
+        let objects = vec![
+            dir.join("objects with spaces").join("日本語.o"),
+            dir.join("quote\"name.o"),
+        ];
+        let extra = vec!["-lcustom library".to_string()];
+        let response_file = dir.join("bench.rsp");
+        let prepared = prepare_link_inputs(&objects, &extra, &response_file, "clang.exe").unwrap();
+
+        if cfg!(windows) {
+            assert_eq!(
+                std::fs::read_to_string(&response_file).unwrap(),
+                compiler_driver_response_file_contents(
+                    &[
+                        objects[0].to_string_lossy().into_owned(),
+                        objects[1].to_string_lossy().into_owned(),
+                        extra[0].clone(),
+                    ],
+                    ResponseFileSyntax::Gnu,
+                )
+            );
+            assert!(matches!(&prepared, PreparedLinkInputs::ResponseFile(_)));
+        } else {
+            assert!(matches!(&prepared, PreparedLinkInputs::Direct { .. }));
+            assert!(!response_file.exists());
+        }
+
+        drop(prepared);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn bench_output_name_flattens_path_separators() {
         // A short name is untouched...
         assert_eq!(bench_output_name("lld"), "bench-lld.bin");
@@ -889,6 +1343,10 @@ mod tests {
         assert_eq!(
             bench_output_name(r"C:\tc\ld.reld"),
             "bench-C__tc_ld.reld.bin"
+        );
+        assert_eq!(
+            bench_output_name(r"\\?\C:\tc\reld-link.exe"),
+            "bench-____C__tc_reld-link.exe.bin"
         );
     }
 }

@@ -6608,9 +6608,16 @@ fn verify_linker_plugin_requirements(
                 verifier_path.display()
             );
 
-            // Check that rustc can use linker-plugin-lto with the installed clang. This eliminates
-            // platforms where the LLVM version used by clang doesn't match the version used by
-            // rustc.
+            // Keep this output in a private directory. Fixture collection can happen in several
+            // processes, so a shared architecture-named file can be replaced mid-link.
+            let verifier_dir = tempfile::tempdir()
+                .context("Failed to create temporary directory for the Rust LTO verifier")?;
+            let verifier_output = verifier_dir
+                .path()
+                .join(format!("rust-{}.out", config.arch));
+
+            // Check compiler plugin compatibility with the installed clang. This eliminates
+            // platforms where the LLVM version used by clang doesn't match the compiler's version.
             let mut command = Command::new(&compiler);
             command.args(config.rustc_channel.as_arg());
             command.arg(verifier_path);
@@ -6619,8 +6626,8 @@ fn verify_linker_plugin_requirements(
                 "-Clinker-plugin-lto",
                 "-Clink-arg=-flto",
                 "-o",
-                &format!("/tmp/rust-{}.out", config.arch),
             ]);
+            command.arg(&verifier_output);
             verify_command_success(&mut command).context(
                 "Can't use rust+clang with linker plugin. LLVM version mismatch? \
                 Check that clang --version matches LLVM version reported by `rustc -vV`.",

@@ -25,19 +25,32 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-linux
-          # reld is measured natively on Linux; on Windows/macOS it is pending-by-design (the
-          # rustc-based bridge measurement hasn't landed — see #17), so it renders an explicit
-          # `pending` rather than a silent `n/a` (#63).
+            reld_driver: target/release/ld.reld
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
-            reld_pending: "reld bridge measurement pending (rustc-based); see #17"
+            # COFF format selection is made from argv[0], not Linux's ld.reld shim name.
+            reld_driver: target/release/reld-link.exe
           - runner: macos-14
             target: aarch64-apple-darwin
-            reld_pending: "reld bridge measurement pending (rustc-based); see #17"
+            # Mach-O format selection is also made from argv[0].
+            reld_driver: target/release/ld64.reld
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
+
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          toolset: "14.44"
 
       - uses: dtolnay/rust-toolchain@1.94.1
 
@@ -58,13 +71,8 @@ jobs:
 
       - name: Install Windows linkers
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install llvm --no-progress --yes
-          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) { throw "clang missing" }
-          if (-not (Get-Command lld-link -ErrorAction SilentlyContinue)) { throw "lld-link missing" }
-          if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) { throw "link.exe missing" }
+        shell: bash
+        run: uv run --no-sync python -m ci.windows_ci install-benchmark-linkers
 
       - name: Install macOS linkers
         if: runner.os == 'macOS'
@@ -82,32 +90,47 @@ jobs:
           command -v clang
           command -v ld64.lld
 
-      - name: Build native reld shim
+      - name: Build Linux native reld shim
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          CARGO_COMMAND: cargo
         run: |
           set -euo pipefail
-          cargo build --release -p reld
+          $CARGO_COMMAND build --release -p reld
           bash ci/install-driver-shims.sh release
+
+      - name: Build Windows COFF reld front door
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CARGO_COMMAND: cargo
+        run: uv run --no-sync python -m ci.windows_ci build-benchmark-driver
+
+      - name: Build macOS Mach-O reld front door
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CARGO_COMMAND: cargo
+        run: |
+          set -euo pipefail
+          $CARGO_COMMAND build --release -p reld --bin reld
+          bash ci/install-driver-shims.sh release
+          test -x target/release/ld64.reld
+          echo "Using Mach-O bridge driver: target/release/ld64.reld"
 
       - name: Run benchmark
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          RELD_PENDING: ${{ matrix.reld_pending }}
-        run: |
-          set -euo pipefail
-          mkdir -p benchmark-output
-          if [ -n "${RELD_PENDING:-}" ]; then
-            # Render reld's documented, unsupported-by-design gap as `pending`, never silent n/a.
-            cargo run --release -p reld-testkit --bin reld-bench -- \
-              --target "$TARGET" --trials 5 --warmup 1 --reld-pending "$RELD_PENDING" \
-              > "benchmark-output/benchmark.log" 2>&1
-          else
-            cargo run --release -p reld-testkit --bin reld-bench -- \
-              --target "$TARGET" --trials 5 --warmup 1 \
-              > "benchmark-output/benchmark.log" 2>&1
-          fi
+          RELD_DRIVER: ${{ matrix.reld_driver }}
+          CARGO_COMMAND: cargo
+        # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. The
+        # harness still compiles generated workloads once before timing link-only iterations.
+        run: >-
+          uv run --no-sync python -m ci.benchmark_runner
+          --target "$TARGET" --reld "$RELD_DRIVER"
+          --output benchmark-output/benchmark.log --trials 5 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
         shell: bash
@@ -118,10 +141,18 @@ jobs:
           # Fails the build if any expected linker for this platform reports n/a, or if a
           # pending-by-design linker slipped to a bare n/a. Prints the expected-vs-measured
           # table to the log and the job step summary (#63).
-          PY=python3
-          command -v "$PY" >/dev/null 2>&1 || PY=python
-          "$PY" -m ci.benchmark_coverage \
+          uv run --no-sync python -m ci.benchmark_coverage \
             --input-log "benchmark-output/benchmark.log" --target "$TARGET"
+
+      - name: Report per-target timings and metadata
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f benchmark-output/benchmark.log
+          uv run --no-sync python -m ci.benchmark_stats \
+            --input-log benchmark-output/benchmark.log --summary-only \
+            --publish-outcome "raw benchmark artifact uploaded; aggregation pending"
 
       - name: Upload raw benchmark log
         if: always()
@@ -139,12 +170,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Install renderer dependencies
-        run: python -m pip install --disable-pip-version-check pillow
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
 
       - name: Download benchmark logs
         uses: actions/download-artifact@v4
@@ -159,17 +195,26 @@ jobs:
           RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
         run: |
           set -euo pipefail
-          targets=(x86_64-linux x86_64-pc-windows-msvc aarch64-apple-darwin)
+          mapfile -t targets < <(uv run --no-sync python -m ci.benchmark_stats --print-targets)
           for target in "${targets[@]}"; do
             mkdir -p "benchmark-stats/$target"
             curl --fail --silent --location --max-time 30 \
               -o "benchmark-stats/$target/history.jsonl" \
               "$RELD_BENCHMARK_RAW_BASE_URL/$target/history.jsonl" \
               || : > "benchmark-stats/$target/history.jsonl"
-            python -m ci.benchmark_stats \
+            uv run --no-sync python -m ci.benchmark_stats \
               --input-log "benchmark-input/benchmark-log-$target/benchmark.log" \
               --output-dir "benchmark-stats/$target"
           done
+
+      - name: Assert generated README block and artifact freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m ci.benchmark_stats --check-readme README.md
+          uv run --no-sync python -m ci.benchmark_stats \
+            --verify-current-outputs benchmark-stats --expected-sha "$GITHUB_SHA" \
+            --max-age-seconds 7200
 
       - name: Upload per-target benchmark artifacts
         if: always()
@@ -180,6 +225,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish benchmark-stats branch
+        id: publish
         if: ${{ success() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -196,3 +242,65 @@ jobs:
           git -C "$publish_dir" remote add origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git -C "$publish_dir" push --force origin benchmark-stats
+
+      - name: Report benchmark publication outcome
+        if: always()
+        shell: bash
+        env:
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          IS_DEFAULT_BRANCH: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_DEFAULT_BRANCH" = "true" ]; then
+            outcome="${PUBLISH_OUTCOME:-not-run}"
+            destination="https://github.com/${GITHUB_REPOSITORY}/tree/benchmark-stats"
+          else
+            outcome="skipped (not default branch)"
+            destination="raw artifacts only"
+          fi
+          {
+            echo "### Benchmark publication"
+            echo
+            echo "| Field | Value |"
+            echo "|:------|:------|"
+            echo "| source SHA | ${GITHUB_SHA} |"
+            echo "| generated timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| publish outcome | ${outcome} |"
+            echo "| destination | ${destination} |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Deliberately follows the aggregate with always(): the check must report stale public charts
+  # even if a runner or aggregation failed, but waiting avoids racing a successful publish.
+  # Feature-branch dispatches skip it, so the currently stale public branch cannot block review
+  # validation before the default branch has had a chance to republish.
+  freshness:
+    name: Verify published benchmark freshness
+    needs: [benchmark, aggregate]
+    if: ${{ always() && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
+
+      - name: Check published latest.json age and status
+        env:
+          RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m ci.benchmark_stats \
+            --check-remote-freshness \
+            --remote-base-url "$RELD_BENCHMARK_RAW_BASE_URL" \
+            --expected-sha "$GITHUB_SHA" \
+            --max-age-seconds 129600

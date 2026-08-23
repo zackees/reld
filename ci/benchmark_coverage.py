@@ -29,24 +29,24 @@ import os
 import sys
 from pathlib import Path
 
-from ci.benchmark_stats import Report, parse_benchmark_log, target_os
+from ci.benchmark_stats import (
+    CANONICAL_SCENARIOS,
+    EXPECTED_SERIES,
+    Report,
+    parse_benchmark_log,
+    target_os,
+)
 
-# Linkers that MUST produce a real timing on each platform. reld is expected on Linux (native
-# engine) but *pending* elsewhere until the bridge measurement lands — see PENDING_LINKERS.
+# Linkers that MUST produce a real timing on each platform. reld is native on Linux and measured
+# through its target-correct lld bridge front door on Windows/macOS. A bridge result is still a
+# real result: leaving it pending would let the published chart hide a supported product path.
 EXPECTED_LINKERS: dict[str, list[str]] = {
-    "x86_64-linux": ["bfd", "lld", "mold", "wild", "reld"],
-    "x86_64-pc-windows-msvc": ["link.exe", "lld"],
-    "aarch64-apple-darwin": ["ld", "ld64.lld"],
+    target: list(series) for target, series in EXPECTED_SERIES.items()
 }
 
-# Series that are unsupported-by-design (documented) on a platform, with the reason. They must
-# render as ``pending`` rather than a bare ``n/a``. Ties to the bridge status in the README and
-# issue #17.
-_RELD_BRIDGE_PENDING = "reld bridge measurement pending (rustc-based); see #17"
-PENDING_LINKERS: dict[str, dict[str, str]] = {
-    "x86_64-pc-windows-msvc": {"reld": _RELD_BRIDGE_PENDING},
-    "aarch64-apple-darwin": {"reld": _RELD_BRIDGE_PENDING},
-}
+# Retained as a distinct policy mechanism for future documented, intentionally unsupported
+# series. There are deliberately no permanent benchmark gaps after the bridge measurement slice.
+PENDING_LINKERS: dict[str, dict[str, str]] = {}
 
 # Fallback so an unrecognized/short target label still resolves to a policy via its OS.
 _OS_TO_TARGET = {
@@ -88,7 +88,9 @@ class CoverageResult:
         return not self.violations
 
 
-def check_coverage(report: Report, target: str) -> CoverageResult:
+def check_coverage(
+    report: Report, target: str, *, require_canonical_scenarios: bool = True
+) -> CoverageResult:
     result = CoverageResult(target)
     expected = expected_for(target)
     pending = pending_for(target)
@@ -98,6 +100,29 @@ def check_coverage(report: Report, target: str) -> CoverageResult:
             ("<policy>", f"no coverage policy defined for target {target!r}")
         )
         return result
+
+    # The charts are a public synthetic benchmark, so their scenario matrix is part of the
+    # contract. Report.scenarios() intentionally de-duplicates for rendering; inspect one
+    # complete column instead so a repeated markdown row cannot quietly collapse into one bar.
+    if not report.series:
+        result.violations.append(("<scenarios>", "benchmark table has no linker series"))
+    elif require_canonical_scenarios:
+        scenario_rows = [r.scenario for r in report.rows if r.series == report.series[0]]
+        duplicates = sorted({s for s in scenario_rows if scenario_rows.count(s) > 1})
+        missing_scenarios = [s for s in CANONICAL_SCENARIOS if s not in scenario_rows]
+        unexpected = sorted(set(scenario_rows) - set(CANONICAL_SCENARIOS))
+        if duplicates:
+            result.violations.append(
+                ("<scenarios>", f"duplicate synthetic scenario(s): {', '.join(duplicates)}")
+            )
+        if missing_scenarios:
+            result.violations.append(
+                ("<scenarios>", f"missing synthetic scenario(s): {', '.join(missing_scenarios)}")
+            )
+        if unexpected:
+            result.violations.append(
+                ("<scenarios>", f"unexpected synthetic scenario(s): {', '.join(unexpected)}")
+            )
 
     for linker in expected:
         status = report.series_status(linker)
@@ -184,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="benchmark target label (e.g. x86_64-linux); falls back to the log heading",
     )
+    p.add_argument(
+        "--allow-noncanonical-scenarios",
+        action="store_true",
+        help=(
+            "check linker coverage for a focused smoke/replay table without requiring the "
+            "public small/medium/large scenario manifest"
+        ),
+    )
     args = p.parse_args(argv)
 
     report = parse_benchmark_log(args.input_log.read_text(encoding="utf-8"))
@@ -193,7 +226,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("no --target given and no benchmark heading found in the log\n")
         return 1
 
-    result = check_coverage(report, target)
+    result = check_coverage(
+        report,
+        target,
+        require_canonical_scenarios=not args.allow_noncanonical_scenarios,
+    )
     summary = render_summary(report, result)
     print(summary)
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):

@@ -15,7 +15,7 @@ def test_benchmark_workflow_publishes_one_directory_per_target():
     assert "x86_64-pc-windows-msvc" in text
     assert "aarch64-apple-darwin" in text
     assert "needs: benchmark" in text
-    assert 'benchmark-stats/$target' in text
+    assert "benchmark-stats/$target" in text
     assert "github.event.repository.default_branch" in text
 
 
@@ -27,7 +27,51 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     assert "ci.benchmark_coverage" in text
     assert "Assert benchmark coverage" in text
 
-    # reld is pending-by-design on Windows/macOS, so those legs pass --reld-pending; Linux (where
-    # reld is expected/measured) must not.
-    assert "--reld-pending" in text
-    assert text.count("reld_pending:") == 2  # windows + macOS matrix entries only
+    # Every target supplies its own front door; no permanent pending bridge path may survive.
+    assert "--reld-pending" not in text
+    assert "reld_pending:" not in text
+    assert "reld_driver: target/release/ld.reld" in text
+    assert "reld_driver: target/release/reld-link.exe" in text
+    assert "reld_driver: target/release/ld64.reld" in text
+    assert '--reld "$RELD_DRIVER"' in text
+    assert "pwsh" not in text.lower()
+    assert "powershell" not in text.lower()
+    assert "uv run --no-sync python -m ci.windows_ci install-benchmark-linkers" in text
+    assert "uv run --no-sync python -m ci.windows_ci build-benchmark-driver" in text
+    assert "uv run --no-sync python -m ci.benchmark_runner" in text
+    assert "ilammy/msvc-dev-cmd@" in text
+
+
+def test_benchmark_workflow_reports_and_guards_generated_artifacts():
+    text = WORKFLOW.read_text()
+
+    assert "Report per-target timings and metadata" in text
+    assert "--summary-only" in text
+    assert "--print-targets" in text
+    assert "--check-readme README.md" in text
+    assert "--verify-current-outputs benchmark-stats" in text
+    assert "Report benchmark publication outcome" in text
+    assert "GITHUB_STEP_SUMMARY" in text
+
+
+def test_freshness_watchdog_runs_after_failures_only_on_schedule_or_default_branch():
+    text = WORKFLOW.read_text()
+
+    assert "freshness:" in text
+    assert "needs: [benchmark, aggregate]" in text
+    assert "always()" in text
+    assert "github.event_name == 'schedule'" in text
+    assert "--check-remote-freshness" in text
+    assert '--remote-base-url "$RELD_BENCHMARK_RAW_BASE_URL"' in text
+    assert '--expected-sha "$GITHUB_SHA"' in text
+
+
+def test_benchmark_workflow_provisions_uv_and_has_no_bare_python_invocations():
+    text = WORKFLOW.read_text()
+
+    assert text.count("astral-sh/setup-uv@") == 3
+    assert text.count("uv sync --extra dev") == 3
+    assert "uv run --no-project" not in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith(("python ", "python3 "))
