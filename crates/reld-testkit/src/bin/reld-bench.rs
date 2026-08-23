@@ -439,20 +439,26 @@ enum ResponseFileSyntax {
     Windows,
 }
 
-fn compiler_driver_response_syntax() -> ResponseFileSyntax {
-    if cfg!(windows) {
+fn compiler_driver_response_syntax(cc: &str) -> ResponseFileSyntax {
+    let driver = cc
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(cc)
+        .to_ascii_lowercase();
+    let driver = driver.strip_suffix(".exe").unwrap_or(&driver);
+    if matches!(driver, "clang-cl" | "cl") {
         ResponseFileSyntax::Windows
     } else {
         ResponseFileSyntax::Gnu
     }
 }
 
-/// Quote one response-file argument for clang's platform-native driver parser.
+/// Quote one response-file argument for clang's active driver-mode parser.
 ///
-/// GNU response files treat every backslash as an escape, while Windows follows the usual
-/// CommandLineToArgvW rule where only runs of backslashes immediately before a quote (or the
-/// closing quote) need special handling. Always quoting each argument makes whitespace, quotes,
-/// and non-ASCII paths unambiguous.
+/// The `clang` driver uses GNU tokenization even on Windows, while `clang-cl` uses the Windows
+/// CommandLineToArgvW rules. GNU response files treat every backslash as an escape; Windows only
+/// gives special meaning to runs of backslashes immediately before a quote (or the closing quote).
+/// Always quoting each argument makes whitespace, quotes, and non-ASCII paths unambiguous.
 fn quote_response_file_argument(arg: &str, syntax: ResponseFileSyntax) -> String {
     match syntax {
         ResponseFileSyntax::Gnu => {
@@ -496,8 +502,9 @@ fn compiler_driver_response_file_contents(args: &[String], syntax: ResponseFileS
     contents
 }
 
-fn write_compiler_driver_response_file(path: &Path, args: &[String]) -> Result<()> {
-    let contents = compiler_driver_response_file_contents(args, compiler_driver_response_syntax());
+fn write_compiler_driver_response_file(path: &Path, args: &[String], cc: &str) -> Result<()> {
+    let contents =
+        compiler_driver_response_file_contents(args, compiler_driver_response_syntax(cc));
     std::fs::write(path, contents)
         .with_context(|| format!("writing compiler-driver response file {}", path.display()))
 }
@@ -519,6 +526,7 @@ fn prepare_link_inputs<'a>(
     objects: &'a [PathBuf],
     extra: &'a [String],
     response_file: &Path,
+    cc: &str,
 ) -> Result<PreparedLinkInputs<'a>> {
     if cfg!(windows) {
         let mut inputs = Vec::with_capacity(objects.len() + extra.len());
@@ -529,7 +537,7 @@ fn prepare_link_inputs<'a>(
                 .collect::<Result<Vec<_>>>()?,
         );
         inputs.extend(extra.iter().cloned());
-        write_compiler_driver_response_file(response_file, &inputs)?;
+        write_compiler_driver_response_file(response_file, &inputs, cc)?;
         Ok(PreparedLinkInputs::ResponseFile(
             response_file.to_path_buf(),
         ))
@@ -691,7 +699,7 @@ fn validate_replay_output(out: &Path, expected_exit_code: Option<i32>) -> Result
 
 fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Result<Duration> {
     let out = bench_output_path(dir, linker);
-    let inputs = prepare_link_inputs(objects, &[], &out.with_extension("rsp"))?;
+    let inputs = prepare_link_inputs(objects, &[], &out.with_extension("rsp"), &args.cc)?;
 
     for _ in 0..args.warmup {
         link_once(args, &inputs, linker, &out)?;
@@ -748,7 +756,7 @@ fn time_link_replay(
     trials: usize,
 ) -> Result<Duration> {
     let out = bench_output_path(out_dir, linker);
-    let inputs = prepare_link_inputs(objects, extra, &out.with_extension("rsp"))?;
+    let inputs = prepare_link_inputs(objects, extra, &out.with_extension("rsp"), cc)?;
     for _ in 0..warmup {
         link_once_replay(cc, &inputs, linker, &out)?;
     }
@@ -1214,6 +1222,30 @@ mod tests {
     }
 
     #[test]
+    fn response_file_syntax_follows_clang_driver_mode_not_host_os() {
+        assert_eq!(
+            compiler_driver_response_syntax("clang.exe"),
+            ResponseFileSyntax::Gnu
+        );
+        assert_eq!(
+            compiler_driver_response_syntax(r"C:\Program Files\LLVM\bin\clang.exe"),
+            ResponseFileSyntax::Gnu
+        );
+        assert_eq!(
+            compiler_driver_response_syntax("clang-cl.exe"),
+            ResponseFileSyntax::Windows
+        );
+        assert_eq!(
+            compiler_driver_response_syntax(r"C:\Program Files\LLVM\bin\clang-cl.exe"),
+            ResponseFileSyntax::Windows
+        );
+        assert_eq!(
+            compiler_driver_response_syntax(r"C:\LLVM\CLANG-CL.EXE"),
+            ResponseFileSyntax::Windows
+        );
+    }
+
+    #[test]
     fn prepared_link_inputs_writes_windows_response_file_before_linking() {
         let dir = unique_tmp_dir("prepared-inputs");
         let objects = vec![
@@ -1222,7 +1254,7 @@ mod tests {
         ];
         let extra = vec!["-lcustom library".to_string()];
         let response_file = dir.join("bench.rsp");
-        let prepared = prepare_link_inputs(&objects, &extra, &response_file).unwrap();
+        let prepared = prepare_link_inputs(&objects, &extra, &response_file, "clang.exe").unwrap();
 
         if cfg!(windows) {
             assert_eq!(
@@ -1233,7 +1265,7 @@ mod tests {
                         objects[1].to_string_lossy().into_owned(),
                         extra[0].clone(),
                     ],
-                    ResponseFileSyntax::Windows,
+                    ResponseFileSyntax::Gnu,
                 )
             );
             assert!(matches!(&prepared, PreparedLinkInputs::ResponseFile(_)));
