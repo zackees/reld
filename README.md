@@ -36,13 +36,15 @@ means concretely, and what part of it is shipped vs. designed.
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
 with independent `latest.json` and `history.jsonl` per target. Linux measures reld's native
-engine; Windows and macOS mark reld **`pending`** (unsupported-by-design in this clang-based
-harness) until the rustc-based bridge measurement lands — an explicit, documented state that
-`latest.json` and the charts render distinctly from a failed `n/a`. Each platform gates its
-**expected** linkers in CI (Linux `bfd`/`lld`/`mold`/`wild`/`reld`, Windows `link.exe`/`lld`,
-macOS `ld`/`ld64.lld`): a missing timing for an expected linker fails the build, so coverage can
-never silently understate itself (see [#63](https://github.com/zackees/reld/issues/63)). Every
-chart labels reference, native, and bridge series modes in its generated metadata.*
+engine; Windows and macOS measure reld through their target-correct `lld` **bridge** front doors.
+`latest.json` records both the series `mode` (`native` or `bridge`) and concrete `engine` (`reld`
+on Linux, `lld-link` on Windows, `ld64.lld` on macOS), and the charts label bridge results so they
+are never presented as native COFF/Mach-O throughput. Each platform gates its **expected** linkers
+in CI (Linux `bfd`/`lld`/`mold`/`wild`/`reld`, Windows `link.exe`/`lld`/`reld`, macOS
+`ld`/`ld64.lld`/`reld`): a missing timing or a missing/duplicate/unexpected synthetic scenario
+fails the build, so coverage can never silently understate itself (see
+[#63](https://github.com/zackees/reld/issues/63)). The generated artifact freshness guard also
+requires every published chart to name the source SHA and current generation time.*
 <!-- BENCHMARK:END -->
 
 ## What it is
