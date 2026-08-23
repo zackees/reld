@@ -100,4 +100,6 @@ def test_msvc_linker_uses_visual_studio_tools_instead_of_path(
     monkeypatch.setenv("VCToolsInstallDir", str(tools))
 
     assert _msvc_linker() == expected
-    assert _msvc_path_env()["PATH"].split(os.pathsep)[0] == str(expected.parent)
+    env = _msvc_path_env()
+    assert env["PATH"].split(os.pathsep)[0] == str(expected.parent)
+    assert env["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"] == str(expected)

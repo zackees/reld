@@ -125,16 +125,12 @@ jobs:
           TARGET: ${{ matrix.target }}
           RELD_DRIVER: ${{ matrix.reld_driver }}
           CARGO_COMMAND: cargo
-        run: |
-          set -euo pipefail
-          mkdir -p benchmark-output
-          test -f "$RELD_DRIVER"
-          # The harness compiles generated workloads once before `time_link`; every warm-up and
-          # trial is link-only. `--reld` supplies the target-correct bridge front door, so bridge
-          # timing is real data rather than the former permanent pending marker.
-          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- \
-            --target "$TARGET" --trials 5 --warmup 1 --reld "$RELD_DRIVER" \
-            > "benchmark-output/benchmark.log" 2>&1
+        # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. The
+        # harness still compiles generated workloads once before timing link-only iterations.
+        run: >-
+          uv run --no-sync python -m ci.benchmark_runner
+          --target "$TARGET" --reld "$RELD_DRIVER"
+          --output benchmark-output/benchmark.log --trials 5 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
         shell: bash

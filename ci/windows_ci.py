@@ -144,9 +144,11 @@ def _msvc_linker() -> Path:
 
 def _msvc_path_env() -> dict[str, str]:
     env = os.environ.copy()
-    linker_dir = str(_msvc_linker().parent)
+    linker = _msvc_linker()
+    linker_dir = str(linker.parent)
     inherited = env.get("PATH")
     env["PATH"] = os.pathsep.join((linker_dir, inherited)) if inherited else linker_dir
+    env["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"] = str(linker)
     return env
 
 
@@ -184,17 +186,15 @@ def install_benchmark_linkers() -> None:
     llvm_bin = program_files / "LLVM" / "bin"
     _require_file(llvm_bin / "clang.exe", "clang.exe")
     _require_file(llvm_bin / "lld-link.exe", "lld-link.exe")
-    msvc_bin = _msvc_linker().parent
+    _msvc_linker()  # Fail setup immediately if the pinned Visual Studio toolset is incomplete.
     github_path = Path(_required_env("GITHUB_PATH"))
     with github_path.open("a", encoding="utf-8", newline="") as handle:
         handle.write(str(llvm_bin) + "\n")
-        # GITHUB_PATH entries take effect for subsequent steps. Write MSVC last so its link.exe
-        # wins over both LLVM/Git additions when Actions prepends the entries.
-        handle.write(str(msvc_bin) + "\n")
 
 
 def native_tests() -> None:
-    _run(_cargo("build", "--workspace", "--all-targets"))
+    env = _msvc_path_env()
+    _run(_cargo("build", "--workspace", "--all-targets"), env=env)
     commands = [
         _cargo(
             "test",
@@ -213,7 +213,7 @@ def native_tests() -> None:
     ]
     log = Path("platform-tests.log")
     for index, command in enumerate(commands):
-        _run_logged(command, log, append=index > 0)
+        _run_logged(command, log, append=index > 0, env=env)
 
 
 def sqlite_bridge() -> None:
@@ -288,7 +288,7 @@ def benchmark_smoke() -> None:
     workspace = _workspace()
     runner_temp = _runner_temp()
     benchmark_env = _msvc_path_env()
-    _run(_cargo("build", "-p", "reld", "--bin", "reld-link"))
+    _run(_cargo("build", "-p", "reld", "--bin", "reld-link"), env=benchmark_env)
     reld = _require_file(workspace / "target" / "debug" / "reld-link.exe", "reld-link.exe")
 
     generated = _reset_under(runner_temp / "reld-bench-generated", runner_temp)
@@ -356,7 +356,10 @@ def benchmark_smoke() -> None:
 
 def build_benchmark_driver() -> None:
     workspace = _workspace()
-    _run(_cargo("build", "--release", "-p", "reld", "--bin", "reld-link"))
+    _run(
+        _cargo("build", "--release", "-p", "reld", "--bin", "reld-link"),
+        env=_msvc_path_env(),
+    )
     driver = _require_file(workspace / "target" / "release" / "reld-link.exe", "reld-link.exe")
     print(f"Using COFF bridge driver: {driver}")
 

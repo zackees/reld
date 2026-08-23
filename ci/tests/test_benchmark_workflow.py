@@ -38,6 +38,7 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     assert "powershell" not in text.lower()
     assert "uv run --no-sync python -m ci.windows_ci install-benchmark-linkers" in text
     assert "uv run --no-sync python -m ci.windows_ci build-benchmark-driver" in text
+    assert "uv run --no-sync python -m ci.benchmark_runner" in text
     assert "ilammy/msvc-dev-cmd@" in text
 
 
