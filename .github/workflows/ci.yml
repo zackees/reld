@@ -52,6 +52,8 @@ jobs:
     name: Phase 1 / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      PHASE1_UPSTREAM_FAILED: "false"
     strategy:
       fail-fast: false
       matrix:
@@ -454,11 +456,14 @@ jobs:
           path: benchmark-macos-arm64.md
           if-no-files-found: warn
 
+      - name: Record an earlier phase failure for the summary
+        if: failure()
+        shell: bash
+        run: printf 'PHASE1_UPSTREAM_FAILED=true\n' >> "${GITHUB_ENV}"
+
       - name: Publish Linux counts and skips
         if: always() && matrix.kind == 'linux-gnu'
         shell: bash
-        env:
-          PHASE1_UPSTREAM_FAILED: ${{ failure() }}
         run: >-
           uv run --no-sync python ci/phase1_summary.py --job linux-gnu
           --log platform-tests.log --log acceptance-tests.log --log difftest.log
@@ -469,8 +474,6 @@ jobs:
       - name: Publish Windows GNU counts and skips
         if: always() && matrix.kind == 'windows-gnu'
         shell: bash
-        env:
-          PHASE1_UPSTREAM_FAILED: ${{ failure() }}
         run: >-
           uv run --no-sync python ci/phase1_summary.py --job windows-gnu --log platform-tests.log --versions versions.txt
           --upstream-failed "$PHASE1_UPSTREAM_FAILED"
@@ -478,8 +481,6 @@ jobs:
       - name: Publish Windows MSVC counts and skips
         if: always() && matrix.kind == 'windows-msvc'
         shell: bash
-        env:
-          PHASE1_UPSTREAM_FAILED: ${{ failure() }}
         run: >-
           uv run --no-sync python ci/phase1_summary.py --job windows-msvc --log platform-tests.log --versions versions.txt
           --upstream-failed "$PHASE1_UPSTREAM_FAILED"
@@ -487,8 +488,6 @@ jobs:
       - name: Publish macOS counts and skips
         if: always() && matrix.kind == 'macos-arm64'
         shell: bash
-        env:
-          PHASE1_UPSTREAM_FAILED: ${{ failure() }}
         run: >-
           uv run --no-sync python ci/phase1_summary.py --job macos-arm64 --log platform-tests.log --versions versions.txt
           --upstream-failed "$PHASE1_UPSTREAM_FAILED"

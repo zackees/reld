@@ -94,6 +94,10 @@ def test_phase1_summary_only_relaxes_missing_log_validation_after_failure():
     text = WORKFLOW.read_text()
 
     # The always() summary steps need GitHub's prior-step state explicitly: the summary script
-    # cannot infer whether an absent log was skipped because an earlier step failed.
-    assert text.count("PHASE1_UPSTREAM_FAILED: ${{ failure() }}") == 4
+    # cannot infer whether an absent log was skipped because an earlier step failed. Status
+    # functions are legal in a step `if`, not in a step `env` expression.
+    assert 'PHASE1_UPSTREAM_FAILED: "false"' in text
+    assert "if: failure()" in text
+    assert "PHASE1_UPSTREAM_FAILED=true" in text
+    assert "PHASE1_UPSTREAM_FAILED: ${{ failure() }}" not in text
     assert text.count("--upstream-failed") == 4
