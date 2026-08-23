@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   benchmark:
@@ -61,11 +61,9 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y clang lld mold python3-pil
-          cargo install --locked wild-linker || echo "wild unavailable; will report n/a"
-          if command -v wild >/dev/null 2>&1; then
-            ln -sf "$(command -v wild)" "$HOME/.cargo/bin/ld.wild"
-          fi
-          for l in ld.lld ld.mold; do
+          cargo install --locked wild-linker
+          ln -sf "$(command -v wild)" "$HOME/.cargo/bin/ld.wild"
+          for l in ld.lld ld.mold ld.wild; do
             command -v "$l" >/dev/null || { echo "::error::$l missing"; exit 1; }
           done
 
@@ -125,11 +123,13 @@ jobs:
           TARGET: ${{ matrix.target }}
           RELD_DRIVER: ${{ matrix.reld_driver }}
           CARGO_COMMAND: cargo
-        # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. The
-        # harness still compiles generated workloads once before timing link-only iterations.
+        # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. Cargo
+        # compiles the one sqlite-bridge Rust project once per LTO configuration; every timed
+        # iteration replays only rustc's captured target-native final linker invocation.
         run: >-
           uv run --no-sync python -m ci.benchmark_runner
           --target "$TARGET" --reld "$RELD_DRIVER"
+          --manifest ci/e2e/sqlite-bridge/Cargo.toml
           --output benchmark-output/benchmark.log --trials 5 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
@@ -152,6 +152,7 @@ jobs:
           test -f benchmark-output/benchmark.log
           uv run --no-sync python -m ci.benchmark_stats \
             --input-log benchmark-output/benchmark.log --summary-only \
+            --metadata-output benchmark-output/metadata.json \
             --publish-outcome "raw benchmark artifact uploaded; aggregation pending"
 
       - name: Upload raw benchmark log
@@ -159,7 +160,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-log-${{ matrix.target }}
-          path: benchmark-output/benchmark.log
+          path: |
+            benchmark-output/benchmark.log
+            benchmark-output/metadata.json
           if-no-files-found: error
 
   aggregate:
@@ -167,6 +170,8 @@ jobs:
     needs: benchmark
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -204,6 +209,7 @@ jobs:
               || : > "benchmark-stats/$target/history.jsonl"
             uv run --no-sync python -m ci.benchmark_stats \
               --input-log "benchmark-input/benchmark-log-$target/benchmark.log" \
+              --metadata-path "benchmark-input/benchmark-log-$target/metadata.json" \
               --output-dir "benchmark-stats/$target"
           done
 

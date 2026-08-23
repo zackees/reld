@@ -11,3 +11,24 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+# The public link benchmark compiles this one application once per profile, captures rustc's
+# target-native final linker command, then replays only that command. Keep optimization settings
+# identical except for Cargo's LTO mode so the three chart rows describe one idiomatic project.
+[profile.linkbench-no-lto]
+inherits = "release"
+lto = false
+incremental = false
+codegen-units = 16
+
+[profile.linkbench-thin-lto]
+inherits = "release"
+lto = "thin"
+incremental = false
+codegen-units = 16
+
+[profile.linkbench-full-lto]
+inherits = "release"
+lto = "fat"
+incremental = false
+codegen-units = 16

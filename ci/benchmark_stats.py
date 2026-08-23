@@ -1,8 +1,8 @@
 """Parse reld-bench markdown output and render the published benchmark chart.
 
 Contract with the benchmark runner is deliberately tiny: print a markdown table under a
-heading that starts with ``## Link Benchmark:``, whose first column is ``Scenario`` and whose
-remaining columns are linker names. Cells are seconds, or ``n/a`` when a linker was not
+heading that starts with ``## Link Benchmark:``, whose first column is ``Configuration`` and
+whose remaining columns are linker names. Cells are seconds, or ``n/a`` when a linker was not
 available on the runner.
 
 Outputs (all into ``--output-dir``):
@@ -33,7 +33,8 @@ from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+BENCHMARK_ID = "sqlite-bridge-lto-v1"
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
@@ -47,12 +48,12 @@ BENCHMARK_TARGETS = (
     ("aarch64-apple-darwin", "macOS"),
 )
 
-# The public synthetic workload is deliberately stable. Missing, duplicate, or renamed rows are
-# incomparable to history and must never reach the published branch.
+# The public workload/configuration matrix is deliberately stable. Missing, duplicate, or renamed
+# rows are incomparable to history and must never reach the published branch.
 CANONICAL_SCENARIOS = (
-    "small (16 units)",
-    "medium (128 units)",
-    "large (512 units)",
+    "no-LTO",
+    "ThinLTO",
+    "full-LTO",
 )
 
 # Shared public-artifact contract for the coverage gate and remote freshness watchdog.
@@ -288,6 +289,11 @@ def collect_metadata(report: Report) -> dict[str, Any]:
         "git_ref": os.environ.get("GITHUB_REF", ""),
         "run_url": f"https://github.com/{repo}/actions/runs/{run_id}" if run_id else None,
         "target": report.label,
+        "benchmark": {
+            "id": BENCHMARK_ID,
+            "workload": "ci/e2e/sqlite-bridge",
+            "configurations": list(CANONICAL_SCENARIOS),
+        },
         "runner": {
             "os": target_os(report.label) or platform.system(),
             "arch": platform.machine(),
@@ -301,9 +307,18 @@ def collect_metadata(report: Report) -> dict[str, Any]:
             "ld.lld": _tool_version(["ld.lld", "--version"]),
         },
         "raw_image_base_url": raw_base,
-        "raw_image_url": f"{raw_base}/{IMAGE_NAME}",
+        "raw_image_url": f"{raw_base}/{report.label}/{IMAGE_NAME}",
         "pages_url": os.environ.get("RELD_BENCHMARK_PAGES_URL"),
     }
+
+
+def read_metadata(path: Path, report: Report) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("metadata root is not an object")
+    if payload.get("target") != report.label:
+        raise ValueError(f"metadata target {payload.get('target')!r} does not match {report.label!r}")
+    return payload
 
 
 def render_summary(report: Report, meta: dict[str, Any], publish_outcome: str = "rendered") -> str:
@@ -323,7 +338,7 @@ def render_summary(report: Report, meta: dict[str, Any], publish_outcome: str = 
         f"| generated at | {meta.get('generated_at') or 'unknown'} |",
         f"| publish outcome | {publish_outcome} |",
         "",
-        f"Timings by scenario: {headings}",
+        f"Timings by configuration: {headings}",
         "",
         "| Series | Mode | Engine | Status | Timings (seconds) |",
         "|:-------|:-----|:-------|:-------|:------------------|",
@@ -356,13 +371,16 @@ def render_readme_block() -> str:
     prose = (
         "*Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and\n"
         "published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),\n"
-        "with independent `latest.json` and `history.jsonl` per target. Linux measures reld's native\n"
+        "with independent `latest.json` and `history.jsonl` per target. Each chart links the same\n"
+        "idiomatic two-crate Rust + bundled SQLite project in `no-LTO`, `ThinLTO`, and `full-LTO`\n"
+        "configurations; compilation happens once per configuration and only the captured final link\n"
+        "is timed. Linux measures reld's native\n"
         "engine; Windows and macOS measure reld through their target-correct `lld` **bridge** front doors.\n"
         "`latest.json` records both the series `mode` (`native` or `bridge`) and concrete `engine` (`reld`\n"
         "on Linux, `lld-link` on Windows, `ld64.lld` on macOS), and the charts label bridge results so they\n"
         "are never presented as native COFF/Mach-O throughput. Each platform gates its **expected** linkers\n"
         "in CI (Linux `bfd`/`lld`/`mold`/`wild`/`reld`, Windows `link.exe`/`lld`/`reld`, macOS\n"
-        "`ld`/`ld64.lld`/`reld`): a missing timing or a missing/duplicate/unexpected synthetic scenario\n"
+        "`ld`/`ld64.lld`/`reld`): a missing timing or a missing/duplicate/unexpected configuration\n"
         "fails the build, so coverage can never silently understate itself (see\n"
         "[#63](https://github.com/zackees/reld/issues/63)). The generated artifact freshness guard also\n"
         "requires every published chart to name the source SHA and current generation time.*"
@@ -413,6 +431,10 @@ def verify_current_outputs(out_root: Path, expected_sha: str, max_age_seconds: i
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             errors.append(f"{target}: invalid latest.json metadata ({error})")
             continue
+        if payload.get("schema_version") != SCHEMA_VERSION:
+            errors.append(f"{target}: schema version {payload.get('schema_version')!r} != {SCHEMA_VERSION}")
+        if payload.get("benchmark_id") != BENCHMARK_ID:
+            errors.append(f"{target}: benchmark id {payload.get('benchmark_id')!r} != {BENCHMARK_ID!r}")
         if meta.get("target") != target:
             errors.append(f"{target}: metadata target is {meta.get('target')!r}")
         if expected_sha and meta.get("git_sha") != expected_sha:
@@ -460,6 +482,8 @@ def verify_remote_freshness(
             payload = fetch_json(url)
             if payload.get("schema_version") != SCHEMA_VERSION:
                 errors.append(f"{target}: schema version {payload.get('schema_version')!r} != {SCHEMA_VERSION}")
+            if payload.get("benchmark_id") != BENCHMARK_ID:
+                errors.append(f"{target}: benchmark id {payload.get('benchmark_id')!r} != {BENCHMARK_ID!r}")
             meta = payload["metadata"]
             if not isinstance(meta, dict):
                 raise ValueError("metadata is not an object")
@@ -479,14 +503,17 @@ def verify_remote_freshness(
                 if not isinstance(result, dict):
                     errors.append(f"{target}: result entry is not an object")
                     continue
-                key = (str(result.get("scenario", "")), str(result.get("series", "")))
+                key = (
+                    str(result.get("configuration", "")),
+                    str(result.get("series", "")),
+                )
                 if key in cells:
                     errors.append(f"{target}: duplicate result for {key[0]!r}/{key[1]!r}")
                 cells[key] = result
             actual_scenarios = {scenario for scenario, _ in cells}
             unexpected = sorted(actual_scenarios - set(CANONICAL_SCENARIOS))
             if unexpected:
-                errors.append(f"{target}: unexpected synthetic scenario(s): {', '.join(unexpected)}")
+                errors.append(f"{target}: unexpected configuration(s): {', '.join(unexpected)}")
             for series in EXPECTED_SERIES[target]:
                 for scenario in CANONICAL_SCENARIOS:
                     cell = cells.get((scenario, series))
@@ -639,7 +666,7 @@ td.na{{color:#7d8590}}td.pending{{color:#bb8009}}
 <h1>reld &mdash; link benchmark</h1>
 <p>{meta["generated_at"]} &middot; {meta.get("target", "")} &middot; {meta["runner"]["platform"]}</p>
 <img src="{IMAGE_NAME}" alt="benchmark chart">
-<table><thead><tr><th>Scenario</th>{head}</tr></thead><tbody>{body}</tbody></table>
+<table><thead><tr><th>Configuration</th>{head}</tr></thead><tbody>{body}</tbody></table>
 <p><a href="https://github.com/{meta["repository"]}">{meta["repository"]}</a></p>
 </body></html>
 """
@@ -655,10 +682,11 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
     runner_os = meta.get("runner", {}).get("os", "")
     payload = {
         "schema_version": SCHEMA_VERSION,
+        "benchmark_id": BENCHMARK_ID,
         "metadata": meta,
         "results": [
             {
-                "scenario": r.scenario,
+                "configuration": r.scenario,
                 "series": r.series,
                 "seconds": r.seconds,
                 # "measured" | "pending" | "na" — pending (unsupported-by-design, documented) is
@@ -674,10 +702,20 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
     (out_dir / "latest.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     history = out_dir / "history.jsonl"
-    prior = history.read_text(encoding="utf-8").splitlines() if history.exists() else []
+    old_lines = history.read_text(encoding="utf-8").splitlines() if history.exists() else []
+    prior = []
+    for line in old_lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("schema_version") == SCHEMA_VERSION and entry.get("benchmark_id") == BENCHMARK_ID:
+            prior.append(line)
     prior.append(
         json.dumps(
             {
+                "schema_version": SCHEMA_VERSION,
+                "benchmark_id": BENCHMARK_ID,
                 "ts": meta["generated_at"],
                 "sha": meta.get("git_sha", ""),
                 "target": meta.get("target", ""),
@@ -696,6 +734,16 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ci.benchmark_stats")
     p.add_argument("--output-dir", type=Path, default=Path("benchmark-stats"))
     p.add_argument("--log-path", type=Path)
+    p.add_argument(
+        "--metadata-output",
+        type=Path,
+        help="write native runner metadata beside the raw benchmark log",
+    )
+    p.add_argument(
+        "--metadata-path",
+        type=Path,
+        help="use metadata captured on the benchmark runner while rendering",
+    )
     p.add_argument(
         "--summary-only",
         action="store_true",
@@ -815,7 +863,14 @@ def main(argv: list[str] | None = None) -> int:
         text = args.input_log.read_text(encoding="utf-8")
 
     report = parse_benchmark_log(text)
-    meta = collect_metadata(report)
+    try:
+        meta = read_metadata(args.metadata_path, report) if args.metadata_path else collect_metadata(report)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        sys.stderr.write(f"invalid benchmark metadata: {error}\n")
+        return 1
+    if args.metadata_output:
+        args.metadata_output.parent.mkdir(parents=True, exist_ok=True)
+        args.metadata_output.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if args.summary_only:
         summary = render_summary(report, meta, args.publish_outcome)
         print(summary)

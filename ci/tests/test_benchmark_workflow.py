@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "benchmark-stats.yml"
+OBSOLETE_ASSET_WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "benchmark-assets.yml"
 
 
 def test_benchmark_workflow_publishes_one_directory_per_target():
@@ -17,6 +18,7 @@ def test_benchmark_workflow_publishes_one_directory_per_target():
     assert "needs: benchmark" in text
     assert "benchmark-stats/$target" in text
     assert "github.event.repository.default_branch" in text
+    assert not OBSOLETE_ASSET_WORKFLOW.exists()
 
 
 def test_benchmark_workflow_gates_expected_linker_coverage():
@@ -39,6 +41,10 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     assert "uv run --no-sync python -m ci.windows_ci install-benchmark-linkers" in text
     assert "uv run --no-sync python -m ci.windows_ci build-benchmark-driver" in text
     assert "uv run --no-sync python -m ci.benchmark_runner" in text
+    assert "--manifest ci/e2e/sqlite-bridge/Cargo.toml" in text
+    assert "--print link-args" not in text  # Python owns capture/replay, not shell YAML.
+    assert "will report n/a" not in text
+    assert "cargo install --locked wild-linker ||" not in text
     assert "ilammy/msvc-dev-cmd@" in text
 
 
@@ -46,12 +52,16 @@ def test_benchmark_workflow_reports_and_guards_generated_artifacts():
     text = WORKFLOW.read_text()
 
     assert "Report per-target timings and metadata" in text
+    assert "--metadata-output benchmark-output/metadata.json" in text
+    assert '--metadata-path "benchmark-input/benchmark-log-$target/metadata.json"' in text
     assert "--summary-only" in text
     assert "--print-targets" in text
     assert "--check-readme README.md" in text
     assert "--verify-current-outputs benchmark-stats" in text
     assert "Report benchmark publication outcome" in text
     assert "GITHUB_STEP_SUMMARY" in text
+    assert "permissions:\n  contents: read" in text
+    assert "    permissions:\n      contents: write" in text
 
 
 def test_freshness_watchdog_runs_after_failures_only_on_schedule_or_default_branch():

@@ -40,9 +40,7 @@ from ci.benchmark_stats import (
 # Linkers that MUST produce a real timing on each platform. reld is native on Linux and measured
 # through its target-correct lld bridge front door on Windows/macOS. A bridge result is still a
 # real result: leaving it pending would let the published chart hide a supported product path.
-EXPECTED_LINKERS: dict[str, list[str]] = {
-    target: list(series) for target, series in EXPECTED_SERIES.items()
-}
+EXPECTED_LINKERS: dict[str, list[str]] = {target: list(series) for target, series in EXPECTED_SERIES.items()}
 
 # Retained as a distinct policy mechanism for future documented, intentionally unsupported
 # series. There are deliberately no permanent benchmark gaps after the bridge measurement slice.
@@ -88,50 +86,38 @@ class CoverageResult:
         return not self.violations
 
 
-def check_coverage(
-    report: Report, target: str, *, require_canonical_scenarios: bool = True
-) -> CoverageResult:
+def check_coverage(report: Report, target: str, *, require_canonical_scenarios: bool = True) -> CoverageResult:
     result = CoverageResult(target)
     expected = expected_for(target)
     pending = pending_for(target)
 
     if not expected and not pending:
-        result.violations.append(
-            ("<policy>", f"no coverage policy defined for target {target!r}")
-        )
+        result.violations.append(("<policy>", f"no coverage policy defined for target {target!r}"))
         return result
 
-    # The charts are a public synthetic benchmark, so their scenario matrix is part of the
-    # contract. Report.scenarios() intentionally de-duplicates for rendering; inspect one
+    # The charts use one public workload, so its configuration matrix is part of the contract.
+    # Report.scenarios() intentionally de-duplicates for rendering; inspect one
     # complete column instead so a repeated markdown row cannot quietly collapse into one bar.
     if not report.series:
-        result.violations.append(("<scenarios>", "benchmark table has no linker series"))
+        result.violations.append(("<configurations>", "benchmark table has no linker series"))
     elif require_canonical_scenarios:
         scenario_rows = [r.scenario for r in report.rows if r.series == report.series[0]]
         duplicates = sorted({s for s in scenario_rows if scenario_rows.count(s) > 1})
         missing_scenarios = [s for s in CANONICAL_SCENARIOS if s not in scenario_rows]
         unexpected = sorted(set(scenario_rows) - set(CANONICAL_SCENARIOS))
         if duplicates:
-            result.violations.append(
-                ("<scenarios>", f"duplicate synthetic scenario(s): {', '.join(duplicates)}")
-            )
+            result.violations.append(("<configurations>", f"duplicate configuration(s): {', '.join(duplicates)}"))
         if missing_scenarios:
-            result.violations.append(
-                ("<scenarios>", f"missing synthetic scenario(s): {', '.join(missing_scenarios)}")
-            )
+            result.violations.append(("<configurations>", f"missing configuration(s): {', '.join(missing_scenarios)}"))
         if unexpected:
-            result.violations.append(
-                ("<scenarios>", f"unexpected synthetic scenario(s): {', '.join(unexpected)}")
-            )
+            result.violations.append(("<configurations>", f"unexpected configuration(s): {', '.join(unexpected)}"))
 
     for linker in expected:
         status = report.series_status(linker)
         result.statuses[linker] = status
         if status != "measured":
             detail = "reported n/a (failed/unavailable)" if status == "na" else f"reported {status}"
-            result.violations.append(
-                (linker, f"expected linker {linker!r} must be measured but {detail}")
-            )
+            result.violations.append((linker, f"expected linker {linker!r} must be measured but {detail}"))
             continue
         # Measured overall, but an expected linker must produce a real timing for *every*
         # scenario — a partial n/a is a silent regression, exactly what #63 forbids.
@@ -140,8 +126,7 @@ def check_coverage(
             result.violations.append(
                 (
                     linker,
-                    f"expected linker {linker!r} has no timing for scenario(s): "
-                    f"{', '.join(missing)}",
+                    f"expected linker {linker!r} has no timing for scenario(s): " f"{', '.join(missing)}",
                 )
             )
 
@@ -154,8 +139,7 @@ def check_coverage(
             result.violations.append(
                 (
                     linker,
-                    f"pending-by-design linker {linker!r} reported a bare n/a; it must be marked "
-                    f"pending ({reason})",
+                    f"pending-by-design linker {linker!r} reported a bare n/a; it must be marked " f"pending ({reason})",
                 )
             )
 
@@ -186,9 +170,7 @@ def render_summary(report: Report, result: CoverageResult) -> str:
         # ASCII only: this string is also printed to stdout, which on the Windows CI leg is a
         # redirected (non-tty) stream using the cp1252 locale encoding — emoji would raise
         # UnicodeEncodeError and crash the gate even when coverage is healthy.
-        mark = {"measured": "OK measured", "pending": "-- pending", "na": "XX n/a"}.get(
-            status, status
-        )
+        mark = {"measured": "OK measured", "pending": "-- pending", "na": "XX n/a"}.get(status, status)
         lines.append(f"| {linker} | {role(linker)} | {mark} |")
 
     lines.append("")
@@ -212,10 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--allow-noncanonical-scenarios",
         action="store_true",
-        help=(
-            "check linker coverage for a focused smoke/replay table without requiring the "
-            "public small/medium/large scenario manifest"
-        ),
+        help=("check linker coverage for a focused smoke/replay table without requiring the " "public no-LTO/ThinLTO/full-LTO configuration manifest"),
     )
     args = p.parse_args(argv)
 
@@ -238,11 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(summary)
 
     if not result.ok:
-        sys.stderr.write(
-            f"benchmark coverage gate failed for {target}: "
-            + "; ".join(reason for _, reason in result.violations)
-            + "\n"
-        )
+        sys.stderr.write(f"benchmark coverage gate failed for {target}: " + "; ".join(reason for _, reason in result.violations) + "\n")
         return 1
     return 0
 
