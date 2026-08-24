@@ -401,6 +401,25 @@ def _validate_executable(output: Path, *, cwd: Path, environment: dict[str, str]
         raise BenchmarkError(f"linked output failed its OK oracle ({completed.returncode}):\n" f"{completed.stdout}{completed.stderr}")
 
 
+def _discard_verified_output(output: Path) -> None:
+    """Discard one verified output, quarantining a transiently locked Windows executable."""
+    try:
+        output.unlink()
+    except PermissionError:
+        if sys.platform != "win32":
+            raise
+        # Windows Defender or the loader can retain a handle briefly after process exit. Mirror
+        # `clud trash` semantics: quarantine the exact artifact once, without delete retries or
+        # guessed process termination. The Actions workspace itself is ephemeral.
+        quarantine = output.with_name(f".{output.name}.trash-{time.time_ns()}")
+        try:
+            output.replace(quarantine)
+        except PermissionError:
+            # Every invocation has a unique output path, so even a non-renamable quarantined file
+            # cannot block the next replay. The hosted runner reclaims the workspace after the job.
+            pass
+
+
 def benchmark_replay(
     captured: LinkCommand,
     linker: Linker,
@@ -414,8 +433,7 @@ def benchmark_replay(
 ) -> float:
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if captured.windows else ""
-    output = output_dir / f"app-{linker.label.replace('.', '-')}{suffix}"
-    response_file = output.with_suffix(output.suffix + ".rsp")
+    output_stem = f"app-{linker.label.replace('.', '-')}"
     driver_linker_dir = None
     if not captured.windows and use_driver_shim:
         if linker.path is None:
@@ -425,28 +443,33 @@ def benchmark_replay(
         linker_shim = driver_linker_dir / "ld"
         linker_shim.unlink(missing_ok=True)
         linker_shim.symlink_to(linker.path)
-    command, response = replay_command(
-        captured,
-        linker=linker.label,
-        linker_path=linker.path,
-        output=output,
-        response_file=response_file,
-        driver_linker_dir=driver_linker_dir,
-    )
-    if response is not None:
-        response_file.write_text(response, encoding="utf-8", newline="\n")
+    def prepare_replay(output: Path) -> list[str]:
+        response_file = output.with_suffix(output.suffix + ".rsp")
+        command, response = replay_command(
+            captured,
+            linker=linker.label,
+            linker_path=linker.path,
+            output=output,
+            response_file=response_file,
+            driver_linker_dir=driver_linker_dir,
+        )
+        if response is not None:
+            response_file.write_text(response, encoding="utf-8", newline="\n")
+        return command
 
-    for _ in range(warmup):
-        output.unlink(missing_ok=True)
+    for index in range(warmup):
+        output = output_dir / f"{output_stem}-warmup-{index}{suffix}"
+        command = prepare_replay(output)
         completed = _run_link(command, cwd=cwd, environment=environment)
         if completed.returncode:
             raise BenchmarkError(f"{linker.label} warmup link failed:\n{completed.stdout}{completed.stderr}")
         _validate_executable(output, cwd=cwd, environment=environment)
-        output.unlink()
+        _discard_verified_output(output)
 
     samples: list[float] = []
-    for _ in range(trials):
-        output.unlink(missing_ok=True)
+    for index in range(trials):
+        output = output_dir / f"{output_stem}-trial-{index}{suffix}"
+        command = prepare_replay(output)
         started = time.perf_counter()
         completed = _run_link(command, cwd=cwd, environment=environment)
         elapsed = time.perf_counter() - started
@@ -456,7 +479,7 @@ def benchmark_replay(
         # The oracle runs after the timer stops, once for every produced executable. A bad early
         # trial therefore cannot enter the median and then be hidden by a later overwrite.
         _validate_executable(output, cwd=cwd, environment=environment)
-        output.unlink()
+        _discard_verified_output(output)
 
     return statistics.median(samples)
 

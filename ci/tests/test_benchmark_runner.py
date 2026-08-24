@@ -12,6 +12,7 @@ from ci.benchmark_runner import (
     BenchmarkError,
     LinkCommand,
     Linker,
+    _discard_verified_output,
     assert_significant_workload,
     benchmark_environment,
     benchmark_replay,
@@ -117,13 +118,13 @@ def test_every_warmup_and_trial_executable_is_verified_outside_timing(tmp_path: 
     original_output = tmp_path / "cargo-output"
     captured = LinkCommand("cc", ("main.o", "-o", str(original_output)), original_output, False)
     output_dir = tmp_path / "replays"
-    replay_output = output_dir / "app-test"
     validations: list[Path] = []
 
     def fake_run(command, *, cwd, environment):
-        del command, cwd, environment
-        replay_output.parent.mkdir(parents=True, exist_ok=True)
-        replay_output.write_bytes(b"executable")
+        del cwd, environment
+        output = Path(command[command.index("-o") + 1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"executable")
         return runner_module.subprocess.CompletedProcess([], 0, "", "")
 
     def fake_validate(output, *, cwd, environment):
@@ -145,8 +146,38 @@ def test_every_warmup_and_trial_executable_is_verified_outside_timing(tmp_path: 
         use_driver_shim=False,
     )
 
-    assert validations == [replay_output] * 5
-    assert not replay_output.exists()
+    assert [path.name for path in validations] == [
+        "app-test-warmup-0",
+        "app-test-warmup-1",
+        "app-test-trial-0",
+        "app-test-trial-1",
+        "app-test-trial-2",
+    ]
+    assert all(not path.exists() for path in validations)
+
+
+def test_locked_windows_output_is_quarantined_without_delete_retries(tmp_path: Path, monkeypatch):
+    output = tmp_path / "app-reld.exe"
+    output.write_bytes(b"verified executable")
+    real_unlink = Path.unlink
+    delete_attempts = 0
+
+    def locked_once(path, *args, **kwargs):
+        nonlocal delete_attempts
+        if path == output:
+            delete_attempts += 1
+            raise PermissionError(32, "being used by another process", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner_module.sys, "platform", "win32")
+    monkeypatch.setattr(Path, "unlink", locked_once)
+
+    _discard_verified_output(output)
+
+    assert delete_attempts == 1
+    assert not output.exists()
+    quarantined = list(tmp_path.glob(".app-reld.exe.trash-*"))
+    assert len(quarantined) == 1
 
 
 def test_cargo_capture_command_rejects_shell_fragments():
