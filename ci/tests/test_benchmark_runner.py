@@ -83,6 +83,18 @@ def test_parse_print_link_args_reads_unix_driver_command():
     assert command.executable == "cc"
 
 
+def test_parse_print_link_args_handles_macos_environment_removals():
+    output = (
+        'env -u IPHONEOS_DEPLOYMENT_TARGET -u SDKROOT LC_ALL="C" ' 'PATH="/toolchain/bin:/usr/bin" VSLANG="1033" ZERO_AR_DATE="1" ' '"cc" "symbols.o" "libapp.rlib" "-arch" "arm64" "-o" "/tmp/app"\n'
+    )
+
+    command = parse_print_link_args(output, windows=False)
+
+    assert command.executable == "cc"
+    assert command.arguments[0] == "symbols.o"
+    assert command.output == Path("/tmp/app")
+
+
 def test_replace_output_handles_unix_and_msvc_forms(tmp_path: Path):
     unix = LinkCommand("cc", ("main.o", "-o", "/old/app"), Path("/old/app"), False)
     windows = LinkCommand(

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TextIO
 
 
@@ -57,7 +57,18 @@ class Linker:
 
 
 _QUOTED_ARGUMENT = re.compile(r'"(?:\\.|[^"\\])*"')
-_ENVIRONMENT_PREFIX = re.compile(r'^(?:[A-Za-z_][A-Za-z0-9_]*="(?:\\.|[^"\\])*"\s+)*')
+_LINK_DRIVER_NAMES = {
+    "cc",
+    "clang",
+    "clang++",
+    "gcc",
+    "g++",
+    "ld",
+    "link.exe",
+    "lld-link",
+    "lld-link.exe",
+    "rust-lld",
+}
 
 
 def cargo_capture_command(*, cargo: str, manifest: Path, profile: str, target_dir: Path) -> list[str]:
@@ -107,14 +118,10 @@ def _output_from_arguments(arguments: tuple[str, ...], *, windows: bool) -> Path
 def parse_print_link_args(output: str, *, windows: bool) -> LinkCommand:
     """Parse rustc's Rust-escaped ``--print link-args`` command line."""
     for line in reversed(output.splitlines()):
-        # rustc prefixes the quoted command with target-specific environment assignments such as
-        # LC_ALL, PATH, and VSLANG. The replay inherits the same prepared runner environment.
-        command_text = line[_ENVIRONMENT_PREFIX.match(line).end() :]
-        tokens = _QUOTED_ARGUMENT.findall(command_text)
+        # Rust's Command debug form may prefix target-specific assignments and, on Apple targets,
+        # `env -u ...` removals. Decode all quoted tokens, then locate the actual driver by name.
+        tokens = _QUOTED_ARGUMENT.findall(line)
         if len(tokens) < 2:
-            continue
-        remainder = _QUOTED_ARGUMENT.sub("", command_text)
-        if remainder.strip():
             continue
         try:
             decoded = [ast.literal_eval(token) for token in tokens]
@@ -122,10 +129,14 @@ def parse_print_link_args(output: str, *, windows: bool) -> LinkCommand:
             continue
         if not all(isinstance(argument, str) for argument in decoded):
             continue
-        arguments = tuple(decoded[1:])
-        linked_output = _output_from_arguments(arguments, windows=windows)
-        if linked_output is not None:
-            return LinkCommand(decoded[0], arguments, linked_output, windows)
+        for index, executable in enumerate(decoded[:-1]):
+            name = (PureWindowsPath(executable).name if windows else Path(executable).name).lower()
+            if name not in _LINK_DRIVER_NAMES:
+                continue
+            arguments = tuple(decoded[index + 1 :])
+            linked_output = _output_from_arguments(arguments, windows=windows)
+            if linked_output is not None:
+                return LinkCommand(executable, arguments, linked_output, windows)
     raise BenchmarkError("rustc --print link-args emitted no complete final linker command")
 
 
@@ -245,7 +256,10 @@ def capture_final_link(
     )
     if completed.returncode:
         raise BenchmarkError(f"{configuration.label} compilation/capture failed:\n{completed.stderr}")
-    return parse_print_link_args(completed.stdout, windows=sys.platform == "win32")
+    try:
+        return parse_print_link_args(completed.stdout, windows=sys.platform == "win32")
+    except BenchmarkError as error:
+        raise BenchmarkError(f"{error}\nrustc stdout:\n{completed.stdout}\nrustc stderr:\n{completed.stderr}") from error
 
 
 def _run_link(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
