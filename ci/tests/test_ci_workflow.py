@@ -32,26 +32,16 @@ def test_ci_cross_compiles_release_on_linux():
     assert "CC_x86_64_pc_windows_gnu" in text
 
 
-def test_ci_measures_target_correct_reld_drivers_in_windows_and_macos_benchmarks():
+def test_ci_leaves_benchmarking_to_the_canonical_dispatched_workflow():
     text = WORKFLOW.read_text()
 
-    # The PR smokes measure the real platform bridge drivers; there is no permanent pending
-    # marker once #17's Windows/macOS benchmark slice is present.
-    assert "--reld-pending" not in text
-    assert "uv run --no-sync python -m ci.windows_ci benchmark-smoke" in text
-    assert "target/debug/ld64.reld" in text
-    assert "bash ci/install-driver-shims.sh debug" in text
-    assert '--reld "$reld" --workdir "$workdir"' in text
-
-
-def test_ci_windows_benchmark_gates_generated_and_replayed_large_response_file_paths():
-    text = WORKFLOW.read_text()
-
-    # The generated 512-unit path produces the large frozen-object replay fixture. Both tables
-    # must prove link.exe, lld, and reld timed successfully, and both run the coverage gate.
-    assert "uv run --no-sync python -m ci.windows_ci benchmark-smoke" in text
-    assert "benchmark-windows-msvc.md" in text
-    assert "benchmark-windows-msvc-replay.md" in text
+    # benchmark-stats.yml owns the only benchmark matrix. Keeping the retired synthetic smoke
+    # here would reintroduce size scenarios and make the strict LTO coverage gate fail PR CI.
+    assert "reld-bench" not in text
+    assert "benchmark-smoke" not in text
+    assert "small (16 units)" not in text
+    assert "medium (128 units)" not in text
+    assert "large (512 units)" not in text
 
 
 def test_ci_uses_bash_to_invoke_python_for_every_windows_msvc_script():
@@ -65,18 +55,9 @@ def test_ci_uses_bash_to_invoke_python_for_every_windows_msvc_script():
         "verify-msvc-linkers",
         "native-tests",
         "sqlite-bridge",
-        "benchmark-smoke",
         "self-host",
     ):
         assert f"shell: bash\n        run: uv run --no-sync python -m ci.windows_ci {command}" in text
-
-
-def test_ci_macos_benchmark_requires_measured_rows_and_coverage():
-    text = WORKFLOW.read_text()
-
-    assert '"macOS benchmark produced no complete measured rows"' in text
-    assert "aarch64-apple-darwin" in text
-    assert "uv run --no-sync python -m ci.benchmark_coverage" in text
 
 
 def test_ci_provisions_uv_and_has_no_bare_python_script_invocations():
