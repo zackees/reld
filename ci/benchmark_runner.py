@@ -401,7 +401,7 @@ def _validate_executable(output: Path, *, cwd: Path, environment: dict[str, str]
         raise BenchmarkError(f"linked output failed its OK oracle ({completed.returncode}):\n" f"{completed.stdout}{completed.stderr}")
 
 
-def _discard_verified_output(output: Path) -> None:
+def _discard_verified_output(output: Path) -> Path | None:
     """Discard one verified output, quarantining a transiently locked Windows executable."""
     try:
         output.unlink()
@@ -417,7 +417,29 @@ def _discard_verified_output(output: Path) -> None:
         except PermissionError:
             # Every invocation has a unique output path, so even a non-renamable quarantined file
             # cannot block the next replay. The hosted runner reclaims the workspace after the job.
-            pass
+            return None
+        else:
+            return quarantine
+    return None
+
+
+def _reclaim_quarantines(quarantines: list[Path]) -> None:
+    """Reclaim quarantines after a linker's timed trials, before another linker runs."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    helpers = [
+        subprocess.Popen(
+            [sys.executable, "-m", "ci.quarantine_cleanup", str(quarantine)],
+            cwd=REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        for quarantine in quarantines
+    ]
+    for helper in helpers:
+        helper.wait()
 
 
 def benchmark_replay(
@@ -457,29 +479,37 @@ def benchmark_replay(
             response_file.write_text(response, encoding="utf-8", newline="\n")
         return command
 
-    for index in range(warmup):
-        output = output_dir / f"{output_stem}-warmup-{index}{suffix}"
-        command = prepare_replay(output)
-        completed = _run_link(command, cwd=cwd, environment=environment)
-        if completed.returncode:
-            raise BenchmarkError(f"{linker.label} warmup link failed:\n{completed.stdout}{completed.stderr}")
-        _validate_executable(output, cwd=cwd, environment=environment)
-        _discard_verified_output(output)
-
+    quarantines: list[Path] = []
     samples: list[float] = []
-    for index in range(trials):
-        output = output_dir / f"{output_stem}-trial-{index}{suffix}"
-        command = prepare_replay(output)
-        started = time.perf_counter()
-        completed = _run_link(command, cwd=cwd, environment=environment)
-        elapsed = time.perf_counter() - started
-        if completed.returncode:
-            raise BenchmarkError(f"{linker.label} timed link failed:\n{completed.stdout}{completed.stderr}")
-        samples.append(elapsed)
-        # The oracle runs after the timer stops, once for every produced executable. A bad early
-        # trial therefore cannot enter the median and then be hidden by a later overwrite.
-        _validate_executable(output, cwd=cwd, environment=environment)
-        _discard_verified_output(output)
+    try:
+        for index in range(warmup):
+            output = output_dir / f"{output_stem}-warmup-{index}{suffix}"
+            command = prepare_replay(output)
+            completed = _run_link(command, cwd=cwd, environment=environment)
+            if completed.returncode:
+                raise BenchmarkError(f"{linker.label} warmup link failed:\n{completed.stdout}{completed.stderr}")
+            _validate_executable(output, cwd=cwd, environment=environment)
+            if quarantine := _discard_verified_output(output):
+                quarantines.append(quarantine)
+
+        for index in range(trials):
+            output = output_dir / f"{output_stem}-trial-{index}{suffix}"
+            command = prepare_replay(output)
+            started = time.perf_counter()
+            completed = _run_link(command, cwd=cwd, environment=environment)
+            elapsed = time.perf_counter() - started
+            if completed.returncode:
+                raise BenchmarkError(f"{linker.label} timed link failed:\n{completed.stdout}{completed.stderr}")
+            samples.append(elapsed)
+            # The oracle runs after the timer stops, once for every produced executable. A bad
+            # early trial therefore cannot enter the median and then be hidden by an overwrite.
+            _validate_executable(output, cwd=cwd, environment=environment)
+            if quarantine := _discard_verified_output(output):
+                quarantines.append(quarantine)
+    finally:
+        # A cleaner that wakes during a later trial would contaminate that measurement with I/O.
+        # Start and join all one-shot helpers only after this linker's timed samples are complete.
+        _reclaim_quarantines(quarantines)
 
     return statistics.median(samples)
 

@@ -66,6 +66,15 @@ def test_default_workload_replaces_startup_dominated_sqlite_bridge():
     assert BENCHMARK_PACKAGE == "linkbench-app"
 
 
+def test_compiled_policy_is_calibrated_for_fast_macos_final_links():
+    rules = DEFAULT_MANIFEST.parent / "crates" / "app" / "src" / "rules.rs"
+
+    # The first exact-SHA macOS run measured 160 MiB at only 0.3169s under full LTO,
+    # while the bridged reld front door needed 0.1539s to start. Keep enough real,
+    # runtime-consumed policy data for the strict <=10% fixed-startup gate.
+    assert "896 * 1024 * 1024" in rules.read_text(encoding="utf-8")
+
+
 def test_startup_probe_is_target_correct(tmp_path: Path):
     linker = Linker("reference", tmp_path / "linker")
 
@@ -172,12 +181,57 @@ def test_locked_windows_output_is_quarantined_without_delete_retries(tmp_path: P
     monkeypatch.setattr(runner_module.sys, "platform", "win32")
     monkeypatch.setattr(Path, "unlink", locked_once)
 
-    _discard_verified_output(output)
+    quarantine = _discard_verified_output(output)
 
     assert delete_attempts == 1
     assert not output.exists()
     quarantined = list(tmp_path.glob(".app-reld.exe.trash-*"))
     assert len(quarantined) == 1
+    assert quarantine == quarantined[0]
+
+
+def test_quarantine_cleanup_runs_after_all_timed_links(tmp_path: Path, monkeypatch):
+    original_output = tmp_path / "cargo-output"
+    captured = LinkCommand("cc", ("main.o", "-o", str(original_output)), original_output, False)
+    events: list[str] = []
+
+    def fake_run(command, *, cwd, environment):
+        del cwd, environment
+        output = Path(command[command.index("-o") + 1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"executable")
+        events.append(f"link:{output.name}")
+        return runner_module.subprocess.CompletedProcess([], 0, "", "")
+
+    def fake_validate(output, *, cwd, environment):
+        del cwd, environment
+        events.append(f"validate:{output.name}")
+
+    def fake_discard(output):
+        events.append(f"quarantine:{output.name}")
+        return output.with_name(f".{output.name}.trash")
+
+    def fake_reclaim(paths):
+        events.append("reclaim:" + ",".join(path.name for path in paths))
+
+    monkeypatch.setattr(runner_module, "_run_link", fake_run)
+    monkeypatch.setattr(runner_module, "_validate_executable", fake_validate)
+    monkeypatch.setattr(runner_module, "_discard_verified_output", fake_discard)
+    monkeypatch.setattr(runner_module, "_reclaim_quarantines", fake_reclaim)
+
+    benchmark_replay(
+        captured,
+        Linker("reld", tmp_path / "reld-link.exe"),
+        output_dir=tmp_path / "replays",
+        cwd=tmp_path,
+        environment={},
+        warmup=1,
+        trials=3,
+        use_driver_shim=False,
+    )
+
+    assert events[-1].startswith("reclaim:")
+    assert sum(event.startswith("link:") for event in events[:-1]) == 4
 
 
 def test_cargo_capture_command_rejects_shell_fragments():

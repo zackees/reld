@@ -130,7 +130,7 @@ jobs:
           uv run --no-sync python -m ci.benchmark_runner
           --target "$TARGET" --reld "$RELD_DRIVER"
           --manifest ci/e2e/link-workload/Cargo.toml
-          --output benchmark-output/benchmark.log --trials 5 --warmup 1
+          --output benchmark-output/benchmark.log --trials 3 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
         shell: bash

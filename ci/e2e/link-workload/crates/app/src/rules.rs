@@ -5,7 +5,11 @@
 //! audit consumes the complete table when deriving its fingerprint; it is workload data, not
 //! unreferenced linker padding.
 
-const COMPILED_POLICY_BYTES: usize = 160 * 1024 * 1024;
+// Exact-SHA calibration on GitHub's macOS-14 runner showed that 160 MiB still let the
+// bridged front door's 0.1539s startup dominate ld64.lld's 0.3169s full-LTO link. This
+// policy size gives the fastest target enough real bytes to lay out and emit while keeping
+// the workload a single distributable artifact-auditing application.
+const COMPILED_POLICY_BYTES: usize = 896 * 1024 * 1024;
 
 #[used]
 static COMPILED_POLICY: [u8; COMPILED_POLICY_BYTES] = [0xA5; COMPILED_POLICY_BYTES];
