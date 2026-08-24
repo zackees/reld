@@ -14,12 +14,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ci.benchmark_stats import (  # noqa: E402
+    BENCHMARK_ID,
     BENCHMARK_TARGETS,
     CANONICAL_SCENARIOS,
     EXPECTED_SERIES,
     check_readme_block,
     collect_metadata,
     parse_benchmark_log,
+    read_metadata,
     render_readme_block,
     render_summary,
     series_engine,
@@ -39,9 +41,9 @@ SAMPLE_LOG = """
 
 | Scenario | bfd | lld | mold | wild | reld |
 |:---------|----:|----:|-----:|-----:|----:|
-| small (16 units) | 0.0210 | 0.0081 | 0.0062 | 0.0044 | n/a |
-| medium (128 units) | 0.1400 | 0.0390 | 0.0221 | 0.0155 | n/a |
-| large (512 units) | 0.6120 | 0.1602 | 0.0904 | 0.0631 | n/a |
+| no-LTO | 0.0210 | 0.0081 | 0.0062 | 0.0044 | n/a |
+| ThinLTO | 0.1400 | 0.0390 | 0.0221 | 0.0155 | n/a |
+| full-LTO | 0.6120 | 0.1602 | 0.0904 | 0.0631 | n/a |
 
 <!-- linker wild not available on this runner -->
 """
@@ -56,19 +58,19 @@ def test_parses_label_and_series():
 def test_parses_scenarios_in_order():
     r = parse_benchmark_log(SAMPLE_LOG)
     assert r.scenarios() == [
-        "small (16 units)",
-        "medium (128 units)",
-        "large (512 units)",
+        "no-LTO",
+        "ThinLTO",
+        "full-LTO",
     ]
 
 
 def test_parses_values_and_na():
     r = parse_benchmark_log(SAMPLE_LOG)
-    assert r.value("small (16 units)", "bfd") == pytest.approx(0.0210)
-    assert r.value("large (512 units)", "wild") == pytest.approx(0.0631)
+    assert r.value("no-LTO", "bfd") == pytest.approx(0.0210)
+    assert r.value("full-LTO", "wild") == pytest.approx(0.0631)
     # The unimplemented column must survive as None, not as 0.0 — a zero would render as
     # an infinitely fast linker, which is exactly the kind of accidental lie this guards.
-    assert r.value("small (16 units)", "reld") is None
+    assert r.value("no-LTO", "reld") is None
 
 
 def test_row_count():
@@ -95,7 +97,9 @@ def test_write_outputs_produces_all_artifacts(tmp_path):
         assert (tmp_path / name).exists(), name
 
     payload = json.loads((tmp_path / "latest.json").read_text())
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
+    assert payload["benchmark_id"] == BENCHMARK_ID
+    assert payload["metadata"]["benchmark"]["workload"] == "ci/e2e/sqlite-bridge"
     assert len(payload["results"]) == 15
     for entry in payload["results"]:
         assert "mode" in entry
@@ -107,6 +111,30 @@ def test_write_outputs_produces_all_artifacts(tmp_path):
         if entry["series"] == "reld":
             # SAMPLE_LOG has reld as a bare n/a (not a pending marker), so it is a failure.
             assert entry["status"] == "na"
+
+
+def test_native_runner_metadata_round_trips_and_targets_its_image(tmp_path):
+    report = parse_benchmark_log(SAMPLE_LOG)
+    meta = collect_metadata(report)
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+    loaded = read_metadata(path, report)
+
+    assert loaded["runner"] == meta["runner"]
+    assert loaded["versions"] == meta["versions"]
+    assert loaded["raw_image_url"].endswith("/x86_64-linux/benchmark-link.jpg")
+
+
+def test_native_runner_metadata_rejects_a_different_target(tmp_path):
+    report = parse_benchmark_log(SAMPLE_LOG)
+    meta = collect_metadata(report)
+    meta["target"] = "aarch64-apple-darwin"
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match"):
+        read_metadata(path, report)
 
 
 def test_series_mode():
@@ -137,7 +165,7 @@ def test_summary_includes_timings_metadata_and_publish_state(monkeypatch):
     summary = render_summary(report, collect_metadata(report), "uploaded")
     assert "source SHA | abc123" in summary
     assert "publish outcome | uploaded" in summary
-    assert "Timings by scenario" in summary
+    assert "Timings by configuration" in summary
     assert "reld | native | reld | na" in summary
 
 
@@ -209,8 +237,8 @@ def test_remote_freshness_accepts_injectable_current_results_and_rejects_stale_o
     pending["results"][0]["status"] = "pending"
     assert any("not measured" in error for error in verify_remote_freshness("local", 60, fetch_json=lambda url: pending if "x86_64-linux" in url else fetch(url), now=now))
     unexpected = fetch("https://example.invalid/stats/x86_64-linux/latest.json")
-    unexpected["results"][0]["scenario"] = "tiny (1 unit)"
-    assert any("unexpected synthetic scenario" in error for error in verify_remote_freshness("local", 60, fetch_json=lambda url: unexpected if "x86_64-linux" in url else fetch(url), now=now))
+    unexpected["results"][0]["configuration"] = "tiny (1 unit)"
+    assert any("unexpected configuration" in error for error in verify_remote_freshness("local", 60, fetch_json=lambda url: unexpected if "x86_64-linux" in url else fetch(url), now=now))
     wrong_sha = fetch("https://example.invalid/stats/x86_64-linux/latest.json")
     wrong_sha["metadata"]["git_sha"] = "old"
     assert any(
@@ -247,6 +275,22 @@ def test_history_appends_and_caps(tmp_path):
     for line in lines:
         entry = json.loads(line)
         assert "target" in entry
+        assert entry["schema_version"] == 5
+        assert entry["benchmark_id"] == BENCHMARK_ID
+
+
+def test_history_drops_incompatible_size_based_generation(tmp_path):
+    history = tmp_path / "history.jsonl"
+    history.write_text('{"target":"x86_64-linux","results":[{"scenario":"large (512 units)"}]}\n')
+    report = parse_benchmark_log(SAMPLE_LOG)
+
+    write_outputs(report, collect_metadata(report), tmp_path)
+
+    lines = history.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["benchmark_id"] == BENCHMARK_ID
+    assert {result["configuration"] for result in entry["results"]} == set(CANONICAL_SCENARIOS)
 
 
 def test_render_refuses_empty(tmp_path):
@@ -260,9 +304,9 @@ PENDING_LOG = """
 
 | Scenario | ld | ld64.lld | reld |
 |:---------|---:|---------:|----:|
-| small (16 units) | 0.0300 | 0.0120 | pending |
-| medium (128 units) | 0.1500 | 0.0400 | pending |
-| large (512 units) | 0.6000 | 0.1600 | pending |
+| no-LTO | 0.0300 | 0.0120 | pending |
+| ThinLTO | 0.1500 | 0.0400 | pending |
+| full-LTO | 0.6000 | 0.1600 | pending |
 
 <!-- linker reld pending: reld bridge measurement pending (rustc-based); see #17 -->
 """
@@ -271,10 +315,10 @@ PENDING_LOG = """
 def test_pending_cells_parse_as_pending_not_na():
     r = parse_benchmark_log(PENDING_LOG)
     # A pending cell has no timing (like n/a) but is flagged distinctly.
-    assert r.value("small (16 units)", "reld") is None
-    assert r.is_pending("small (16 units)", "reld") is True
+    assert r.value("no-LTO", "reld") is None
+    assert r.is_pending("no-LTO", "reld") is True
     # A real n/a would not be flagged pending.
-    assert r.is_pending("small (16 units)", "ld") is False
+    assert r.is_pending("no-LTO", "ld") is False
 
 
 def test_series_status_distinguishes_pending_measured_and_na():

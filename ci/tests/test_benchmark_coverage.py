@@ -26,9 +26,9 @@ LINUX_FULL = """
 
 | Scenario | bfd | lld | mold | wild | reld |
 |:---------|----:|----:|-----:|-----:|----:|
-| small (16 units) | 0.0210 | 0.0081 | 0.0062 | 0.0044 | 0.0216 |
-| medium (128 units) | 0.1400 | 0.0390 | 0.0221 | 0.0155 | 0.0800 |
-| large (512 units) | 0.6120 | 0.1602 | 0.0904 | 0.0631 | 0.2100 |
+| no-LTO | 0.0210 | 0.0081 | 0.0062 | 0.0044 | 0.0216 |
+| ThinLTO | 0.1400 | 0.0390 | 0.0221 | 0.0155 | 0.0800 |
+| full-LTO | 0.6120 | 0.1602 | 0.0904 | 0.0631 | 0.2100 |
 """
 
 # The exact shape #63 forbids: an expected linker (reld on Linux) as a bare n/a.
@@ -42,29 +42,25 @@ MACOS_FULL = """
 
 | Scenario | ld | ld64.lld | reld |
 |:---------|---:|---------:|----:|
-| small (16 units) | 0.0300 | 0.0120 | 0.0130 |
-| medium (128 units) | 0.1500 | 0.0400 | 0.0500 |
-| large (512 units) | 0.6000 | 0.1600 | 0.1700 |
+| no-LTO | 0.0300 | 0.0120 | 0.0130 |
+| ThinLTO | 0.1500 | 0.0400 | 0.0500 |
+| full-LTO | 0.6000 | 0.1600 | 0.1700 |
 """
 
 # reld on macOS as a bare n/a — a supported bridge cannot be silently missing.
-MACOS_RELD_NA = MACOS_FULL.replace("| 0.0130 |", "| n/a |").replace(
-    "| 0.1700 |", "| n/a |"
-)
+MACOS_RELD_NA = MACOS_FULL.replace("| 0.0130 |", "| n/a |").replace("| 0.1700 |", "| n/a |")
 
 # macOS with ld64.lld silently n/a — the #60 regression the gate must catch.
-MACOS_LD64_NA = MACOS_FULL.replace("| 0.0120 |", "| n/a |").replace(
-    "| 0.1600 |", "| n/a |"
-)
+MACOS_LD64_NA = MACOS_FULL.replace("| 0.0120 |", "| n/a |").replace("| 0.1600 |", "| n/a |")
 
 WINDOWS_FULL = """
 ## Link Benchmark: x86_64-pc-windows-msvc
 
 | Scenario | link.exe | lld | reld |
 |:---------|---------:|----:|----:|
-| small (16 units) | 0.0500 | 0.0200 | 0.0230 |
-| medium (128 units) | 0.1500 | 0.0700 | 0.0800 |
-| large (512 units) | 0.5000 | 0.2000 | 0.2200 |
+| no-LTO | 0.0500 | 0.0200 | 0.0230 |
+| ThinLTO | 0.1500 | 0.0700 | 0.0800 |
+| full-LTO | 0.5000 | 0.2000 | 0.2200 |
 """
 
 
@@ -107,25 +103,21 @@ def test_partial_scenario_na_for_expected_linker_fails_the_gate():
     result = _check(partial, "x86_64-linux")
     assert not result.ok
     violation = next((r for linker, r in result.violations if linker == "mold"), None)
-    assert violation is not None and "large (512 units)" in violation
+    assert violation is not None and "full-LTO" in violation
 
 
-def test_synthetic_scenarios_must_be_canonical_complete_and_unique():
-    missing = _check(LINUX_FULL.replace("| medium (128 units) | 0.1400 | 0.0390 | 0.0221 | 0.0155 | 0.0800 |\n", ""), "x86_64-linux")
-    duplicate = _check(LINUX_FULL.replace("| large (512 units)", "| medium (128 units)"), "x86_64-linux")
-    unexpected = _check(LINUX_FULL.replace("small (16 units)", "tiny (1 unit)"), "x86_64-linux")
-    assert any("missing synthetic scenario" in reason for _, reason in missing.violations)
-    assert any("duplicate synthetic scenario" in reason for _, reason in duplicate.violations)
-    assert any("unexpected synthetic scenario" in reason for _, reason in unexpected.violations)
+def test_lto_configurations_must_be_canonical_complete_and_unique():
+    missing = _check(LINUX_FULL.replace("| ThinLTO | 0.1400 | 0.0390 | 0.0221 | 0.0155 | 0.0800 |\n", ""), "x86_64-linux")
+    duplicate = _check(LINUX_FULL.replace("| full-LTO", "| ThinLTO"), "x86_64-linux")
+    unexpected = _check(LINUX_FULL.replace("no-LTO", "debug"), "x86_64-linux")
+    assert any("missing configuration" in reason for _, reason in missing.violations)
+    assert any("duplicate configuration" in reason for _, reason in duplicate.violations)
+    assert any("unexpected configuration" in reason for _, reason in unexpected.violations)
 
 
 def test_focused_replay_can_gate_every_linker_without_public_scenario_manifest():
-    replay = WINDOWS_FULL.replace("small (16 units)", "large replay (512 units)")
-    replay = "\n".join(
-        line
-        for line in replay.splitlines()
-        if "medium (128 units)" not in line and "large (512 units)" not in line
-    )
+    replay = WINDOWS_FULL.replace("no-LTO", "focused replay")
+    replay = "\n".join(line for line in replay.splitlines() if "ThinLTO" not in line and "full-LTO" not in line)
     report = parse_benchmark_log(replay)
     result = check_coverage(
         report,

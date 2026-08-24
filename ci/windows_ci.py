@@ -7,17 +7,11 @@ Windows checks locally testable and avoids embedding a second scripting language
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Sequence
-
-from ci import benchmark_coverage
-
 
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 
@@ -102,17 +96,6 @@ def _workspace() -> Path:
 
 def _runner_temp() -> Path:
     return Path(_required_env("RUNNER_TEMP")).resolve()
-
-
-def _reset_under(path: Path, root: Path) -> Path:
-    resolved = path.resolve()
-    root = root.resolve()
-    if resolved == root or root not in resolved.parents:
-        raise WindowsCiError(f"refusing to reset path outside runner temp: {resolved}")
-    if resolved.exists():
-        shutil.rmtree(resolved)
-    resolved.mkdir(parents=True)
-    return resolved
 
 
 def _require_file(path: Path, description: str) -> Path:
@@ -232,128 +215,6 @@ def sqlite_bridge() -> None:
         raise WindowsCiError("sqlite-bridge e2e output did not contain 'linked SQLite' marker")
 
 
-def require_measured_row(text: str, scenario: str) -> None:
-    timing = r"[0-9]+\.[0-9]{4}"
-    pattern = rf"^\| {re.escape(scenario)} \| {timing} \| {timing} \| {timing} \|$"
-    normalized = text.replace("\r\n", "\n")
-    if not re.search(pattern, normalized, flags=re.MULTILINE):
-        raise WindowsCiError(f"{scenario} link.exe/lld/reld row must contain real timings")
-
-
-def require_generated_table(text: str) -> None:
-    required = ["## Link Benchmark:", "| link.exe |", "| lld |", "| reld |"]
-    missing = [marker for marker in required if marker not in text]
-    if missing:
-        raise WindowsCiError(f"benchmark table missing marker(s): {', '.join(missing)}")
-    require_measured_row(text, "large (512 units)")
-
-
-def freeze_large_corpus(generated: Path, corpus: Path, runner_temp: Path) -> Path:
-    objects = sorted((generated / "large").glob("*.o"), key=lambda path: path.name)
-    if len(objects) != 513:
-        raise WindowsCiError(f"expected 513 large-workload objects (512 units plus main), got {len(objects)}")
-
-    corpus = _reset_under(corpus, runner_temp)
-    object_destination = corpus / "objs"
-    object_destination.mkdir()
-    object_names = []
-    for source in objects:
-        shutil.copy2(source, object_destination / source.name)
-        object_names.append(f"objs/{source.name}")
-
-    manifest = {
-        "schema_version": 1,
-        "platform": WINDOWS_TARGET,
-        "configuration": "large replay (512 units)",
-        "cc": "clang",
-        "objects": object_names,
-        "extra_link_args": [],
-        "output_name": "bench.exe",
-        "expected_exit_code": 0,
-    }
-    manifest_path = corpus / "corpus.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    return manifest_path
-
-
-def _coverage(log: Path, *, canonical: bool) -> None:
-    args = ["--input-log", str(log), "--target", WINDOWS_TARGET]
-    if not canonical:
-        args.append("--allow-noncanonical-scenarios")
-    if benchmark_coverage.main(args):
-        raise WindowsCiError(f"benchmark coverage failed for {log}")
-
-
-def benchmark_smoke() -> None:
-    workspace = _workspace()
-    runner_temp = _runner_temp()
-    benchmark_env = _msvc_path_env()
-    _run(_cargo("build", "-p", "reld", "--bin", "reld-link"), env=benchmark_env)
-    reld = _require_file(workspace / "target" / "debug" / "reld-link.exe", "reld-link.exe")
-
-    generated = _reset_under(runner_temp / "reld-bench-generated", runner_temp)
-    generated_log = Path("benchmark-windows-msvc.md")
-    generated_text = _run_logged(
-        _cargo(
-            "run",
-            "--release",
-            "-p",
-            "reld-testkit",
-            "--bin",
-            "reld-bench",
-            "--",
-            "--cc",
-            "clang",
-            "--target",
-            WINDOWS_TARGET,
-            "--trials",
-            "2",
-            "--warmup",
-            "1",
-            "--reld",
-            str(reld),
-            "--workdir",
-            str(generated),
-        ),
-        generated_log,
-        env=benchmark_env,
-    )
-    require_generated_table(generated_text)
-    _coverage(generated_log, canonical=True)
-
-    corpus = runner_temp / "reld-bench-large-replay-corpus"
-    freeze_large_corpus(generated, corpus, runner_temp)
-    replay_workdir = _reset_under(runner_temp / "reld-bench-large-replay-output", runner_temp)
-    replay_log = Path("benchmark-windows-msvc-replay.md")
-    replay_text = _run_logged(
-        _cargo(
-            "run",
-            "--release",
-            "-p",
-            "reld-testkit",
-            "--bin",
-            "reld-bench",
-            "--",
-            "--replay-corpus",
-            str(corpus),
-            "--target",
-            WINDOWS_TARGET,
-            "--trials",
-            "2",
-            "--warmup",
-            "1",
-            "--reld",
-            str(reld),
-            "--workdir",
-            str(replay_workdir),
-        ),
-        replay_log,
-        env=benchmark_env,
-    )
-    require_measured_row(replay_text, "large replay (512 units)")
-    _coverage(replay_log, canonical=False)
-
-
 def build_benchmark_driver() -> None:
     workspace = _workspace()
     _run(
@@ -381,7 +242,6 @@ COMMANDS = {
     "install-benchmark-linkers": install_benchmark_linkers,
     "native-tests": native_tests,
     "sqlite-bridge": sqlite_bridge,
-    "benchmark-smoke": benchmark_smoke,
     "build-benchmark-driver": build_benchmark_driver,
     "self-host": self_host,
 }

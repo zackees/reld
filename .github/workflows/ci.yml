@@ -351,23 +351,6 @@ jobs:
         shell: bash
         run: uv run --no-sync python -m ci.windows_ci sqlite-bridge
 
-      - name: Windows MSVC reld-bench smoke
-        if: matrix.kind == 'windows-msvc'
-        # Python owns the Windows path handling, process checks, response-file replay fixture,
-        # and benchmark assertions; Bash is only the portable Actions entry point.
-        shell: bash
-        run: uv run --no-sync python -m ci.windows_ci benchmark-smoke
-
-      - name: Upload Windows MSVC benchmark artifact
-        if: always() && matrix.kind == 'windows-msvc'
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-windows-msvc
-          path: |
-            benchmark-windows-msvc.md
-            benchmark-windows-msvc-replay.md
-          if-no-files-found: warn
-
       - name: Windows MSVC self-host (link reld with reld-link)
         if: matrix.kind == 'windows-msvc'
         shell: bash
@@ -406,30 +389,6 @@ jobs:
           echo "$output" | grep -q "OK"
           echo "$output" | grep -q "linked SQLite"
 
-      - name: macOS reld-bench smoke
-        if: matrix.kind == 'macos-arm64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # `ld64.reld` is the Mach-O bridge front door (format selected by argv[0]), created
-          # from the built reld binary. Generated objects are compiled before timing; warmups and
-          # trials only link them.
-          $CARGO_COMMAND build -p reld --bin reld
-          bash ci/install-driver-shims.sh debug
-          reld="$GITHUB_WORKSPACE/target/debug/ld64.reld"
-          test -x "$reld"
-          workdir="$RUNNER_TEMP/reld-bench-macos"
-          rm -rf "$workdir"
-          $CARGO_COMMAND run --release -p reld-testkit --bin reld-bench -- \
-            --cc clang --target aarch64-apple-darwin --trials 2 --warmup 1 \
-            --reld "$reld" --workdir "$workdir" | tee benchmark-macos-arm64.md
-          grep -q '## Link Benchmark:' benchmark-macos-arm64.md || { echo "benchmark table missing '## Link Benchmark:' heading" >&2; exit 1; }
-          grep -qE '\| *ld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing ld column" >&2; exit 1; }
-          grep -qE '\| *ld64.lld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing ld64.lld column" >&2; exit 1; }
-          grep -qE '\| *reld *\|' benchmark-macos-arm64.md || { echo "benchmark table missing reld column" >&2; exit 1; }
-          grep -qE '^\| (small \(16 units\)|medium \(128 units\)|large \(512 units\)) \| [0-9]+\.[0-9]{4} \| [0-9]+\.[0-9]{4} \| [0-9]+\.[0-9]{4} \|$' benchmark-macos-arm64.md || { echo "macOS benchmark produced no complete measured rows" >&2; exit 1; }
-          uv run --no-sync python -m ci.benchmark_coverage --input-log benchmark-macos-arm64.md --target aarch64-apple-darwin
-
       - name: macOS self-host (link reld with reld)
         if: matrix.kind == 'macos-arm64'
         shell: bash
@@ -447,14 +406,6 @@ jobs:
           test -x "$reld"
           file "$reld"
           file "$reld" | grep -q 'Mach-O'
-
-      - name: Upload macOS benchmark artifact
-        if: always() && matrix.kind == 'macos-arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-macos-arm64
-          path: benchmark-macos-arm64.md
-          if-no-files-found: warn
 
       - name: Record an earlier phase failure for the summary
         if: failure()
