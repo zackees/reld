@@ -1,17 +1,26 @@
 import os
+from io import StringIO
 from pathlib import Path
 
 import pytest
 
+import ci.benchmark_runner as runner_module
 from ci.benchmark_runner import (
+    BENCHMARK_PACKAGE,
     CONFIGURATIONS,
+    DEFAULT_MANIFEST,
     BenchmarkError,
     LinkCommand,
+    Linker,
+    assert_significant_workload,
     benchmark_environment,
+    benchmark_replay,
     cargo_capture_command,
     parse_print_link_args,
+    prune_capture_artifacts,
     replay_command,
     replace_output,
+    startup_probe_command,
 )
 
 
@@ -26,7 +35,7 @@ def test_configurations_are_exactly_the_three_public_lto_rows():
 def test_cargo_capture_command_builds_the_idiomatic_project_once():
     command = cargo_capture_command(
         cargo="cargo",
-        manifest=Path("ci/e2e/sqlite-bridge/Cargo.toml"),
+        manifest=Path("ci/e2e/link-workload/Cargo.toml"),
         profile="linkbench-thin-lto",
         target_dir=Path("target/link-benchmark"),
     )
@@ -36,9 +45,9 @@ def test_cargo_capture_command_builds_the_idiomatic_project_once():
         "rustc",
         "--locked",
         "--manifest-path",
-        str(Path("ci/e2e/sqlite-bridge/Cargo.toml")),
+        str(Path("ci/e2e/link-workload/Cargo.toml")),
         "--package",
-        "app",
+        "linkbench-app",
         "--profile",
         "linkbench-thin-lto",
         "--target-dir",
@@ -49,6 +58,95 @@ def test_cargo_capture_command_builds_the_idiomatic_project_once():
         "--print",
         "link-args",
     ]
+
+
+def test_default_workload_replaces_startup_dominated_sqlite_bridge():
+    assert DEFAULT_MANIFEST.as_posix().endswith("ci/e2e/link-workload/Cargo.toml")
+    assert BENCHMARK_PACKAGE == "linkbench-app"
+
+
+def test_startup_probe_is_target_correct(tmp_path: Path):
+    linker = Linker("reference", tmp_path / "linker")
+
+    assert startup_probe_command("x86_64-linux", linker) == [str(linker.path), "--version"]
+    assert startup_probe_command("aarch64-apple-darwin", linker) == [str(linker.path), "-v"]
+    assert startup_probe_command("x86_64-pc-windows-msvc", linker) == [str(linker.path), "/?"]
+
+
+def test_old_sqlite_bridge_is_red_and_significant_workload_is_green():
+    startups = {"bfd": 0.010, "lld": 0.008, "mold": 0.006, "wild": 0.005, "reld": 0.095}
+    old_links = {
+        "no-LTO": {"wild": 0.0204},
+        "ThinLTO": {"wild": 0.0251},
+        "full-LTO": {"wild": 0.0172},
+    }
+
+    with pytest.raises(BenchmarkError, match="startup-dominated"):
+        assert_significant_workload("x86_64-linux", startups, old_links)
+
+    significant_links = {
+        "no-LTO": {"wild": 1.10},
+        "ThinLTO": {"wild": 1.05},
+        "full-LTO": {"wild": 1.20},
+    }
+    assert_significant_workload("x86_64-linux", startups, significant_links)
+
+
+def test_capture_pruning_preserves_referenced_native_inputs(tmp_path: Path):
+    profile = tmp_path / "linkbench-no-lto"
+    profile.mkdir()
+    retained = profile / "app.rcgu.o"
+    retained.write_bytes(b"native object")
+    stale_bitcode = profile / "app.pre-lto.bc"
+    stale_bitcode.write_bytes(b"temporary bitcode")
+    stale_metadata = profile / "dependency.rmeta"
+    stale_metadata.write_bytes(b"temporary metadata")
+    cargo_output = profile / "linkbench-app"
+    cargo_output.write_bytes(b"captured executable")
+    command = LinkCommand("cc", (str(retained), "-o", str(cargo_output)), cargo_output, False)
+
+    prune_capture_artifacts(command, profile_dir=profile, log=StringIO())
+
+    assert retained.is_file()
+    assert not stale_bitcode.exists()
+    assert not stale_metadata.exists()
+    assert not cargo_output.exists()
+
+
+def test_every_warmup_and_trial_executable_is_verified_outside_timing(tmp_path: Path, monkeypatch):
+    original_output = tmp_path / "cargo-output"
+    captured = LinkCommand("cc", ("main.o", "-o", str(original_output)), original_output, False)
+    output_dir = tmp_path / "replays"
+    replay_output = output_dir / "app-test"
+    validations: list[Path] = []
+
+    def fake_run(command, *, cwd, environment):
+        del command, cwd, environment
+        replay_output.parent.mkdir(parents=True, exist_ok=True)
+        replay_output.write_bytes(b"executable")
+        return runner_module.subprocess.CompletedProcess([], 0, "", "")
+
+    def fake_validate(output, *, cwd, environment):
+        del cwd, environment
+        assert output.is_file()
+        validations.append(output)
+
+    monkeypatch.setattr(runner_module, "_run_link", fake_run)
+    monkeypatch.setattr(runner_module, "_validate_executable", fake_validate)
+
+    benchmark_replay(
+        captured,
+        Linker("test", tmp_path / "ld.test"),
+        output_dir=output_dir,
+        cwd=tmp_path,
+        environment={},
+        warmup=2,
+        trials=3,
+        use_driver_shim=False,
+    )
+
+    assert validations == [replay_output] * 5
+    assert not replay_output.exists()
 
 
 def test_cargo_capture_command_rejects_shell_fragments():

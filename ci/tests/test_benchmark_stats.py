@@ -41,12 +41,45 @@ SAMPLE_LOG = """
 
 | Scenario | bfd | lld | mold | wild | reld |
 |:---------|----:|----:|-----:|-----:|----:|
-| no-LTO | 0.0210 | 0.0081 | 0.0062 | 0.0044 | n/a |
-| ThinLTO | 0.1400 | 0.0390 | 0.0221 | 0.0155 | n/a |
-| full-LTO | 0.6120 | 0.1602 | 0.0904 | 0.0631 | n/a |
+| no-LTO | 1.2100 | 0.8100 | 0.7200 | 1.1000 | 1.3000 |
+| ThinLTO | 1.1400 | 0.7900 | 0.7100 | 1.0500 | 1.2500 |
+| full-LTO | 1.1200 | 0.7600 | 0.6900 | 1.0000 | 1.2000 |
 
-<!-- linker wild not available on this runner -->
+## Linker Startup: x86_64-linux
+
+| Linker | Seconds |
+|:-------|--------:|
+| bfd | 0.0100 |
+| lld | 0.0080 |
+| mold | 0.0060 |
+| wild | 0.0050 |
+| reld | 0.0950 |
 """
+
+
+def sample_log_for_target(target: str) -> str:
+    series = EXPECTED_SERIES[target]
+    startup = {name: 0.0500 for name in series}
+    reference = {
+        "x86_64-linux": "wild",
+        "x86_64-pc-windows-msvc": "lld",
+        "aarch64-apple-darwin": "ld64.lld",
+    }[target]
+    startup[reference] = 0.0050
+    lines = [
+        f"## Link Benchmark: {target}",
+        "",
+        "| Configuration | " + " | ".join(series) + " |",
+        "|:--------------|" + "|".join("----:" for _ in series) + "|",
+        *(f"| {scenario} | " + " | ".join("1.0000" for _ in series) + " |" for scenario in CANONICAL_SCENARIOS),
+        "",
+        f"## Linker Startup: {target}",
+        "",
+        "| Linker | Seconds |",
+        "|:-------|--------:|",
+        *(f"| {name} | {startup[name]:.4f} |" for name in series),
+    ]
+    return "\n".join(lines)
 
 
 def test_parses_label_and_series():
@@ -66,11 +99,23 @@ def test_parses_scenarios_in_order():
 
 def test_parses_values_and_na():
     r = parse_benchmark_log(SAMPLE_LOG)
-    assert r.value("no-LTO", "bfd") == pytest.approx(0.0210)
-    assert r.value("full-LTO", "wild") == pytest.approx(0.0631)
+    assert r.value("no-LTO", "bfd") == pytest.approx(1.2100)
+    assert r.value("full-LTO", "wild") == pytest.approx(1.0000)
     # The unimplemented column must survive as None, not as 0.0 — a zero would render as
     # an infinitely fast linker, which is exactly the kind of accidental lie this guards.
-    assert r.value("no-LTO", "reld") is None
+    assert r.value("no-LTO", "reld") == pytest.approx(1.3000)
+
+
+def test_parses_linker_startup_separately_from_final_links():
+    report = parse_benchmark_log(SAMPLE_LOG)
+
+    assert report.startup_seconds == {
+        "bfd": 0.0100,
+        "lld": 0.0080,
+        "mold": 0.0060,
+        "wild": 0.0050,
+        "reld": 0.0950,
+    }
 
 
 def test_row_count():
@@ -97,9 +142,16 @@ def test_write_outputs_produces_all_artifacts(tmp_path):
         assert (tmp_path / name).exists(), name
 
     payload = json.loads((tmp_path / "latest.json").read_text())
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
     assert payload["benchmark_id"] == BENCHMARK_ID
-    assert payload["metadata"]["benchmark"]["workload"] == "ci/e2e/sqlite-bridge"
+    assert payload["metadata"]["benchmark"]["workload"] == "ci/e2e/link-workload"
+    assert payload["startup"] == [
+        {"series": "bfd", "seconds": 0.01, "status": "measured", "mode": "reference", "engine": "bfd"},
+        {"series": "lld", "seconds": 0.008, "status": "measured", "mode": "reference", "engine": "lld"},
+        {"series": "mold", "seconds": 0.006, "status": "measured", "mode": "reference", "engine": "mold"},
+        {"series": "wild", "seconds": 0.005, "status": "measured", "mode": "reference", "engine": "wild"},
+        {"series": "reld", "seconds": 0.095, "status": "measured", "mode": "native", "engine": "reld"},
+    ]
     assert len(payload["results"]) == 15
     for entry in payload["results"]:
         assert "mode" in entry
@@ -109,8 +161,7 @@ def test_write_outputs_produces_all_artifacts(tmp_path):
             assert entry["mode"] == "reference"
             assert entry["status"] == "measured"
         if entry["series"] == "reld":
-            # SAMPLE_LOG has reld as a bare n/a (not a pending marker), so it is a failure.
-            assert entry["status"] == "na"
+            assert entry["status"] == "measured"
 
 
 def test_native_runner_metadata_round_trips_and_targets_its_image(tmp_path):
@@ -166,7 +217,8 @@ def test_summary_includes_timings_metadata_and_publish_state(monkeypatch):
     assert "source SHA | abc123" in summary
     assert "publish outcome | uploaded" in summary
     assert "Timings by configuration" in summary
-    assert "reld | native | reld | na" in summary
+    assert "reld | native | reld | measured | no-LTO: 1.3000" in summary
+    assert "Fixed linker startup (reported raw; never subtracted)" in summary
 
 
 def test_readme_block_is_generated_from_the_target_manifest(tmp_path):
@@ -193,7 +245,7 @@ def test_readme_block_is_generated_from_the_target_manifest(tmp_path):
 def test_freshness_guard_rejects_wrong_source_sha_and_accepts_current_outputs(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_SHA", "current")
     for target, _ in BENCHMARK_TARGETS:
-        target_report = parse_benchmark_log(SAMPLE_LOG.replace("x86_64-linux", target))
+        target_report = parse_benchmark_log(sample_log_for_target(target))
         write_outputs(target_report, collect_metadata(target_report), tmp_path / target)
     assert verify_current_outputs(tmp_path, "current", 60) == []
     errors = verify_current_outputs(tmp_path, "different", 60)
@@ -207,7 +259,17 @@ def test_remote_freshness_accepts_injectable_current_results_and_rejects_stale_o
         series = EXPECTED_SERIES[target]
         lines = [f"## Link Benchmark: {target}", "", "| Scenario | " + " | ".join(series) + " |"]
         lines.append("|:---------|" + "|".join("---:" for _ in series) + "|")
-        lines.extend(f"| {scenario} | " + " | ".join("0.0200" for _ in series) + " |" for scenario in CANONICAL_SCENARIOS)
+        lines.extend(f"| {scenario} | " + " | ".join("2.0000" for _ in series) + " |" for scenario in CANONICAL_SCENARIOS)
+        lines.extend(
+            [
+                "",
+                f"## Linker Startup: {target}",
+                "",
+                "| Linker | Seconds |",
+                "|:-------|--------:|",
+                *(f"| {name} | 0.0500 |" for name in series),
+            ]
+        )
         report = parse_benchmark_log("\n".join(lines))
         write_outputs(report, collect_metadata(report), tmp_path / target)
     now = __import__("time").time()
@@ -275,7 +337,7 @@ def test_history_appends_and_caps(tmp_path):
     for line in lines:
         entry = json.loads(line)
         assert "target" in entry
-        assert entry["schema_version"] == 5
+        assert entry["schema_version"] == 6
         assert entry["benchmark_id"] == BENCHMARK_ID
 
 
@@ -327,7 +389,7 @@ def test_series_status_distinguishes_pending_measured_and_na():
     assert r.series_status("ld64.lld") == "measured"
     assert r.series_status("reld") == "pending"
     # A series absent from the table is treated as na, never pending.
-    assert parse_benchmark_log(SAMPLE_LOG).series_status("reld") == "na"
+    assert parse_benchmark_log(SAMPLE_LOG).series_status("gold") == "na"
 
 
 def test_latest_json_carries_pending_status(tmp_path):

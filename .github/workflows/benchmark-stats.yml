@@ -124,12 +124,12 @@ jobs:
           RELD_DRIVER: ${{ matrix.reld_driver }}
           CARGO_COMMAND: cargo
         # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. Cargo
-        # compiles the one sqlite-bridge Rust project once per LTO configuration; every timed
+        # compiles the one artifact-auditor Rust project once per LTO configuration; every timed
         # iteration replays only rustc's captured target-native final linker invocation.
         run: >-
           uv run --no-sync python -m ci.benchmark_runner
           --target "$TARGET" --reld "$RELD_DRIVER"
-          --manifest ci/e2e/sqlite-bridge/Cargo.toml
+          --manifest ci/e2e/link-workload/Cargo.toml
           --output benchmark-output/benchmark.log --trials 5 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)

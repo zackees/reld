@@ -36,9 +36,10 @@ means concretely, and what part of it is shipped vs. designed.
 *Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and
 published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),
 with independent `latest.json` and `history.jsonl` per target. Each chart links the same
-idiomatic two-crate Rust + bundled SQLite project in `no-LTO`, `ThinLTO`, and `full-LTO`
+idiomatic, moderately link-heavy Rust artifact-auditing project in `no-LTO`, `ThinLTO`, and `full-LTO`
 configurations; compilation happens once per configuration and only the captured final link
-is timed. Linux measures reld's native
+is timed. Fixed linker startup is measured and reported separately, never subtracted, and a
+10% significance gate prevents startup-dominated results. Linux measures reld's native
 engine; Windows and macOS measure reld through their target-correct `lld` **bridge** front doors.
 `latest.json` records both the series `mode` (`native` or `bridge`) and concrete `engine` (`reld`
 on Linux, `lld-link` on Windows, `ld64.lld` on macOS), and the charts label bridge results so they
