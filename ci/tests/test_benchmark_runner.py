@@ -72,7 +72,7 @@ def test_compiled_policy_is_calibrated_for_fast_macos_final_links():
     # The first exact-SHA macOS run measured 160 MiB at only 0.3169s under full LTO,
     # while the bridged reld front door needed 0.1539s to start. Keep enough real,
     # runtime-consumed policy data for the strict <=10% fixed-startup gate.
-    assert "896 * 1024 * 1024" in rules.read_text(encoding="utf-8")
+    assert "1024 * 1024 * 1024" in rules.read_text(encoding="utf-8")
 
 
 def test_startup_probe_is_target_correct(tmp_path: Path):

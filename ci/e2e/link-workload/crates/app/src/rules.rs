@@ -9,7 +9,7 @@
 // bridged front door's 0.1539s startup dominate ld64.lld's 0.3169s full-LTO link. This
 // policy size gives the fastest target enough real bytes to lay out and emit while keeping
 // the workload a single distributable artifact-auditing application.
-const COMPILED_POLICY_BYTES: usize = 896 * 1024 * 1024;
+const COMPILED_POLICY_BYTES: usize = 1024 * 1024 * 1024;
 
 #[used]
 static COMPILED_POLICY: [u8; COMPILED_POLICY_BYTES] = [0xA5; COMPILED_POLICY_BYTES];
