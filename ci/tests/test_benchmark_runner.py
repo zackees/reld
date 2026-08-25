@@ -152,13 +152,17 @@ def test_default_workload_replaces_startup_dominated_sqlite_bridge():
     assert BENCHMARK_PACKAGE == "linkbench-app"
 
 
-def test_compiled_policy_is_calibrated_for_fast_macos_final_links():
+def test_compiled_policy_is_target_calibrated_for_significant_final_links():
     rules = DEFAULT_MANIFEST.parent / "crates" / "app" / "src" / "rules.rs"
 
     # The first exact-SHA macOS run measured 160 MiB at only 0.3169s under full LTO,
     # while the bridged reld front door needed 0.1539s to start. Keep enough real,
     # runtime-consumed policy data for the strict <=10% fixed-startup gate.
-    assert "928 * 1024 * 1024" in rules.read_text(encoding="utf-8")
+    source = rules.read_text(encoding="utf-8")
+    assert '#[cfg(target_os = "macos")]' in source
+    assert "928 * 1024 * 1024" in source
+    assert '#[cfg(not(target_os = "macos"))]' in source
+    assert "256 * 1024 * 1024" in source
 
 
 def test_startup_probe_is_target_correct(tmp_path: Path):
