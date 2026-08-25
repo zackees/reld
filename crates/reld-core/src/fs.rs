@@ -582,6 +582,15 @@ fn default_file_write_mode_for_filesystem_type(
     FileWriteMode::Mmap
 }
 
+#[cfg(all(test, target_os = "linux"))]
+fn should_use_splice_buffer_for_filesystem_type(
+    _filesystem_type: Option<nix::sys::statfs::FsType>,
+    _output_size: u64,
+    _write_mode: FileWriteMode,
+) -> bool {
+    false
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -628,6 +637,41 @@ mod tests {
             ),
             FileWriteMode::BufferThenWrite
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn benchmark_sized_ext4_buffer_uses_page_splicing() {
+        assert!(should_use_splice_buffer_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+            FileWriteMode::BufferThenWrite,
+        ));
+        assert!(should_use_splice_buffer_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MAX,
+            FileWriteMode::BufferThenWrite,
+        ));
+        assert!(!should_use_splice_buffer_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MIN - 1,
+            FileWriteMode::BufferThenWrite,
+        ));
+        assert!(!should_use_splice_buffer_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MAX + 1,
+            FileWriteMode::BufferThenWrite,
+        ));
+        assert!(!should_use_splice_buffer_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+            FileWriteMode::Mmap,
+        ));
+        assert!(!should_use_splice_buffer_for_filesystem_type(
+            Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+            FileWriteMode::BufferThenWrite,
+        ));
     }
 }
 
