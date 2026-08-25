@@ -7,6 +7,8 @@ use crate::error::Context as _;
 use crate::error::Result;
 use memmap2::Mmap;
 use memmap2::MmapOptions;
+#[cfg(unix)]
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::io::Write as _;
@@ -31,7 +33,7 @@ pub enum FileReplacementMode {
     UpdateInPlaceWithFallback,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileWriteMode {
     Mmap,
     BufferThenWrite,
@@ -357,10 +359,9 @@ impl OutputFileData for OsOutputFile {
         }
     }
 
-    fn finish(mut self) -> Result {
+    fn finish(self) -> Result {
         if let OsOutputBuffer::InMemory(bytes) = &self.buffer {
-            self.file
-                .write_all(bytes)
+            write_buffer_to_file(&self.file, bytes)
                 .with_context(|| format!("Failed to write to {}", self.path.display()))?;
         }
 
@@ -381,6 +382,35 @@ impl OutputFileData for OsOutputFile {
         #[cfg(not(target_os = "macos"))]
         let _ = len;
     }
+}
+
+#[cfg(unix)]
+const PARALLEL_FILE_WRITE_SIZE_THRESHOLD: usize = 1_000_000;
+#[cfg(unix)]
+const PARALLEL_FILE_WRITE_CHUNKS_PER_THREAD: usize = 8;
+
+fn write_buffer_to_file(mut file: &File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if bytes.len() >= PARALLEL_FILE_WRITE_SIZE_THRESHOLD
+        && rayon::current_num_threads() > 1
+        && file.metadata().is_ok_and(|metadata| metadata.is_file())
+    {
+        use std::os::unix::fs::FileExt as _;
+
+        let target_chunks =
+            rayon::current_num_threads().saturating_mul(PARALLEL_FILE_WRITE_CHUNKS_PER_THREAD);
+        let chunk_size = bytes
+            .len()
+            .div_ceil(target_chunks)
+            .max(PARALLEL_FILE_WRITE_SIZE_THRESHOLD);
+        bytes
+            .par_chunks(chunk_size)
+            .enumerate()
+            .try_for_each(|(index, chunk)| file.write_all_at(chunk, (index * chunk_size) as u64))?;
+        return Ok(());
+    }
+
+    file.write_all(bytes)
 }
 
 impl FileSystem for OsFileSystem {
@@ -500,7 +530,7 @@ impl FileSystem for OsFileSystem {
 
         let file_write_mode = options
             .write_mode
-            .unwrap_or_else(|| default_file_write_mode_for_file(&file));
+            .unwrap_or_else(|| default_file_write_mode_for_file(&file, options.size));
 
         let buffer = match file_write_mode {
             FileWriteMode::Mmap => {
@@ -535,26 +565,96 @@ impl FileSystem for OsFileSystem {
     }
 }
 
-fn default_file_write_mode_for_file(file: &std::fs::File) -> FileWriteMode {
+fn default_file_write_mode_for_file(file: &std::fs::File, output_size: u64) -> FileWriteMode {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
-        match nix::sys::statfs::fstatfs(file)
-            .map(|stat| stat.filesystem_type())
-            .ok()
-        {
-            // Multi-threaded write performance with BTRFS is terrible. It's substantially faster to
-            // just buffer it all in memory then write it afterwards.
-            Some(nix::sys::statfs::BTRFS_SUPER_MAGIC) => FileWriteMode::BufferThenWrite,
-            // vfat isn't quite as bad as BTRFS in this regard, but it's still at least 4-10% faster
-            // if we avoid mmap.
-            Some(nix::sys::statfs::MSDOS_SUPER_MAGIC) => FileWriteMode::BufferThenWrite,
-            _ => FileWriteMode::Mmap,
-        }
+        default_file_write_mode_for_filesystem_type(
+            nix::sys::statfs::fstatfs(file)
+                .map(|stat| stat.filesystem_type())
+                .ok(),
+            output_size,
+        )
     }
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     {
-        let _ = file;
+        let _ = (file, output_size);
         FileWriteMode::Mmap
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn default_file_write_mode_for_filesystem_type(
+    filesystem_type: Option<nix::sys::statfs::FsType>,
+    output_size: u64,
+) -> FileWriteMode {
+    const EXT4_BUFFERED_OUTPUT_THRESHOLD: u64 = 64 * 1024 * 1024;
+
+    match filesystem_type {
+        // Preserve the existing Btrfs/vfat policy at every size.
+        Some(nix::sys::statfs::BTRFS_SUPER_MAGIC | nix::sys::statfs::MSDOS_SUPER_MAGIC) => {
+            FileWriteMode::BufferThenWrite
+        }
+        // ext4 was measured directly on GitHub's Linux runner in issue #74. Keep mmap for small
+        // outputs so ordinary link latency is unchanged; large outputs use parallel ranged writes.
+        Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+            if output_size >= EXT4_BUFFERED_OUTPUT_THRESHOLD =>
+        {
+            FileWriteMode::BufferThenWrite
+        }
+        _ => FileWriteMode::Mmap,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn ext4_uses_measured_buffered_output_without_changing_unknown_filesystems() {
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(
+                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                256 * 1024 * 1024,
+            ),
+            FileWriteMode::BufferThenWrite
+        );
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(
+                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                1024 * 1024,
+            ),
+            FileWriteMode::Mmap
+        );
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(None, 256 * 1024 * 1024),
+            FileWriteMode::Mmap
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_ranged_write_preserves_every_byte() {
+        use std::io::Read as _;
+        use std::io::Seek as _;
+
+        let mut file = tempfile::tempfile().unwrap();
+        let bytes: Vec<u8> = (0..PARALLEL_FILE_WRITE_SIZE_THRESHOLD * 2)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        file.set_len(bytes.len() as u64).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+
+        pool.install(|| write_buffer_to_file(&file, &bytes))
+            .unwrap();
+
+        file.rewind().unwrap();
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
     }
 }
 
