@@ -1735,10 +1735,10 @@ enum PreparedObjectSection<'out> {
 }
 
 impl PreparedObjectSection<'_> {
-    fn populate<A: Arch<Platform = Elf>>(
+    fn populate<'data, A: Arch<Platform = Elf>>(
         &mut self,
-        object: &ObjectLayout<Elf>,
-        layout: &ElfLayout,
+        object: &ObjectLayout<'data, Elf>,
+        layout: &ElfLayout<'data>,
     ) -> Result {
         match self {
             Self::Loaded {
@@ -1746,15 +1746,20 @@ impl PreparedObjectSection<'_> {
                 section_index,
                 out,
                 content_len,
+            } => {
+                *content_len =
+                    populate_section_output::<A>(object, layout, *section, *section_index, out)?;
             }
-            | Self::Debug {
+            Self::Debug {
                 section,
                 section_index,
                 out,
                 content_len,
             } => {
-                *content_len =
+                let len =
                     populate_section_output::<A>(object, layout, *section, *section_index, out)?;
+                relocate_debug_section::<A>(object, layout, *section_index, &mut out[..len])?;
+                *content_len = len;
             }
             Self::FrameData(_) => {}
         }
@@ -1834,18 +1839,8 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
                 )?;
             }
             PreparedObjectSection::Debug {
-                section_index,
-                out,
-                content_len,
-                ..
-            } => {
-                relocate_debug_section::<A>(
-                    object,
-                    layout,
-                    section_index,
-                    &mut out[..content_len],
-                )?;
-            }
+                section_index: _, ..
+            } => {}
             PreparedObjectSection::FrameData(section_index) => {
                 write_eh_frame_data::<A>(object, section_index, layout, table_writer, trace)?;
             }
