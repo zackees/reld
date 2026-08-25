@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-const LARGE_EXT4_OUTPUT_THRESHOLD: u64 = 256 * 1024 * 1024;
+const LARGE_EXT4_BUFFERED_OUTPUT_MIN: u64 = 256 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const LARGE_EXT4_BUFFERED_OUTPUT_MAX: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileReplacementMode {
@@ -501,8 +503,6 @@ impl FileSystem for OsFileSystem {
             }
         };
 
-        let should_preallocate = options.write_mode.is_none()
-            && should_preallocate_large_ext4_output(&file, options.size);
         let file_write_mode = options
             .write_mode
             .unwrap_or_else(|| default_file_write_mode_for_file(&file, options.size));
@@ -512,7 +512,6 @@ impl FileSystem for OsFileSystem {
                 // For some types of output file (e.g. character devices) we can't mmap, so we try
                 // to mmap the file and if it fails, fall back to non-mmapped output.
                 if file.set_len(options.size).is_ok() {
-                    preallocate_output_file(&file, options.size, should_preallocate);
                     match unsafe { MmapOptions::new().map_mut(&file) } {
                         Ok(mmap) => OsOutputBuffer::Mmap(mmap),
                         Err(_) => OsOutputBuffer::InMemory(vec![0; options.size as usize]),
@@ -560,58 +559,27 @@ fn default_file_write_mode_for_file(file: &std::fs::File, output_size: u64) -> F
 #[cfg(any(target_os = "android", target_os = "linux"))]
 fn default_file_write_mode_for_filesystem_type(
     filesystem_type: Option<nix::sys::statfs::FsType>,
-    _output_size: u64,
+    output_size: u64,
 ) -> FileWriteMode {
     // Preserve the existing Btrfs/vfat policy at every size.
     if let Some(nix::sys::statfs::BTRFS_SUPER_MAGIC | nix::sys::statfs::MSDOS_SUPER_MAGIC) =
         filesystem_type
     {
-        FileWriteMode::BufferThenWrite
-    } else {
-        FileWriteMode::Mmap
+        return FileWriteMode::BufferThenWrite;
     }
-}
 
-fn should_preallocate_large_ext4_output(file: &std::fs::File, output_size: u64) -> bool {
     #[cfg(target_os = "linux")]
+    if filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+        && (LARGE_EXT4_BUFFERED_OUTPUT_MIN..=LARGE_EXT4_BUFFERED_OUTPUT_MAX).contains(&output_size)
     {
-        should_preallocate_large_ext4_output_for_filesystem_type(
-            nix::sys::statfs::fstatfs(file)
-                .map(|stat| stat.filesystem_type())
-                .ok(),
-            output_size,
-        )
+        // Exact captured-link trials consistently show that writing one completed buffer is
+        // faster than faulting and dirtying a large ext4 mmap during parallel section writes.
+        // Keep the policy inside the measured range to avoid unbounded memory use on huge links.
+        return FileWriteMode::BufferThenWrite;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, output_size);
-        false
-    }
-}
 
-#[cfg(target_os = "linux")]
-fn should_preallocate_large_ext4_output_for_filesystem_type(
-    filesystem_type: Option<nix::sys::statfs::FsType>,
-    output_size: u64,
-) -> bool {
-    filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
-        && output_size >= LARGE_EXT4_OUTPUT_THRESHOLD
-}
-
-fn preallocate_output_file(file: &std::fs::File, output_size: u64, should_preallocate: bool) {
-    #[cfg(target_os = "linux")]
-    if should_preallocate {
-        // Reserving extents is substantially cheaper than faulting every output page up front and
-        // lets the existing parallel mmap writer avoid block allocation on its critical path.
-        let _ = nix::fcntl::fallocate(
-            file,
-            nix::fcntl::FallocateFlags::empty(),
-            0,
-            output_size as libc::off_t,
-        );
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (file, output_size, should_preallocate);
+    let _ = output_size;
+    FileWriteMode::Mmap
 }
 
 #[cfg(all(test, unix))]
@@ -620,11 +588,25 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn only_large_linux_ext4_outputs_are_preallocated() {
+    fn large_linux_ext4_outputs_use_the_measured_buffered_policy() {
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
                 Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
-                256 * 1024 * 1024,
+                LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+            ),
+            FileWriteMode::BufferThenWrite
+        );
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(
+                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                LARGE_EXT4_BUFFERED_OUTPUT_MAX,
+            ),
+            FileWriteMode::BufferThenWrite
+        );
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(
+                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                LARGE_EXT4_BUFFERED_OUTPUT_MAX + 1,
             ),
             FileWriteMode::Mmap
         );
@@ -635,18 +617,17 @@ mod tests {
             ),
             FileWriteMode::Mmap
         );
-        assert!(should_preallocate_large_ext4_output_for_filesystem_type(
-            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
-            256 * 1024 * 1024,
-        ));
-        assert!(!should_preallocate_large_ext4_output_for_filesystem_type(
-            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
-            64 * 1024 * 1024,
-        ));
-        assert!(!should_preallocate_large_ext4_output_for_filesystem_type(
-            None,
-            256 * 1024 * 1024,
-        ));
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(None, 256 * 1024 * 1024),
+            FileWriteMode::Mmap
+        );
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(
+                Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+                64 * 1024 * 1024,
+            ),
+            FileWriteMode::BufferThenWrite
+        );
     }
 }
 
