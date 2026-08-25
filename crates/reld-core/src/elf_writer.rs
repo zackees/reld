@@ -269,7 +269,8 @@ fn fast_build_id(bytes: &[u8]) -> [u8; size_of::<u128>()] {
         .par_chunks(CHUNK_SIZE)
         .map(twox_hash::XxHash3_128::oneshot)
         .collect::<Vec<_>>();
-    let mut combined = Vec::with_capacity(size_of::<u64>() + chunk_hashes.len() * size_of::<u128>());
+    let mut combined =
+        Vec::with_capacity(size_of::<u64>() + chunk_hashes.len() * size_of::<u128>());
     combined.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     for hash in chunk_hashes {
         combined.extend_from_slice(&hash.to_le_bytes());
@@ -1752,13 +1753,8 @@ impl PreparedObjectSection<'_> {
                 out,
                 content_len,
             } => {
-                *content_len = populate_section_output::<A>(
-                    object,
-                    layout,
-                    *section,
-                    *section_index,
-                    out,
-                )?;
+                *content_len =
+                    populate_section_output::<A>(object, layout, *section, *section_index, out)?;
             }
             Self::FrameData(_) => {}
         }
@@ -1788,13 +1784,7 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
                 if should_skip_loaded_section(object, layout, section_index) {
                     continue;
                 }
-                let out = allocate_section_output(
-                    object,
-                    layout,
-                    *sec,
-                    section_index,
-                    buffers,
-                )?;
+                let out = allocate_section_output(object, layout, *sec, section_index, buffers)?;
                 prepared_sections.push(PreparedObjectSection::Loaded {
                     section: *sec,
                     section_index,
@@ -1806,13 +1796,7 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
                 if should_skip_debug_section(object, layout, section_index) {
                     continue;
                 }
-                let out = allocate_section_output(
-                    object,
-                    layout,
-                    *sec,
-                    section_index,
-                    buffers,
-                )?;
+                let out = allocate_section_output(object, layout, *sec, section_index, buffers)?;
                 prepared_sections.push(PreparedObjectSection::Debug {
                     section: *sec,
                     section_index,
@@ -2491,8 +2475,7 @@ fn populate_section_output<A: Arch<Platform = Elf>>(
 
             let remaining = input_data.len() - input_pos;
             if remaining > 0 {
-                out[output_pos..output_pos + remaining]
-                    .copy_from_slice(&input_data[input_pos..]);
+                out[output_pos..output_pos + remaining].copy_from_slice(&input_data[input_pos..]);
                 output_pos += remaining;
             }
             fill_section_padding::<A>(&mut out[output_pos..], section_info);

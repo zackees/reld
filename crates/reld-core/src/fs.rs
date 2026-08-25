@@ -19,6 +19,10 @@ use std::sync::Arc;
 const LARGE_EXT4_BUFFERED_OUTPUT_MIN: u64 = 256 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const LARGE_EXT4_BUFFERED_OUTPUT_MAX: u64 = 512 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const PARALLEL_OUTPUT_WRITE_MIN: usize = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const PARALLEL_OUTPUT_WRITE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileReplacementMode {
@@ -364,8 +368,7 @@ impl OutputFileData for OsOutputFile {
 
     fn finish(self) -> Result {
         if let OsOutputBuffer::InMemory(bytes) = &self.buffer {
-            (&self.file)
-                .write_all(bytes)
+            write_output_buffer(&self.file, bytes)
                 .with_context(|| format!("Failed to write to {}", self.path.display()))?;
         }
 
@@ -386,6 +389,36 @@ impl OutputFileData for OsOutputFile {
         #[cfg(not(target_os = "macos"))]
         let _ = len;
     }
+}
+
+fn write_output_buffer(file: &File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if bytes.len() >= PARALLEL_OUTPUT_WRITE_MIN && file.metadata()?.is_file() {
+        return write_output_buffer_parallel(file, bytes, PARALLEL_OUTPUT_WRITE_CHUNK_SIZE);
+    }
+
+    let mut file = file;
+    file.write_all(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn write_output_buffer_parallel(
+    file: &File,
+    bytes: &[u8],
+    chunk_size: usize,
+) -> std::io::Result<()> {
+    use rayon::iter::IndexedParallelIterator as _;
+    use rayon::iter::ParallelIterator as _;
+    use rayon::slice::ParallelSlice as _;
+    use std::os::unix::fs::FileExt as _;
+
+    debug_assert!(chunk_size > 0);
+    bytes
+        .par_chunks(chunk_size)
+        .enumerate()
+        .try_for_each(|(chunk_index, chunk)| {
+            file.write_all_at(chunk, (chunk_index * chunk_size) as u64)
+        })
 }
 
 impl FileSystem for OsFileSystem {
@@ -585,6 +618,25 @@ fn default_file_write_mode_for_filesystem_type(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parallel_output_write_preserves_chunk_boundaries_and_tail() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("parallel-output");
+        let mut file = File::create(&path).unwrap();
+        let expected = (0_u8..=255).cycle().take(4096 + 17).collect::<Vec<_>>();
+        file.set_len(expected.len() as u64).unwrap();
+
+        write_output_buffer_parallel(&file, &expected, 1024).unwrap();
+
+        let mut actual = Vec::new();
+        file = File::open(path).unwrap();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
