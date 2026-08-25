@@ -41,7 +41,7 @@ jobs:
         id: setup
         uses: zackees/setup-soldr@main
         with:
-          version: 0.8.43
+          version: 0.9.10
           cross-targets: ${{ matrix.target }}
           cache: false
           prebuild-deps: none
