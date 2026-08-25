@@ -218,12 +218,7 @@ fn write_gnu_build_id_note(
     let uuid_placeholder;
     let build_id = match build_id_option {
         BuildIdOption::Fast => {
-            let build_id_layout = layout
-                .section_layouts
-                .get(output_section_id::NOTE_GNU_BUILD_ID);
-            let build_id_range = build_id_layout.file_offset
-                ..build_id_layout.file_offset + build_id_layout.file_size;
-            hash_placeholder = compute_hash(sized_output, build_id_range)?;
+            hash_placeholder = compute_hash(sized_output);
             hash_placeholder.as_bytes()
         }
         BuildIdOption::Hex(hex) => hex.as_slice(),
@@ -251,16 +246,11 @@ fn write_gnu_build_id_note(
     Ok(())
 }
 
-fn compute_hash(
-    sized_output: &mut SizedOutput<impl OutputFileData>,
-    build_id_range: std::ops::Range<usize>,
-) -> Result<blake3::Hash> {
+fn compute_hash(sized_output: &SizedOutput<impl OutputFileData>) -> blake3::Hash {
     timing_phase!("Compute build ID");
-    sized_output
-        .out
-        .compute_while_preflushing(build_id_range, |bytes| {
-            blake3::Hasher::new().update_rayon(bytes).finalize()
-        })
+    blake3::Hasher::new()
+        .update_rayon(&sized_output.out)
+        .finalize()
 }
 
 fn write_file_contents<'data, A: Arch<Platform = Elf>>(
