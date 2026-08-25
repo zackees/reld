@@ -27,6 +27,7 @@ use rayon::slice::ParallelSlice;
 use rayon::slice::ParallelSliceMut;
 use std::ops::Deref;
 use std::ops::DerefMut;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -81,6 +82,14 @@ impl<O: OutputFileData> OutputBuffer<O> {
 
     fn finish(self) -> Result {
         self.0.finish()
+    }
+
+    pub(crate) fn compute_while_preflushing<T>(
+        &mut self,
+        dirty_range: Range<usize>,
+        compute: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T> {
+        self.0.compute_while_preflushing(dirty_range, compute)
     }
 }
 

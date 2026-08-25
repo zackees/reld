@@ -9,8 +9,11 @@ use memmap2::Mmap;
 use memmap2::MmapOptions;
 use std::fs::File;
 use std::io::ErrorKind;
+use std::io::Seek as _;
+use std::io::SeekFrom;
 use std::io::Write as _;
 use std::ops::Deref;
+use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -68,6 +71,17 @@ pub trait OutputFileData: Send {
 
     /// Returns the output buffer for random-access writing.
     fn bytes_mut(&mut self) -> &mut [u8];
+
+    /// Compute from the completed output while, where supported, persisting all bytes that will
+    /// not be changed by the computation. `dirty_range` is written after the computation.
+    fn compute_while_preflushing<T>(
+        &mut self,
+        dirty_range: Range<usize>,
+        compute: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T> {
+        let _ = dirty_range;
+        Ok(compute(self.bytes()))
+    }
 
     /// Persist the bytes and apply final file attributes.
     fn finish(self) -> Result;
@@ -340,6 +354,7 @@ pub struct OsOutputFile {
     file: File,
     buffer: OsOutputBuffer,
     path: Arc<Path>,
+    preflushed_range: Option<Range<usize>>,
 }
 
 impl OutputFileData for OsOutputFile {
@@ -357,11 +372,40 @@ impl OutputFileData for OsOutputFile {
         }
     }
 
+    fn compute_while_preflushing<T>(
+        &mut self,
+        dirty_range: Range<usize>,
+        compute: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T> {
+        let OsOutputBuffer::InMemory(bytes) = &self.buffer else {
+            return Ok(compute(self.bytes()));
+        };
+
+        let mut file = self.file.try_clone()?;
+        let result = std::thread::scope(|scope| -> Result<T> {
+            let writer = scope.spawn(|| -> std::io::Result<()> {
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(bytes)
+            });
+            let result = compute(bytes);
+            writer.join().expect("preflush worker panicked")?;
+            Ok(result)
+        })?;
+        self.preflushed_range = Some(dirty_range);
+        Ok(result)
+    }
+
     fn finish(self) -> Result {
         if let OsOutputBuffer::InMemory(bytes) = &self.buffer {
-            (&self.file)
-                .write_all(bytes)
-                .with_context(|| format!("Failed to write to {}", self.path.display()))?;
+            let mut file = &self.file;
+            if let Some(range) = self.preflushed_range {
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                file.write_all(&bytes[range])
+                    .with_context(|| format!("Failed to patch {}", self.path.display()))?;
+            } else {
+                file.write_all(bytes)
+                    .with_context(|| format!("Failed to write to {}", self.path.display()))?;
+            }
         }
 
         // Making the file executable is best-effort only. For example if we're writing to a pipe or
@@ -498,8 +542,6 @@ impl FileSystem for OsFileSystem {
             }
         };
 
-        let should_prefault_output = options.write_mode.is_none()
-            && should_prefault_output_mmap_for_file(&file, options.size);
         let file_write_mode = options
             .write_mode
             .unwrap_or_else(|| default_file_write_mode_for_file(&file, options.size));
@@ -510,10 +552,7 @@ impl FileSystem for OsFileSystem {
                 // to mmap the file and if it fails, fall back to non-mmapped output.
                 if file.set_len(options.size).is_ok() {
                     match unsafe { MmapOptions::new().map_mut(&file) } {
-                        Ok(mmap) => {
-                            prefault_output_mmap(&mmap, should_prefault_output);
-                            OsOutputBuffer::Mmap(mmap)
-                        }
+                        Ok(mmap) => OsOutputBuffer::Mmap(mmap),
                         Err(_) => OsOutputBuffer::InMemory(vec![0; options.size as usize]),
                     }
                 } else {
@@ -530,7 +569,12 @@ impl FileSystem for OsFileSystem {
             }
         };
 
-        Ok(OsOutputFile { file, buffer, path })
+        Ok(OsOutputFile {
+            file,
+            buffer,
+            path,
+            preflushed_range: None,
+        })
     }
 
     fn write_auxiliary(&self, path: &Path, bytes: &[u8]) -> Result {
@@ -560,75 +604,43 @@ fn default_file_write_mode_for_file(file: &std::fs::File, output_size: u64) -> F
 #[cfg(any(target_os = "android", target_os = "linux"))]
 fn default_file_write_mode_for_filesystem_type(
     filesystem_type: Option<nix::sys::statfs::FsType>,
-    _output_size: u64,
+    output_size: u64,
 ) -> FileWriteMode {
+    const LARGE_EXT4_BUFFERED_OUTPUT_THRESHOLD: u64 = 256 * 1024 * 1024;
+
     match filesystem_type {
         // Preserve the existing Btrfs/vfat policy at every size.
         Some(nix::sys::statfs::BTRFS_SUPER_MAGIC | nix::sys::statfs::MSDOS_SUPER_MAGIC) => {
+            FileWriteMode::BufferThenWrite
+        }
+        #[cfg(target_os = "linux")]
+        Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+            if output_size >= LARGE_EXT4_BUFFERED_OUTPUT_THRESHOLD =>
+        {
             FileWriteMode::BufferThenWrite
         }
         _ => FileWriteMode::Mmap,
     }
 }
 
-fn should_prefault_output_mmap_for_file(file: &std::fs::File, output_size: u64) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        should_prefault_output_mmap_for_filesystem_type(
-            nix::sys::statfs::fstatfs(file)
-                .map(|stat| stat.filesystem_type())
-                .ok(),
-            output_size,
-        )
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, output_size);
-        false
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn should_prefault_output_mmap_for_filesystem_type(
-    filesystem_type: Option<nix::sys::statfs::FsType>,
-    output_size: u64,
-) -> bool {
-    const EXT4_PREFAULT_THRESHOLD: u64 = 64 * 1024 * 1024;
-
-    filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
-        && output_size >= EXT4_PREFAULT_THRESHOLD
-}
-
-fn prefault_output_mmap(mmap: &memmap2::MmapMut, should_prefault: bool) {
-    #[cfg(target_os = "linux")]
-    if should_prefault {
-        // Output creation runs on a background Rayon task, so this moves the unavoidable writable
-        // page faults off the writer's critical path and overlaps them with layout. Kernels older
-        // than 5.14 reject MADV_POPULATE_WRITE; in that case the normal fault-on-write path remains.
-        let _ = mmap.advise(memmap2::Advice::PopulateWrite);
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (mmap, should_prefault);
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     #[test]
-    fn large_ext4_output_stays_mmap_for_background_prefaulting() {
+    fn only_large_linux_ext4_outputs_use_the_measured_buffered_path() {
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
                 Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
                 256 * 1024 * 1024,
             ),
-            FileWriteMode::Mmap
+            FileWriteMode::BufferThenWrite
         );
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
                 Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
-                1024 * 1024,
+                64 * 1024 * 1024,
             ),
             FileWriteMode::Mmap
         );
@@ -636,18 +648,37 @@ mod tests {
             default_file_write_mode_for_filesystem_type(None, 256 * 1024 * 1024),
             FileWriteMode::Mmap
         );
-        assert!(should_prefault_output_mmap_for_filesystem_type(
-            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
-            256 * 1024 * 1024,
-        ));
-        assert!(!should_prefault_output_mmap_for_filesystem_type(
-            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
-            1024 * 1024,
-        ));
-        assert!(!should_prefault_output_mmap_for_filesystem_type(
-            None,
-            256 * 1024 * 1024,
-        ));
+    }
+
+    #[test]
+    fn buffered_preflush_patches_only_the_post_hash_range() {
+        use std::io::Read as _;
+
+        let file = tempfile::tempfile().unwrap();
+        let mut reader = file.try_clone().unwrap();
+        let original: Vec<u8> = (0..64).collect();
+        let mut output = OsOutputFile {
+            file,
+            buffer: OsOutputBuffer::InMemory(original.clone()),
+            path: Arc::from(Path::new("preflush-test")),
+            preflushed_range: None,
+        };
+
+        let sum = output
+            .compute_while_preflushing(8..12, |bytes| {
+                bytes.iter().map(|byte| u64::from(*byte)).sum::<u64>()
+            })
+            .unwrap();
+        output.bytes_mut()[8..12].copy_from_slice(&[200, 201, 202, 203]);
+        output.finish().unwrap();
+
+        let mut actual = Vec::new();
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        reader.read_to_end(&mut actual).unwrap();
+        let mut expected = original;
+        expected[8..12].copy_from_slice(&[200, 201, 202, 203]);
+        assert_eq!(actual, expected);
+        assert_eq!(sum, (0_u64..64).sum());
     }
 }
 
