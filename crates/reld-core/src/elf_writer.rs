@@ -38,7 +38,6 @@ use crate::ensure;
 use crate::error;
 use crate::error::Context as _;
 use crate::error::Result;
-use crate::file_writer::OutputBuffer;
 use crate::file_writer::SizedOutput;
 use crate::file_writer::excessive_allocation;
 use crate::file_writer::insufficient_allocation;
@@ -100,7 +99,6 @@ use crate::value_flags::PerSymbolFlags;
 use crate::value_flags::ValueFlags;
 use crate::verbose_timing_phase;
 use hashbrown::HashMap;
-use hashbrown::HashSet;
 use object::LittleEndian;
 use object::SymbolIndex;
 use object::elf::NT_GNU_BUILD_ID;
@@ -289,173 +287,11 @@ mod build_id_tests {
     }
 }
 
-const DIRECT_SECTION_COPY_THRESHOLD: u64 = 1024 * 1024;
-
-type DirectlyCopiedSections = HashSet<(u32, usize)>;
-
-fn direct_copy_source_offset(
-    archive_entry_offset: Option<usize>,
-    section_offset: u64,
-) -> Option<u64> {
-    (archive_entry_offset.unwrap_or(0) as u64).checked_add(section_offset)
-}
-
-fn direct_copy_output_offset(
-    section_address: u64,
-    part_layout: &OutputRecordLayout,
-) -> Option<u64> {
-    let offset_in_part = section_address.checked_sub(part_layout.mem_offset)?;
-    let offset_in_part = usize::try_from(offset_in_part).ok()?;
-    let output_offset = part_layout.file_offset.checked_add(offset_in_part)?;
-    u64::try_from(output_offset).ok()
-}
-
-#[cfg(test)]
-mod direct_copy_tests {
-    use super::*;
-
-    #[test]
-    fn source_offset_includes_regular_archive_member_position() {
-        assert_eq!(direct_copy_source_offset(None, 0x120), Some(0x120));
-        assert_eq!(direct_copy_source_offset(Some(0x400), 0x120), Some(0x520));
-    }
-
-    #[test]
-    fn output_offset_translates_from_part_memory_address() {
-        let part = OutputRecordLayout {
-            file_offset: 0x800,
-            mem_offset: 0x4000,
-            ..OutputRecordLayout::default()
-        };
-        assert_eq!(direct_copy_output_offset(0x4120, &part), Some(0x920));
-        assert_eq!(direct_copy_output_offset(0x3fff, &part), None);
-    }
-}
-
-fn directly_copy_eligible_sections(
-    output: &mut OutputBuffer<impl OutputFileData>,
-    layout: &ElfLayout<'_>,
-) -> Result<DirectlyCopiedSections> {
-    timing_phase!("Direct copy input sections");
-    let mut directly_copied = DirectlyCopiedSections::new();
-    if !output.supports_file_range_copy() {
-        return Ok(directly_copied);
-    }
-    let mut eligible_sections = 0usize;
-    let mut eligible_bytes = 0u64;
-    let mut copied_bytes = 0u64;
-
-    for group in &layout.group_layouts {
-        for file in &group.files {
-            let FileLayout::Object(object) = file else {
-                continue;
-            };
-            if !object.sections.iter().any(
-                |slot| matches!(slot, SectionSlot::Loaded(section) if section.size >= DIRECT_SECTION_COPY_THRESHOLD),
-            ) {
-                continue;
-            }
-            let Some(input_file) = object
-                .input
-                .file
-                .input_data
-                .and_then(|input| input.open_for_direct_copy())
-            else {
-                continue;
-            };
-            for (section_number, slot) in object.sections.iter().enumerate() {
-                let SectionSlot::Loaded(section) = slot else {
-                    continue;
-                };
-                if section.size < DIRECT_SECTION_COPY_THRESHOLD
-                    || object.section_relax_deltas.get(section_number).is_some()
-                {
-                    continue;
-                }
-
-                let section_index = object::SectionIndex(section_number);
-                let part_id =
-                    object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
-                let output_section_id = part_id.output_section_id::<Elf>();
-                if !layout.output_sections.has_data_in_file(output_section_id)
-                    || should_reverse_contents(
-                        section_index,
-                        part_id,
-                        object.object,
-                        &layout.output_sections,
-                    )
-                    || object.relocations(section_index)?.num_relocations() != 0
-                {
-                    continue;
-                }
-
-                let input_section = object.object.section(section_index)?;
-                if input_section.is_no_bits()
-                    || input_section
-                        .compression(LittleEndian, object.input.data())?
-                        .is_some()
-                {
-                    continue;
-                }
-
-                let section_size = object.object.section_size(input_section)?;
-                if section_size != section.size {
-                    continue;
-                }
-                let Some(section_address) = object.section_resolutions[section_number].address()
-                else {
-                    continue;
-                };
-                let Some(output_offset) = direct_copy_output_offset(
-                    section_address,
-                    layout.section_part_layouts.get(part_id),
-                ) else {
-                    continue;
-                };
-                let Some(source_offset) = direct_copy_source_offset(
-                    object.input.entry.map(|entry| entry.start_offset),
-                    input_section.sh_offset.get(LittleEndian),
-                ) else {
-                    continue;
-                };
-
-                eligible_sections += 1;
-                eligible_bytes += section_size;
-                if output
-                    .copy_file_range(
-                        &input_file,
-                        source_offset,
-                        output_offset,
-                        section_size as usize,
-                    )
-                    .unwrap_or(false)
-                {
-                    directly_copied.insert((object.file_id.as_u32(), section_number));
-                    copied_bytes += section_size;
-                }
-            }
-        }
-    }
-
-    tracing::debug!(
-        target: "metrics",
-        eligible_sections,
-        eligible_bytes,
-        copied_sections = directly_copied.len(),
-        copied_bytes,
-        fallback_sections = eligible_sections - directly_copied.len(),
-        fallback_bytes = eligible_bytes - copied_bytes,
-        "direct input section copy"
-    );
-    Ok(directly_copied)
-}
-
 fn write_file_contents<'data, A: Arch<Platform = Elf>>(
     sized_output: &mut SizedOutput<impl OutputFileData>,
     layout: &ElfLayout<'data>,
 ) -> Result {
     timing_phase!("Write data to file");
-    let directly_copied_sections = directly_copy_eligible_sections(&mut sized_output.out, layout)?;
     let (mut section_buffers, padding) = split_output_into_sections(layout, &mut sized_output.out);
     for pslice in padding.slices {
         if let Some(section_id) = pslice.parent_section_id {
@@ -496,7 +332,6 @@ fn write_file_contents<'data, A: Arch<Platform = Elf>>(
                     layout,
                     &sized_output.trace,
                     &sym_index_map,
-                    &directly_copied_sections,
                 )
                 .with_context(|| format!("Failed copying from {file} to output file"))?;
             }
@@ -729,19 +564,10 @@ fn write_file<'data, A: Arch<Platform = Elf>>(
     layout: &ElfLayout<'data>,
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
-    directly_copied_sections: &DirectlyCopiedSections,
 ) -> Result {
     match file {
         FileLayout::Object(s) => {
-            write_object::<A>(
-                s,
-                buffers,
-                table_writer,
-                layout,
-                trace,
-                sym_index_map,
-                directly_copied_sections,
-            )?;
+            write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
         }
         FileLayout::Prelude(s) => write_prelude::<A>(s, buffers, table_writer, layout)?,
         FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout, trace)?,
@@ -1865,7 +1691,6 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
     layout: &ElfLayout<'data>,
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
-    directly_copied_sections: &DirectlyCopiedSections,
 ) -> Result {
     verbose_timing_phase!("Write object", file_id = object.file_id.as_u32());
 
@@ -1886,18 +1711,10 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
                     buffers,
                     table_writer,
                     trace,
-                    directly_copied_sections,
                 )?;
             }
             SectionSlot::LoadedDebugInfo(sec) => {
-                write_debug_section::<A>(
-                    object,
-                    layout,
-                    *sec,
-                    section_index,
-                    buffers,
-                    directly_copied_sections,
-                )?;
+                write_debug_section::<A>(object, layout, *sec, section_index, buffers)?;
             }
             SectionSlot::FrameData(section_index) => {
                 write_eh_frame_data::<A>(object, *section_index, layout, table_writer, trace)?;
@@ -2257,7 +2074,6 @@ fn write_object_section<'data, A: Arch<Platform = Elf>>(
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
     table_writer: &mut TableWriter,
     trace: &TraceOutput,
-    directly_copied_sections: &DirectlyCopiedSections,
 ) -> Result {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
     if layout.args().should_output_partial_object() {
@@ -2271,14 +2087,7 @@ fn write_object_section<'data, A: Arch<Platform = Elf>>(
         }
     }
 
-    let out = write_section_raw::<A>(
-        object,
-        layout,
-        section,
-        section_index,
-        buffers,
-        directly_copied_sections,
-    )?;
+    let out = write_section_raw::<A>(object, layout, section, section_index, buffers)?;
 
     // We need to reverse the contents and adjust relocations because .ctors/.dtors are executed in
     // reverse order while .init_array/.fini_array are executed in forward order.
@@ -2406,7 +2215,6 @@ fn write_debug_section<'data, A: Arch<Platform = Elf>>(
     section: Section,
     section_index: object::SectionIndex,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
-    directly_copied_sections: &DirectlyCopiedSections,
 ) -> Result {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
     let section_id = part_id.output_section_id::<Elf>();
@@ -2416,14 +2224,7 @@ fn write_debug_section<'data, A: Arch<Platform = Elf>>(
         return Ok(());
     }
 
-    let out = write_section_raw::<A>(
-        object,
-        layout,
-        section,
-        section_index,
-        buffers,
-        directly_copied_sections,
-    )?;
+    let out = write_section_raw::<A>(object, layout, section, section_index, buffers)?;
     let relocations = object.relocations(section_index)?;
     let result = match relocations {
         elf::RelocationList::Rela(rela) => apply_debug_relocations::<A, Rela, _>(
@@ -2453,7 +2254,6 @@ fn write_section_raw<'out, 'data, A: Arch<Platform = Elf>>(
     sec: Section,
     section_index: object::SectionIndex,
     buffers: &'out mut OutputSectionPartMap<&mut [u8]>,
-    directly_copied_sections: &DirectlyCopiedSections,
 ) -> Result<&'out mut [u8]> {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
     if layout
@@ -2481,9 +2281,7 @@ fn write_section_raw<'out, 'data, A: Arch<Platform = Elf>>(
             None => {
                 let section_size = object.object.section_size(object_section)?;
                 let (out, padding) = out.split_at_mut(section_size as usize);
-                if !directly_copied_sections.contains(&(object.file_id.as_u32(), section_index.0)) {
-                    object.object.copy_section_data(object_section, out)?;
-                }
+                object.object.copy_section_data(object_section, out)?;
                 fill_section_padding::<A>(padding, section_info);
                 Ok(out)
             }
@@ -4536,7 +4334,6 @@ fn write_epilogue<A: Arch<Platform = Elf>>(
                 buffers,
                 table_writer,
                 trace,
-                &DirectlyCopiedSections::new(),
             )?;
         }
     }
