@@ -611,13 +611,13 @@ mod tests {
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[test]
-    fn ext4_uses_measured_buffered_output_without_changing_unknown_filesystems() {
+    fn large_ext4_output_stays_mmap_for_background_prefaulting() {
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
                 Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
                 256 * 1024 * 1024,
             ),
-            FileWriteMode::BufferThenWrite
+            FileWriteMode::Mmap
         );
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
