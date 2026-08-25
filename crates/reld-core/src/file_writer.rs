@@ -438,12 +438,30 @@ pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8]) {
 
     if data.len() >= SECTION_PAR_COPY_SIZE_THRESHOLD {
         let threads = rayon::current_num_threads();
-        let chunk_size = (data.len() / threads).max(1);
+        let chunk_size = section_copy_chunk_size(data.len(), threads);
 
         data.par_chunks(chunk_size)
             .zip(out.par_chunks_mut(chunk_size))
             .for_each(|(src, dst)| dst.copy_from_slice(src));
     } else {
         out.copy_from_slice(data);
+    }
+}
+
+fn section_copy_chunk_size(data_len: usize, threads: usize) -> usize {
+    (data_len / threads).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::section_copy_chunk_size;
+
+    /// Issue #74: a retained 256 MiB section must expose enough work items for Rayon to
+    /// rebalance page-fault and output-write variance across four hosted-runner workers.
+    #[test]
+    fn large_section_copy_has_multiple_chunks_per_worker() {
+        let chunk_size = section_copy_chunk_size(256 * 1024 * 1024, 4);
+
+        assert!(chunk_size <= 8 * 1024 * 1024, "chunk size was {chunk_size}");
     }
 }
