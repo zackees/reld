@@ -620,13 +620,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn only_large_linux_ext4_outputs_are_preallocated() {
+    fn large_linux_ext4_outputs_use_the_measured_buffered_policy() {
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
                 Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
                 256 * 1024 * 1024,
             ),
-            FileWriteMode::Mmap
+            FileWriteMode::BufferThenWrite
         );
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
