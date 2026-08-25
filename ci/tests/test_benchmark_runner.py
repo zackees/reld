@@ -1,4 +1,5 @@
 import os
+import json
 from io import StringIO
 from pathlib import Path
 
@@ -205,6 +206,69 @@ def test_linker_trials_rotate_order_and_preserve_every_sample(tmp_path: Path, mo
     assert all(len(values) == 3 for values in samples.values())
     assert all(len(values) == 3 for values in sizes.values())
     assert set(medians) == {"wild", "reld", "mmap"}
+
+
+def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_path: Path, monkeypatch):
+    report_path = tmp_path / "output-modes.json"
+    wild = Linker("wild", tmp_path / "wild")
+
+    def fake_capture(configuration, **kwargs):
+        del kwargs
+        output = tmp_path / configuration.profile / "app"
+        return LinkCommand("clang", ("input.o", "-o", str(output)), output, False)
+
+    def fake_round_robin(captured, linkers, **kwargs):
+        del captured, kwargs
+        samples = {linker.label: [0.9, 1.0, 1.1] for linker in linkers}
+        sizes = {linker.label: [256 * 1024 * 1024] * 3 for linker in linkers}
+        orders = [[linker.label for linker in linkers]] * 3
+        return ({linker.label: 1.0 for linker in linkers}, samples, sizes, orders)
+
+    monkeypatch.setattr(runner_module, "linkers_for_target", lambda target, reld: (wild,))
+    monkeypatch.setattr(runner_module, "benchmark_environment", lambda: {})
+    monkeypatch.setattr(runner_module, "_linux_filesystem_type", lambda path, environment: "ext4")
+    monkeypatch.setattr(runner_module, "capture_final_link", fake_capture)
+    monkeypatch.setattr(runner_module, "prune_capture_artifacts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner_module, "release_capture_artifacts", lambda **kwargs: None)
+    monkeypatch.setattr(runner_module, "benchmark_startup", lambda *args, **kwargs: 0.01)
+    monkeypatch.setattr(runner_module, "benchmark_linkers_round_robin", fake_round_robin)
+    monkeypatch.setattr(
+        runner_module,
+        "capture_reld_phase_trace",
+        lambda *args, **kwargs: (
+            {
+                "Compute build ID": 0.05,
+                "Write data to file": 0.7,
+                "Flush and unmap output file": 0.01,
+            },
+            256 * 1024 * 1024,
+            "phase trace",
+        ),
+    )
+
+    runner_module.run_benchmark(
+        target="x86_64-linux",
+        reld=tmp_path / "reld",
+        manifest=tmp_path / "Cargo.toml",
+        workdir=tmp_path / "work",
+        target_dir=tmp_path / "target",
+        cargo="cargo",
+        trials=3,
+        warmup=1,
+        log=StringIO(),
+        output_mode_report=report_path,
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "measured"
+    assert report["metadata"]["filesystem"] == "ext4"
+    assert report["metadata"]["timing_scope"] == "captured final native link only"
+    assert set(report["configurations"]) == {"no-LTO", "ThinLTO", "full-LTO"}
+    no_lto = report["configurations"]["no-LTO"]
+    assert set(no_lto["modes"]) == {"default", "mmap", "buffer"}
+    assert no_lto["modes"]["default"]["samples_seconds"] == [0.9, 1.0, 1.1]
+    assert no_lto["modes"]["default"]["output_sizes_bytes"] == [256 * 1024 * 1024] * 3
+    assert no_lto["modes"]["default"]["phase_seconds"]["Write data to file"] == 0.7
 
 
 def test_reld_phase_trace_parser_requires_dominant_output_phases():
