@@ -395,6 +395,9 @@ impl OutputFileData for OsOutputFile {
 fn write_output_buffer(file: &File, bytes: &[u8], parallel: bool) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     if parallel && bytes.len() >= PARALLEL_OUTPUT_WRITE_MIN && file.metadata()?.is_file() {
+        if write_output_buffer_mmap(file, bytes, PARALLEL_OUTPUT_WRITE_CHUNK_SIZE).is_ok() {
+            return Ok(());
+        }
         return write_output_buffer_parallel(file, bytes, PARALLEL_OUTPUT_WRITE_CHUNK_SIZE);
     }
 
@@ -403,6 +406,21 @@ fn write_output_buffer(file: &File, bytes: &[u8], parallel: bool) -> std::io::Re
 
     let mut file = file;
     file.write_all(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn write_output_buffer_mmap(file: &File, bytes: &[u8], chunk_size: usize) -> std::io::Result<()> {
+    use rayon::iter::IndexedParallelIterator as _;
+    use rayon::iter::ParallelIterator as _;
+    use rayon::slice::ParallelSlice as _;
+    use rayon::slice::ParallelSliceMut as _;
+
+    debug_assert!(chunk_size > 0);
+    let mut mmap = unsafe { MmapOptions::new().len(bytes.len()).map_mut(file)? };
+    mmap.par_chunks_mut(chunk_size)
+        .zip(bytes.par_chunks(chunk_size))
+        .for_each(|(out, input)| out.copy_from_slice(input));
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -667,6 +685,31 @@ mod tests {
         file.set_len(expected.len() as u64).unwrap();
 
         write_output_buffer_parallel(&file, &expected, 1024).unwrap();
+
+        let mut actual = Vec::new();
+        file = File::open(path).unwrap();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parallel_mmap_output_write_preserves_chunk_boundaries_and_tail() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("parallel-mmap-output");
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let expected = (0_u8..=255).cycle().take(4096 + 17).collect::<Vec<_>>();
+        file.set_len(expected.len() as u64).unwrap();
+
+        write_output_buffer_mmap(&file, &expected, 1024).unwrap();
 
         let mut actual = Vec::new();
         file = File::open(path).unwrap();
