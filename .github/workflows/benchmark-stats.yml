@@ -54,6 +54,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.94.1
 
+      - name: Free Linux runner disk for retained linker inputs
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: >-
+          sudo env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+          "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT"
+          uv run --no-sync python -m ci.free_runner_disk
+
       - name: Install Linux linkers
         if: runner.os == 'Linux'
         shell: bash
@@ -124,13 +134,13 @@ jobs:
           RELD_DRIVER: ${{ matrix.reld_driver }}
           CARGO_COMMAND: cargo
         # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. Cargo
-        # compiles the one sqlite-bridge Rust project once per LTO configuration; every timed
+        # compiles the one artifact-auditor Rust project once per LTO configuration; every timed
         # iteration replays only rustc's captured target-native final linker invocation.
         run: >-
           uv run --no-sync python -m ci.benchmark_runner
           --target "$TARGET" --reld "$RELD_DRIVER"
-          --manifest ci/e2e/sqlite-bridge/Cargo.toml
-          --output benchmark-output/benchmark.log --trials 5 --warmup 1
+          --manifest ci/e2e/link-workload/Cargo.toml
+          --output benchmark-output/benchmark.log --trials 3 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
         shell: bash

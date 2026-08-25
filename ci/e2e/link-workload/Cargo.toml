@@ -1,0 +1,36 @@
+[workspace]
+members = ["crates/app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# All non-LTO settings are intentionally identical. Rust compilation and LTO preparation happen
+# before the benchmark captures and replays the target-native final linker invocation.
+[profile.linkbench-no-lto]
+inherits = "release"
+opt-level = 1
+debug = 2
+strip = false
+incremental = false
+codegen-units = 16
+lto = false
+
+[profile.linkbench-thin-lto]
+inherits = "release"
+opt-level = 1
+debug = 2
+strip = false
+incremental = false
+codegen-units = 16
+lto = "thin"
+
+[profile.linkbench-full-lto]
+inherits = "release"
+opt-level = 1
+debug = 2
+strip = false
+incremental = false
+codegen-units = 16
+lto = "fat"

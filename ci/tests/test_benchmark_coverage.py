@@ -26,41 +26,67 @@ LINUX_FULL = """
 
 | Scenario | bfd | lld | mold | wild | reld |
 |:---------|----:|----:|-----:|-----:|----:|
-| no-LTO | 0.0210 | 0.0081 | 0.0062 | 0.0044 | 0.0216 |
-| ThinLTO | 0.1400 | 0.0390 | 0.0221 | 0.0155 | 0.0800 |
-| full-LTO | 0.6120 | 0.1602 | 0.0904 | 0.0631 | 0.2100 |
+| no-LTO | 1.2000 | 0.8000 | 0.7000 | 0.6500 | 0.9000 |
+| ThinLTO | 1.1000 | 0.7500 | 0.6800 | 0.6200 | 0.8800 |
+| full-LTO | 1.0500 | 0.7000 | 0.6600 | 0.6000 | 0.8500 |
+
+## Linker Startup: x86_64-linux
+
+| Linker | Seconds |
+|:-------|--------:|
+| bfd | 0.0100 |
+| lld | 0.0080 |
+| mold | 0.0060 |
+| wild | 0.0050 |
+| reld | 0.0500 |
 """
 
 # The exact shape #63 forbids: an expected linker (reld on Linux) as a bare n/a.
-LINUX_RELD_NA = LINUX_FULL.replace("| 0.0216 |", "| n/a |").replace("| 0.2100 |", "| n/a |")
+LINUX_RELD_NA = LINUX_FULL.replace("| 0.9000 |", "| n/a |").replace("| 0.8500 |", "| n/a |")
 
 # Another silent gap: wild (expected on Linux) drops to n/a.
-LINUX_WILD_NA = LINUX_FULL.replace("| 0.0044 |", "| n/a |").replace("| 0.0631 |", "| n/a |")
+LINUX_WILD_NA = LINUX_FULL.replace("| 0.6500 |", "| n/a |").replace("| 0.6000 |", "| n/a |")
 
 MACOS_FULL = """
 ## Link Benchmark: aarch64-apple-darwin
 
 | Scenario | ld | ld64.lld | reld |
 |:---------|---:|---------:|----:|
-| no-LTO | 0.0300 | 0.0120 | 0.0130 |
-| ThinLTO | 0.1500 | 0.0400 | 0.0500 |
-| full-LTO | 0.6000 | 0.1600 | 0.1700 |
+| no-LTO | 0.9000 | 0.7000 | 0.8000 |
+| ThinLTO | 0.8500 | 0.6800 | 0.7800 |
+| full-LTO | 0.8000 | 0.6500 | 0.7500 |
+
+## Linker Startup: aarch64-apple-darwin
+
+| Linker | Seconds |
+|:-------|--------:|
+| ld | 0.0100 |
+| ld64.lld | 0.0080 |
+| reld | 0.0500 |
 """
 
 # reld on macOS as a bare n/a — a supported bridge cannot be silently missing.
-MACOS_RELD_NA = MACOS_FULL.replace("| 0.0130 |", "| n/a |").replace("| 0.1700 |", "| n/a |")
+MACOS_RELD_NA = MACOS_FULL.replace("| 0.8000 |", "| n/a |").replace("| 0.7500 |", "| n/a |")
 
 # macOS with ld64.lld silently n/a — the #60 regression the gate must catch.
-MACOS_LD64_NA = MACOS_FULL.replace("| 0.0120 |", "| n/a |").replace("| 0.1600 |", "| n/a |")
+MACOS_LD64_NA = MACOS_FULL.replace("| 0.7000 |", "| n/a |").replace("| 0.6500 |", "| n/a |")
 
 WINDOWS_FULL = """
 ## Link Benchmark: x86_64-pc-windows-msvc
 
 | Scenario | link.exe | lld | reld |
 |:---------|---------:|----:|----:|
-| no-LTO | 0.0500 | 0.0200 | 0.0230 |
-| ThinLTO | 0.1500 | 0.0700 | 0.0800 |
-| full-LTO | 0.5000 | 0.2000 | 0.2200 |
+| no-LTO | 0.9000 | 0.7000 | 0.8000 |
+| ThinLTO | 0.8500 | 0.6800 | 0.7800 |
+| full-LTO | 0.8000 | 0.6500 | 0.7500 |
+
+## Linker Startup: x86_64-pc-windows-msvc
+
+| Linker | Seconds |
+|:-------|--------:|
+| link.exe | 0.0100 |
+| lld | 0.0080 |
+| reld | 0.0500 |
 """
 
 
@@ -83,6 +109,14 @@ def test_full_linux_coverage_passes():
     assert result.statuses["reld"] == "measured"
 
 
+def test_missing_startup_and_startup_dominated_links_fail_the_gate():
+    missing_startup = _check(LINUX_FULL.replace("| reld | 0.0500 |", ""), "x86_64-linux")
+    assert any(linker == "reld" and "startup" in reason for linker, reason in missing_startup.violations)
+
+    dominated = _check(LINUX_FULL.replace("| wild | 0.0050 |", "| wild | 0.1000 |"), "x86_64-linux")
+    assert any(linker == "<significance>" and "startup-dominated" in reason for linker, reason in dominated.violations)
+
+
 def test_expected_linker_na_fails_the_gate():
     # This is the RED -> GREEN heart: pre-#63 this log published fine; now it must fail.
     result = _check(LINUX_RELD_NA, "x86_64-linux")
@@ -97,9 +131,9 @@ def test_expected_reference_linker_na_fails_the_gate():
 
 
 def test_partial_scenario_na_for_expected_linker_fails_the_gate():
-    # mold is measured for `small` but silently n/a for `large` — a partial regression that must
+    # mold is measured for two LTO modes but silently n/a for the third — a partial regression that must
     # not slip through just because the series has *some* timing.
-    partial = LINUX_FULL.replace("| 0.0904 |", "| n/a |")
+    partial = LINUX_FULL.replace("| 0.6600 |", "| n/a |")
     result = _check(partial, "x86_64-linux")
     assert not result.ok
     violation = next((r for linker, r in result.violations if linker == "mold"), None)
@@ -107,7 +141,7 @@ def test_partial_scenario_na_for_expected_linker_fails_the_gate():
 
 
 def test_lto_configurations_must_be_canonical_complete_and_unique():
-    missing = _check(LINUX_FULL.replace("| ThinLTO | 0.1400 | 0.0390 | 0.0221 | 0.0155 | 0.0800 |\n", ""), "x86_64-linux")
+    missing = _check(LINUX_FULL.replace("| ThinLTO | 1.1000 | 0.7500 | 0.6800 | 0.6200 | 0.8800 |\n", ""), "x86_64-linux")
     duplicate = _check(LINUX_FULL.replace("| full-LTO", "| ThinLTO"), "x86_64-linux")
     unexpected = _check(LINUX_FULL.replace("no-LTO", "debug"), "x86_64-linux")
     assert any("missing configuration" in reason for _, reason in missing.violations)

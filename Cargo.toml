@@ -8,7 +8,7 @@ members = [
   "crates/reld-testkit",
   "crates/reld-trace",
 ]
-exclude = ["ci/e2e/sqlite-bridge"]
+exclude = ["ci/e2e/sqlite-bridge", "ci/e2e/link-workload"]
 resolver = "2"
 
 [workspace.package]

@@ -32,6 +32,8 @@ from pathlib import Path
 from ci.benchmark_stats import (
     CANONICAL_SCENARIOS,
     EXPECTED_SERIES,
+    MAX_STARTUP_FRACTION,
+    REFERENCE_SERIES,
     Report,
     parse_benchmark_log,
     target_os,
@@ -130,6 +132,10 @@ def check_coverage(report: Report, target: str, *, require_canonical_scenarios: 
                 )
             )
 
+        startup = report.startup_seconds.get(linker)
+        if startup is None or startup <= 0:
+            result.violations.append((linker, f"expected linker {linker!r} has no measured startup timing"))
+
     for linker, reason in pending.items():
         status = report.series_status(linker)
         result.statuses.setdefault(linker, status)
@@ -142,6 +148,24 @@ def check_coverage(report: Report, target: str, *, require_canonical_scenarios: 
                     f"pending-by-design linker {linker!r} reported a bare n/a; it must be marked " f"pending ({reason})",
                 )
             )
+
+    canonical_target = _canonical_target(target)
+    if canonical_target and report.startup_seconds:
+        largest_startup = max(report.startup_seconds.values())
+        reference = REFERENCE_SERIES[canonical_target]
+        for scenario in CANONICAL_SCENARIOS:
+            reference_seconds = report.value(scenario, reference)
+            if reference_seconds is None or reference_seconds <= 0:
+                continue
+            fraction = largest_startup / reference_seconds
+            if fraction > MAX_STARTUP_FRACTION:
+                result.violations.append(
+                    (
+                        "<significance>",
+                        f"{scenario} is startup-dominated: largest startup is {fraction:.1%} "
+                        f"of {reference} final link (limit {MAX_STARTUP_FRACTION:.0%})",
+                    )
+                )
 
     return result
 

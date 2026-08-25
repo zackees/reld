@@ -1,0 +1,31 @@
+[package]
+name = "linkbench-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+flate2 = "1"
+globset = "0.4"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+indexmap = { version = "2", features = ["serde"] }
+minijinja = "2"
+petgraph = "0.8"
+rayon = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+toml = "0.8"
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+zstd = "0.13"

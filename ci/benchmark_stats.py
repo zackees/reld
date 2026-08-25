@@ -1,9 +1,8 @@
 """Parse reld-bench markdown output and render the published benchmark chart.
 
-Contract with the benchmark runner is deliberately tiny: print a markdown table under a
-heading that starts with ``## Link Benchmark:``, whose first column is ``Configuration`` and
-whose remaining columns are linker names. Cells are seconds, or ``n/a`` when a linker was not
-available on the runner.
+The runner prints final-link medians under ``## Link Benchmark:`` and raw, unsubtracted fixed
+startup medians under ``## Linker Startup:``. Public schema and history identifiers change when
+the workload generation changes so incomparable results cannot be mixed.
 
 Outputs (all into ``--output-dir``):
 
@@ -33,11 +32,12 @@ from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
 
-SCHEMA_VERSION = 5
-BENCHMARK_ID = "sqlite-bridge-lto-v1"
+SCHEMA_VERSION = 6
+BENCHMARK_ID = "artifact-auditor-lto-v1"
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
+STARTUP_HEADING_PREFIX = "## Linker Startup:"
 
 # One canonical manifest for the README, workflow aggregation, and generated artifacts. Keeping
 # this in the renderer makes a target added to one consumer but not another a testable drift,
@@ -62,6 +62,12 @@ EXPECTED_SERIES = {
     "x86_64-pc-windows-msvc": ("link.exe", "lld", "reld"),
     "aarch64-apple-darwin": ("ld", "ld64.lld", "reld"),
 }
+REFERENCE_SERIES = {
+    "x86_64-linux": "wild",
+    "x86_64-pc-windows-msvc": "lld",
+    "aarch64-apple-darwin": "ld64.lld",
+}
+MAX_STARTUP_FRACTION = 0.10
 
 # Rendered at SCALE x then downsampled; cheap supersampling beats fighting PIL's aliasing.
 WIDTH = 900
@@ -109,6 +115,7 @@ class Report:
     label: str = ""
     series: list[str] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
+    startup_seconds: dict[str, float] = field(default_factory=dict)
 
     def scenarios(self) -> list[str]:
         seen: list[str] = []
@@ -170,9 +177,9 @@ def _classify(cell: str) -> tuple[float | None, bool]:
 
 
 def parse_benchmark_log(text: str) -> Report:
-    """Scrape the first ``## Link Benchmark:`` table out of a log."""
+    """Scrape final-link and separate startup tables out of one runner log."""
     report = Report()
-    in_table = False
+    table_kind = ""
     header: list[str] = []
 
     # A UTF-8 BOM ahead of the first heading otherwise makes startswith() miss and the whole
@@ -184,30 +191,44 @@ def parse_benchmark_log(text: str) -> Report:
 
         if line.startswith(HEADING_PREFIX):
             report.label = line[len(HEADING_PREFIX) :].strip()
-            in_table = True
+            table_kind = "links"
+            header = []
+            continue
+        if line.startswith(STARTUP_HEADING_PREFIX):
+            startup_label = line[len(STARTUP_HEADING_PREFIX) :].strip()
+            if report.label and startup_label != report.label:
+                raise ValueError(f"startup target {startup_label!r} does not match {report.label!r}")
+            report.label = report.label or startup_label
+            table_kind = "startup"
             header = []
             continue
 
-        if not in_table:
+        if not table_kind:
             continue
 
         if not line.startswith("|"):
             # A blank line inside the table block is tolerated; anything else ends it.
             if line == "" or line.startswith("<!--"):
                 continue
-            in_table = False
+            table_kind = ""
             continue
 
         cells = [_clean(c) for c in line.strip("|").split("|")]
         if not header:
             header = cells
-            report.series = [c for c in cells[1:] if c]
+            if table_kind == "links":
+                report.series = [c for c in cells[1:] if c]
             continue
         if set("".join(cells)) <= set("-: "):
             continue  # the |---|---| separator row
 
         scenario = cells[0]
         if not scenario:
+            continue
+        if table_kind == "startup":
+            value = _to_seconds(cells[1]) if len(cells) > 1 else None
+            if value is not None:
+                report.startup_seconds[scenario] = value
             continue
         for idx, series in enumerate(report.series, start=1):
             value, pending = _classify(cells[idx]) if idx < len(cells) else (None, False)
@@ -291,7 +312,7 @@ def collect_metadata(report: Report) -> dict[str, Any]:
         "target": report.label,
         "benchmark": {
             "id": BENCHMARK_ID,
-            "workload": "ci/e2e/sqlite-bridge",
+            "workload": "ci/e2e/link-workload",
             "configurations": list(CANONICAL_SCENARIOS),
         },
         "runner": {
@@ -354,6 +375,16 @@ def render_summary(report: Report, meta: dict[str, Any], publish_outcome: str = 
             else:
                 cells.append(f"{row.scenario}: {'pending' if row.pending else 'n/a'}")
         lines.append(f"| {series} | {series_mode(series, runner_os, target)} | {series_engine(series, runner_os, target)} | {report.series_status(series)} | {' ; '.join(cells) or 'n/a'} |")
+    lines.extend(
+        [
+            "",
+            "Fixed linker startup (reported raw; never subtracted)",
+            "",
+            "| Series | Startup (seconds) |",
+            "|:-------|------------------:|",
+            *(f"| {series} | {report.startup_seconds.get(series, float('nan')):.4f} |" for series in report.series),
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -372,9 +403,10 @@ def render_readme_block() -> str:
         "*Auto-generated nightly by [`benchmark-stats.yml`](.github/workflows/benchmark-stats.yml) and\n"
         "published to the [`benchmark-stats` branch](https://github.com/zackees/reld/tree/benchmark-stats),\n"
         "with independent `latest.json` and `history.jsonl` per target. Each chart links the same\n"
-        "idiomatic two-crate Rust + bundled SQLite project in `no-LTO`, `ThinLTO`, and `full-LTO`\n"
+        "idiomatic, moderately link-heavy Rust artifact-auditing project in `no-LTO`, `ThinLTO`, and `full-LTO`\n"
         "configurations; compilation happens once per configuration and only the captured final link\n"
-        "is timed. Linux measures reld's native\n"
+        "is timed. Fixed linker startup is measured and reported separately, never subtracted, and a\n"
+        "10% significance gate prevents startup-dominated results. Linux measures reld's native\n"
         "engine; Windows and macOS measure reld through their target-correct `lld` **bridge** front doors.\n"
         "`latest.json` records both the series `mode` (`native` or `bridge`) and concrete `engine` (`reld`\n"
         "on Linux, `lld-link` on Windows, `ld64.lld` on macOS), and the charts label bridge results so they\n"
@@ -411,6 +443,66 @@ def write_readme_block(path: Path) -> None:
     path.write_text(f"{before}{begin}\n{render_readme_block()}{end}{after}", encoding="utf-8")
 
 
+def validate_startup_and_significance(payload: dict[str, Any], target: str) -> list[str]:
+    """Validate startup coverage and recompute the public significance invariant."""
+    errors: list[str] = []
+    startup = payload.get("startup")
+    if not isinstance(startup, list):
+        return [f"{target}: startup is missing or not a list"]
+    cells: dict[str, dict[str, Any]] = {}
+    for entry in startup:
+        if not isinstance(entry, dict):
+            errors.append(f"{target}: startup entry is not an object")
+            continue
+        series = str(entry.get("series", ""))
+        if series in cells:
+            errors.append(f"{target}: duplicate startup result for {series!r}")
+        cells[series] = entry
+    for series in EXPECTED_SERIES[target]:
+        entry = cells.get(series)
+        if entry is None:
+            errors.append(f"{target}: {series} startup is missing")
+            continue
+        seconds = entry.get("seconds")
+        if entry.get("status") != "measured" or not isinstance(seconds, (int, float)) or seconds <= 0:
+            errors.append(f"{target}: {series} startup is not measured")
+        expected_mode = series_mode(series, "", target)
+        expected_engine = series_engine(series, "", target)
+        if entry.get("mode") != expected_mode:
+            errors.append(f"{target}: {series} startup mode {entry.get('mode')!r} != {expected_mode!r}")
+        if entry.get("engine") != expected_engine:
+            errors.append(f"{target}: {series} startup engine {entry.get('engine')!r} != {expected_engine!r}")
+    unexpected = sorted(set(cells) - set(EXPECTED_SERIES[target]))
+    if unexpected:
+        errors.append(f"{target}: unexpected startup series: {', '.join(unexpected)}")
+
+    numeric_startups = [entry.get("seconds") for entry in cells.values() if isinstance(entry.get("seconds"), (int, float))]
+    results = payload.get("results")
+    if numeric_startups and isinstance(results, list):
+        largest = max(numeric_startups)
+        reference = REFERENCE_SERIES[target]
+        for scenario in CANONICAL_SCENARIOS:
+            reference_cell = next(
+                (
+                    entry
+                    for entry in results
+                    if isinstance(entry, dict)
+                    and entry.get("configuration") == scenario
+                    and entry.get("series") == reference
+                ),
+                None,
+            )
+            seconds = reference_cell.get("seconds") if reference_cell else None
+            if not isinstance(seconds, (int, float)) or seconds <= 0:
+                continue
+            fraction = largest / seconds
+            if fraction > MAX_STARTUP_FRACTION:
+                errors.append(
+                    f"{target}: {scenario} is startup-dominated ({fraction:.1%}; limit {MAX_STARTUP_FRACTION:.0%})"
+                )
+    return errors
+
+
 def verify_current_outputs(out_root: Path, expected_sha: str, max_age_seconds: int) -> list[str]:
     """Validate local generated artifacts before they are force-published.
 
@@ -439,6 +531,7 @@ def verify_current_outputs(out_root: Path, expected_sha: str, max_age_seconds: i
             errors.append(f"{target}: metadata target is {meta.get('target')!r}")
         if expected_sha and meta.get("git_sha") != expected_sha:
             errors.append(f"{target}: source SHA {meta.get('git_sha')!r} != {expected_sha!r}")
+        errors.extend(validate_startup_and_significance(payload, target))
         age = now - calendar.timegm(stamp)
         if age < -300 or age > max_age_seconds:
             errors.append(f"{target}: generated timestamp is {age:.0f}s old (limit {max_age_seconds}s)")
@@ -494,6 +587,7 @@ def verify_remote_freshness(
                 errors.append(f"{target}: metadata target is {meta.get('target')!r}")
             if expected_sha and meta.get("git_sha") != expected_sha:
                 errors.append(f"{target}: source SHA {meta.get('git_sha')!r} != {expected_sha!r}")
+            errors.extend(validate_startup_and_significance(payload, target))
             results = payload.get("results")
             if not isinstance(results, list):
                 errors.append(f"{target}: results is missing or not a list")
@@ -562,8 +656,9 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
     row_h = 26
     group_h = len(series) * row_h + 34
     header_h = 74
+    startup_h = 52
     footer_h = 34
-    height = header_h + len(scenarios) * group_h + footer_h
+    height = header_h + len(scenarios) * group_h + startup_h + footer_h
 
     img = Image.new("RGB", (WIDTH * SCALE, height * SCALE), BG)
     d = ImageDraw.Draw(img)
@@ -628,6 +723,13 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
         d.line([(20 * SCALE, y * SCALE), ((WIDTH - 20) * SCALE, y * SCALE)], fill=GRID, width=SCALE)
         y += 8
 
+    startup_text = "  |  ".join(
+        f"{series_label(series, meta['runner']['os'], meta.get('target', ''))}: {seconds:.4f}s"
+        for series, seconds in report.startup_seconds.items()
+    )
+    d.text((20 * SCALE, (y + 6) * SCALE), "fixed linker startup (not subtracted)", font=f_meta, fill=FG)
+    d.text((20 * SCALE, (y + 25) * SCALE), startup_text or "startup data missing", font=f_meta, fill=MUTED)
+
     d.text(
         (20 * SCALE, (height - 24) * SCALE),
         "lower is better  |  median of N trials, link step only  |  n/a = linker failed/unavailable  |  pending = unsupported-by-design (documented)",
@@ -655,6 +757,10 @@ def render_html(report: Report, meta: dict[str, Any]) -> str:
             else:
                 cells += '<td class="na">n/a</td>'
         body += f"<tr><td>{sc}</td>{cells}</tr>"
+    startup_body = "".join(
+        f"<tr><td>{series_label(series, runner_os, target)}</td><td>{seconds:.4f}s</td></tr>"
+        for series, seconds in report.startup_seconds.items()
+    )
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>reld benchmarks</title>
 <style>
@@ -667,6 +773,8 @@ td.na{{color:#7d8590}}td.pending{{color:#bb8009}}
 <p>{meta["generated_at"]} &middot; {meta.get("target", "")} &middot; {meta["runner"]["platform"]}</p>
 <img src="{IMAGE_NAME}" alt="benchmark chart">
 <table><thead><tr><th>Configuration</th>{head}</tr></thead><tbody>{body}</tbody></table>
+<h2>Fixed linker startup</h2><p>Reported raw and never subtracted from final-link medians.</p>
+<table><thead><tr><th>Series</th><th>Seconds</th></tr></thead><tbody>{startup_body}</tbody></table>
 <p><a href="https://github.com/{meta["repository"]}">{meta["repository"]}</a></p>
 </body></html>
 """
@@ -698,6 +806,16 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
             }
             for r in report.rows
         ],
+        "startup": [
+            {
+                "series": series,
+                "seconds": seconds,
+                "status": "measured",
+                "mode": series_mode(series, runner_os, meta.get("target", "")),
+                "engine": series_engine(series, runner_os, meta.get("target", "")),
+            }
+            for series, seconds in report.startup_seconds.items()
+        ],
     }
     (out_dir / "latest.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -720,6 +838,7 @@ def write_outputs(report: Report, meta: dict[str, Any], out_dir: Path) -> None:
                 "sha": meta.get("git_sha", ""),
                 "target": meta.get("target", ""),
                 "results": payload["results"],
+                "startup": payload["startup"],
             },
             separators=(",", ":"),
         )

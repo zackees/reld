@@ -3,5 +3,6 @@
 .bosn-state
 .pytest_cache
 target
+**/target
 bench.log
 rr.log

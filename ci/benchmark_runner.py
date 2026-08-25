@@ -1,8 +1,9 @@
-"""Benchmark one idiomatic Rust project's final link across three LTO configurations.
+"""Benchmark one significant Rust project's final link across three LTO configurations.
 
-Cargo compiles ``ci/e2e/sqlite-bridge`` exactly once per configuration and asks rustc to print
+Cargo compiles ``ci/e2e/link-workload`` exactly once per configuration and asks rustc to print
 the target-native final linker invocation.  Warmups and timed trials replay only that captured
 invocation with the selected linker; compilation and executable validation stay outside timing.
+Each linker's fixed process startup is measured separately and never subtracted from final links.
 """
 
 from __future__ import annotations
@@ -22,7 +23,10 @@ from typing import TextIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = REPO_ROOT / "ci" / "e2e" / "sqlite-bridge" / "Cargo.toml"
+DEFAULT_MANIFEST = REPO_ROOT / "ci" / "e2e" / "link-workload" / "Cargo.toml"
+BENCHMARK_PACKAGE = "linkbench-app"
+MIN_REFERENCE_LINK_SECONDS = 0.500
+MAX_STARTUP_FRACTION = 0.10
 
 
 class BenchmarkError(RuntimeError):
@@ -81,7 +85,7 @@ def cargo_capture_command(*, cargo: str, manifest: Path, profile: str, target_di
         "--manifest-path",
         str(manifest),
         "--package",
-        "app",
+        BENCHMARK_PACKAGE,
         "--profile",
         profile,
         "--target-dir",
@@ -228,6 +232,86 @@ def linkers_for_target(target: str, reld: Path) -> tuple[Linker, ...]:
     raise BenchmarkError(f"unsupported benchmark target {target!r}")
 
 
+def _target_family(target: str) -> str:
+    normalized = target.lower()
+    if "windows" in normalized or "msvc" in normalized:
+        return "windows"
+    if "darwin" in normalized or "macos" in normalized:
+        return "macos"
+    if "linux" in normalized:
+        return "linux"
+    raise BenchmarkError(f"unsupported benchmark target {target!r}")
+
+
+def reference_linker_for_target(target: str) -> str:
+    """Return the fastest portable native reference available for this object format."""
+    return {"linux": "wild", "macos": "ld64.lld", "windows": "lld"}[_target_family(target)]
+
+
+def startup_probe_command(target: str, linker: Linker, captured: LinkCommand | None = None) -> list[str]:
+    """Build a target-correct, no-link-work command that still loads the concrete linker."""
+    executable = str(linker.path) if linker.path is not None else None
+    if executable is None and captured is not None and linker.label == "link.exe":
+        executable = captured.executable
+    if executable is None:
+        raise BenchmarkError(f"no executable resolved for startup probe {linker.label!r}")
+    flag = {"linux": "--version", "macos": "-v", "windows": "/?"}[_target_family(target)]
+    return [executable, flag]
+
+
+def benchmark_startup(
+    target: str,
+    linker: Linker,
+    *,
+    captured: LinkCommand,
+    environment: dict[str, str],
+    warmup: int,
+    trials: int,
+) -> float:
+    """Measure process/front-door startup without performing a final link."""
+    command = startup_probe_command(target, linker, captured)
+    for _ in range(warmup):
+        completed = _run_link(command, cwd=Path.cwd(), environment=environment)
+        if completed.returncode < 0:
+            raise BenchmarkError(f"{linker.label} startup probe terminated by signal {-completed.returncode}")
+
+    samples: list[float] = []
+    for _ in range(trials):
+        started = time.perf_counter()
+        completed = _run_link(command, cwd=Path.cwd(), environment=environment)
+        samples.append(time.perf_counter() - started)
+        if completed.returncode < 0:
+            raise BenchmarkError(f"{linker.label} startup probe terminated by signal {-completed.returncode}")
+    return statistics.median(samples)
+
+
+def assert_significant_workload(
+    target: str,
+    startup_seconds: dict[str, float],
+    final_links: dict[str, dict[str, float]],
+) -> None:
+    """Reject workloads where fixed startup can materially determine the chart ordering."""
+    if not startup_seconds:
+        raise BenchmarkError("startup timings are missing")
+    largest_startup = max(startup_seconds.values())
+    reference = reference_linker_for_target(target)
+    failures: list[str] = []
+    for configuration in CONFIGURATIONS:
+        reference_seconds = final_links.get(configuration.label, {}).get(reference)
+        if reference_seconds is None or reference_seconds <= 0:
+            failures.append(f"{configuration.label}: missing {reference} reference timing")
+            continue
+        fraction = largest_startup / reference_seconds
+        if fraction > MAX_STARTUP_FRACTION:
+            failures.append(
+                f"{configuration.label}: largest startup {largest_startup:.4f}s is "
+                f"{fraction:.1%} of {reference} final link {reference_seconds:.4f}s"
+            )
+    if failures:
+        calibration = f" (calibration target: {MIN_REFERENCE_LINK_SECONDS:.3f}s reference link)"
+        raise BenchmarkError("startup-dominated workload" + calibration + ":\n" + "\n".join(failures))
+
+
 def capture_final_link(
     configuration: Configuration,
     *,
@@ -262,6 +346,49 @@ def capture_final_link(
         raise BenchmarkError(f"{error}\nrustc stdout:\n{completed.stdout}\nrustc stderr:\n{completed.stderr}") from error
 
 
+def prune_capture_artifacts(command: LinkCommand, *, profile_dir: Path, log: TextIO) -> None:
+    """Remove only compiler outputs that the captured native link does not reference."""
+    argument_text = "\n".join(command.arguments).replace("\\", "/").lower()
+    removed_files = 0
+    removed_bytes = 0
+    for path in profile_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {".bc", ".d", ".rmeta"}:
+            continue
+        normalized = str(path.absolute()).replace("\\", "/").lower()
+        if normalized in argument_text:
+            continue
+        removed_bytes += path.stat().st_size
+        path.unlink()
+        removed_files += 1
+
+    # Cargo already proved this exact command can produce an executable. Replays replace the
+    # output path and validate every measured linker, so retaining Cargo's copy only wastes disk.
+    command.output.unlink(missing_ok=True)
+    print(
+        f"pruned {removed_files} unreferenced capture files ({removed_bytes / (1024**2):.1f} MiB)",
+        file=log,
+        flush=True,
+    )
+
+
+def release_capture_artifacts(*, profile_dir: Path, target_dir: Path, log: TextIO) -> None:
+    """Release one configuration after every linker has replayed its captured link."""
+    allowed_profiles = {configuration.profile for configuration in CONFIGURATIONS}
+    resolved_target = target_dir.resolve()
+    is_junction = getattr(profile_dir, "is_junction", lambda: False)
+    if (
+        profile_dir.name not in allowed_profiles
+        or profile_dir.parent.resolve() != resolved_target
+        or profile_dir.is_symlink()
+        or is_junction()
+        or profile_dir.resolve().parent != resolved_target
+    ):
+        raise BenchmarkError(f"refusing to release unsafe capture profile: {profile_dir}")
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir)
+    print(f"released capture profile {profile_dir.name}", file=log, flush=True)
+
+
 def _run_link(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -292,6 +419,47 @@ def _validate_executable(output: Path, *, cwd: Path, environment: dict[str, str]
         raise BenchmarkError(f"linked output failed its OK oracle ({completed.returncode}):\n" f"{completed.stdout}{completed.stderr}")
 
 
+def _discard_verified_output(output: Path) -> Path | None:
+    """Discard one verified output, quarantining a transiently locked Windows executable."""
+    try:
+        output.unlink()
+    except PermissionError:
+        if sys.platform != "win32":
+            raise
+        # Windows Defender or the loader can retain a handle briefly after process exit. Mirror
+        # `clud trash` semantics: quarantine the exact artifact once, without delete retries or
+        # guessed process termination. The Actions workspace itself is ephemeral.
+        quarantine = output.with_name(f".{output.name}.trash-{time.time_ns()}")
+        try:
+            output.replace(quarantine)
+        except PermissionError:
+            # Every invocation has a unique output path, so even a non-renamable quarantined file
+            # cannot block the next replay. The hosted runner reclaims the workspace after the job.
+            return None
+        else:
+            return quarantine
+    return None
+
+
+def _reclaim_quarantines(quarantines: list[Path]) -> None:
+    """Reclaim quarantines after a linker's timed trials, before another linker runs."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    helpers = [
+        subprocess.Popen(
+            [sys.executable, "-m", "ci.quarantine_cleanup", str(quarantine)],
+            cwd=REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        for quarantine in quarantines
+    ]
+    for helper in helpers:
+        helper.wait()
+
+
 def benchmark_replay(
     captured: LinkCommand,
     linker: Linker,
@@ -305,8 +473,7 @@ def benchmark_replay(
 ) -> float:
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if captured.windows else ""
-    output = output_dir / f"app-{linker.label.replace('.', '-')}{suffix}"
-    response_file = output.with_suffix(output.suffix + ".rsp")
+    output_stem = f"app-{linker.label.replace('.', '-')}"
     driver_linker_dir = None
     if not captured.windows and use_driver_shim:
         if linker.path is None:
@@ -316,34 +483,52 @@ def benchmark_replay(
         linker_shim = driver_linker_dir / "ld"
         linker_shim.unlink(missing_ok=True)
         linker_shim.symlink_to(linker.path)
-    command, response = replay_command(
-        captured,
-        linker=linker.label,
-        linker_path=linker.path,
-        output=output,
-        response_file=response_file,
-        driver_linker_dir=driver_linker_dir,
-    )
-    if response is not None:
-        response_file.write_text(response, encoding="utf-8", newline="\n")
+    def prepare_replay(output: Path) -> list[str]:
+        response_file = output.with_suffix(output.suffix + ".rsp")
+        command, response = replay_command(
+            captured,
+            linker=linker.label,
+            linker_path=linker.path,
+            output=output,
+            response_file=response_file,
+            driver_linker_dir=driver_linker_dir,
+        )
+        if response is not None:
+            response_file.write_text(response, encoding="utf-8", newline="\n")
+        return command
 
-    for _ in range(warmup):
-        output.unlink(missing_ok=True)
-        completed = _run_link(command, cwd=cwd, environment=environment)
-        if completed.returncode:
-            raise BenchmarkError(f"{linker.label} warmup link failed:\n{completed.stdout}{completed.stderr}")
-
+    quarantines: list[Path] = []
     samples: list[float] = []
-    for _ in range(trials):
-        output.unlink(missing_ok=True)
-        started = time.perf_counter()
-        completed = _run_link(command, cwd=cwd, environment=environment)
-        elapsed = time.perf_counter() - started
-        if completed.returncode:
-            raise BenchmarkError(f"{linker.label} timed link failed:\n{completed.stdout}{completed.stderr}")
-        samples.append(elapsed)
+    try:
+        for index in range(warmup):
+            output = output_dir / f"{output_stem}-warmup-{index}{suffix}"
+            command = prepare_replay(output)
+            completed = _run_link(command, cwd=cwd, environment=environment)
+            if completed.returncode:
+                raise BenchmarkError(f"{linker.label} warmup link failed:\n{completed.stdout}{completed.stderr}")
+            _validate_executable(output, cwd=cwd, environment=environment)
+            if quarantine := _discard_verified_output(output):
+                quarantines.append(quarantine)
 
-    _validate_executable(output, cwd=cwd, environment=environment)
+        for index in range(trials):
+            output = output_dir / f"{output_stem}-trial-{index}{suffix}"
+            command = prepare_replay(output)
+            started = time.perf_counter()
+            completed = _run_link(command, cwd=cwd, environment=environment)
+            elapsed = time.perf_counter() - started
+            if completed.returncode:
+                raise BenchmarkError(f"{linker.label} timed link failed:\n{completed.stdout}{completed.stderr}")
+            samples.append(elapsed)
+            # The oracle runs after the timer stops, once for every produced executable. A bad
+            # early trial therefore cannot enter the median and then be hidden by an overwrite.
+            _validate_executable(output, cwd=cwd, environment=environment)
+            if quarantine := _discard_verified_output(output):
+                quarantines.append(quarantine)
+    finally:
+        # A cleaner that wakes during a later trial would contaminate that measurement with I/O.
+        # Start and join all one-shot helpers only after this linker's timed samples are complete.
+        _reclaim_quarantines(quarantines)
+
     return statistics.median(samples)
 
 
@@ -362,7 +547,8 @@ def run_benchmark(
     environment = benchmark_environment()
     linkers = linkers_for_target(target, reld)
     use_driver_shim = "linux" in target.lower()
-    results: list[tuple[str, list[float]]] = []
+    startup_seconds: dict[str, float] | None = None
+    final_links: dict[str, dict[str, float]] = {}
     for configuration in CONFIGURATIONS:
         captured = capture_final_link(
             configuration,
@@ -372,20 +558,49 @@ def run_benchmark(
             environment=environment,
             log=log,
         )
-        timings = [
-            benchmark_replay(
-                captured,
-                linker,
-                output_dir=workdir / configuration.profile,
-                cwd=manifest.parent,
-                environment=environment,
-                warmup=warmup,
-                trials=trials,
-                use_driver_shim=use_driver_shim,
+        prune_capture_artifacts(
+            captured,
+            profile_dir=target_dir / configuration.profile,
+            log=log,
+        )
+        if startup_seconds is None:
+            startup_seconds = {
+                linker.label: benchmark_startup(
+                    target,
+                    linker,
+                    captured=captured,
+                    environment=environment,
+                    warmup=warmup,
+                    trials=trials,
+                )
+                for linker in linkers
+            }
+        try:
+            final_links[configuration.label] = {
+                linker.label: benchmark_replay(
+                    captured,
+                    linker,
+                    output_dir=workdir / configuration.profile,
+                    cwd=manifest.parent,
+                    environment=environment,
+                    warmup=warmup,
+                    trials=trials,
+                    use_driver_shim=use_driver_shim,
+                )
+                for linker in linkers
+            }
+        finally:
+            # Only one configuration's retained native-link inputs live at a time. Compilation
+            # and any Rust LTO preparation still happen once, before this configuration's timed
+            # loop; removing its profile afterward cannot affect the already-recorded samples.
+            release_capture_artifacts(
+                profile_dir=target_dir / configuration.profile,
+                target_dir=target_dir,
+                log=log,
             )
-            for linker in linkers
-        ]
-        results.append((configuration.label, timings))
+
+    if startup_seconds is None:  # CONFIGURATIONS is intentionally non-empty; keep typing honest.
+        raise BenchmarkError("startup timings are missing")
 
     lines = [
         f"## Link Benchmark: {target}",
@@ -393,8 +608,31 @@ def run_benchmark(
         "| Configuration | " + " | ".join(linker.label for linker in linkers) + " |",
         "|:--------------|" + "|".join("----:" for _ in linkers) + "|",
     ]
-    lines.extend(f"| {label} | " + " | ".join(f"{timing:.4f}" for timing in timings) + " |" for label, timings in results)
-    return "\n".join(lines) + "\n"
+    lines.extend(
+        f"| {configuration.label} | "
+        + " | ".join(f"{final_links[configuration.label][linker.label]:.4f}" for linker in linkers)
+        + " |"
+        for configuration in CONFIGURATIONS
+    )
+    lines.extend(
+        [
+            "",
+            f"## Linker Startup: {target}",
+            "",
+            "| Linker | Seconds |",
+            "|:-------|--------:|",
+            *(f"| {linker.label} | {startup_seconds[linker.label]:.4f} |" for linker in linkers),
+            "",
+            "<!-- Startup is reported raw and is never subtracted from final-link medians. -->",
+        ]
+    )
+    table = "\n".join(lines) + "\n"
+    # Preserve the raw evidence even when the significance gate rejects the workload. This makes
+    # calibration diagnosable without subtracting startup or weakening the publication gate.
+    log.write(table)
+    log.flush()
+    assert_significant_workload(target, startup_seconds, final_links)
+    return table
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -419,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
         with args.output.open("w", encoding="utf-8", newline="") as log:
-            table = run_benchmark(
+            run_benchmark(
                 target=args.target,
                 reld=args.reld.absolute(),
                 manifest=args.manifest.resolve(),
@@ -430,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
                 warmup=args.warmup,
                 log=log,
             )
-            log.write(table)
+            # ``run_benchmark`` writes the evidence before applying the significance gate.
     except BenchmarkError as error:
         message = f"benchmark failed: {error}\n"
         with args.output.open("a", encoding="utf-8", newline="") as log:
