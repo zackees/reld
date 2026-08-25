@@ -33,7 +33,7 @@ from typing import Any
 from urllib.request import urlopen
 
 SCHEMA_VERSION = 6
-BENCHMARK_ID = "artifact-auditor-lto-v1"
+BENCHMARK_ID = "artifact-auditor-native-linux-lto-v2"
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
