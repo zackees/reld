@@ -1439,7 +1439,7 @@ fn declare_common_args<T: platform::Args>(parser: &mut ArgumentParser<T>) {
     parser
         .declare()
         .long("mmap-output-file")
-        .help("Write output file using mmap (default)")
+        .help("Force writing the output file using mmap")
         .execute(|args, _modifier_stack| {
             args.common_mut().file_write_mode = Some(FileWriteMode::Mmap);
             Ok(())
