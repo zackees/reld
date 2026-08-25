@@ -140,7 +140,9 @@ jobs:
           uv run --no-sync python -m ci.benchmark_runner
           --target "$TARGET" --reld "$RELD_DRIVER"
           --manifest ci/e2e/link-workload/Cargo.toml
-          --output benchmark-output/benchmark.log --trials 3 --warmup 1
+          --output benchmark-output/benchmark.log
+          --output-mode-report benchmark-output/output-modes.json
+          --trials 3 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
         shell: bash
@@ -173,6 +175,7 @@ jobs:
           path: |
             benchmark-output/benchmark.log
             benchmark-output/metadata.json
+            benchmark-output/output-modes.json
           if-no-files-found: error
 
   aggregate:

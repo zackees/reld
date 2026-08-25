@@ -47,6 +47,8 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     assert "RUNNER_ENVIRONMENT: ${{ runner.environment }}" in text
     assert "--trials 3 --warmup 1" in text
     assert "--manifest ci/e2e/link-workload/Cargo.toml" in text
+    assert "--output-mode-report benchmark-output/output-modes.json" in text
+    assert "benchmark-output/output-modes.json" in text
     assert "sqlite-bridge" not in text
     assert "--print link-args" not in text  # Python owns capture/replay, not shell YAML.
     assert "will report n/a" not in text

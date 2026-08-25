@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import os
+import platform
 import re
 import shutil
 import statistics
@@ -58,6 +60,7 @@ class LinkCommand:
 class Linker:
     label: str
     path: Path | None = None
+    driver_arguments: tuple[str, ...] = ()
 
 
 _QUOTED_ARGUMENT = re.compile(r'"(?:\\.|[^"\\])*"')
@@ -303,10 +306,7 @@ def assert_significant_workload(
             continue
         fraction = largest_startup / reference_seconds
         if fraction > MAX_STARTUP_FRACTION:
-            failures.append(
-                f"{configuration.label}: largest startup {largest_startup:.4f}s is "
-                f"{fraction:.1%} of {reference} final link {reference_seconds:.4f}s"
-            )
+            failures.append(f"{configuration.label}: largest startup {largest_startup:.4f}s is {fraction:.1%} of {reference} final link {reference_seconds:.4f}s")
     if failures:
         calibration = f" (calibration target: {MIN_REFERENCE_LINK_SECONDS:.3f}s reference link)"
         raise BenchmarkError("startup-dominated workload" + calibration + ":\n" + "\n".join(failures))
@@ -376,13 +376,7 @@ def release_capture_artifacts(*, profile_dir: Path, target_dir: Path, log: TextI
     allowed_profiles = {configuration.profile for configuration in CONFIGURATIONS}
     resolved_target = target_dir.resolve()
     is_junction = getattr(profile_dir, "is_junction", lambda: False)
-    if (
-        profile_dir.name not in allowed_profiles
-        or profile_dir.parent.resolve() != resolved_target
-        or profile_dir.is_symlink()
-        or is_junction()
-        or profile_dir.resolve().parent != resolved_target
-    ):
+    if profile_dir.name not in allowed_profiles or profile_dir.parent.resolve() != resolved_target or profile_dir.is_symlink() or is_junction() or profile_dir.resolve().parent != resolved_target:
         raise BenchmarkError(f"refusing to release unsafe capture profile: {profile_dir}")
     if profile_dir.exists():
         shutil.rmtree(profile_dir)
@@ -416,7 +410,7 @@ def _validate_executable(output: Path, *, cwd: Path, environment: dict[str, str]
         check=False,
     )
     if completed.returncode or "OK" not in completed.stdout:
-        raise BenchmarkError(f"linked output failed its OK oracle ({completed.returncode}):\n" f"{completed.stdout}{completed.stderr}")
+        raise BenchmarkError(f"linked output failed its OK oracle ({completed.returncode}):\n{completed.stdout}{completed.stderr}")
 
 
 def _discard_verified_output(output: Path) -> Path | None:
@@ -470,6 +464,8 @@ def benchmark_replay(
     warmup: int,
     trials: int,
     use_driver_shim: bool,
+    sample_sink: list[float] | None = None,
+    output_size_sink: list[int] | None = None,
 ) -> float:
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if captured.windows else ""
@@ -483,6 +479,7 @@ def benchmark_replay(
         linker_shim = driver_linker_dir / "ld"
         linker_shim.unlink(missing_ok=True)
         linker_shim.symlink_to(linker.path)
+
     def prepare_replay(output: Path) -> list[str]:
         response_file = output.with_suffix(output.suffix + ".rsp")
         command, response = replay_command(
@@ -493,6 +490,7 @@ def benchmark_replay(
             response_file=response_file,
             driver_linker_dir=driver_linker_dir,
         )
+        command.extend(linker.driver_arguments)
         if response is not None:
             response_file.write_text(response, encoding="utf-8", newline="\n")
         return command
@@ -522,6 +520,8 @@ def benchmark_replay(
             # The oracle runs after the timer stops, once for every produced executable. A bad
             # early trial therefore cannot enter the median and then be hidden by an overwrite.
             _validate_executable(output, cwd=cwd, environment=environment)
+            if output_size_sink is not None:
+                output_size_sink.append(output.stat().st_size)
             if quarantine := _discard_verified_output(output):
                 quarantines.append(quarantine)
     finally:
@@ -529,7 +529,155 @@ def benchmark_replay(
         # Start and join all one-shot helpers only after this linker's timed samples are complete.
         _reclaim_quarantines(quarantines)
 
+    if sample_sink is not None:
+        sample_sink.extend(samples)
     return statistics.median(samples)
+
+
+def _rotated(items: tuple[Linker, ...], offset: int) -> tuple[Linker, ...]:
+    if not items:
+        return ()
+    split = offset % len(items)
+    return items[split:] + items[:split]
+
+
+def benchmark_linkers_round_robin(
+    captured: LinkCommand,
+    linkers: tuple[Linker, ...],
+    *,
+    output_dir: Path,
+    cwd: Path,
+    environment: dict[str, str],
+    warmup: int,
+    trials: int,
+    use_driver_shim: bool,
+) -> tuple[dict[str, float], dict[str, list[float]], dict[str, list[int]], list[list[str]]]:
+    """Replay linkers in rotating order so cache/writeback position cannot pick a winner."""
+    if not linkers:
+        raise BenchmarkError("at least one linker is required")
+
+    samples = {linker.label: [] for linker in linkers}
+    output_sizes = {linker.label: [] for linker in linkers}
+    orders: list[list[str]] = []
+    for round_index in range(warmup + trials):
+        order = _rotated(linkers, round_index)
+        if round_index >= warmup:
+            orders.append([linker.label for linker in order])
+        for linker in order:
+            one_sample: list[float] = []
+            one_size: list[int] = []
+            benchmark_replay(
+                captured,
+                linker,
+                output_dir=output_dir / linker.label.replace("/", "-"),
+                cwd=cwd,
+                environment=environment,
+                warmup=0,
+                trials=1,
+                use_driver_shim=use_driver_shim,
+                sample_sink=one_sample,
+                output_size_sink=one_size,
+            )
+            if round_index >= warmup:
+                samples[linker.label].extend(one_sample)
+                output_sizes[linker.label].extend(one_size)
+
+    medians = {label: statistics.median(values) for label, values in samples.items()}
+    return medians, samples, output_sizes, orders
+
+
+def _sample_summary(samples: list[float]) -> dict[str, float | list[float]]:
+    median = statistics.median(samples)
+    deviations = [abs(sample - median) for sample in samples]
+    return {
+        "samples_seconds": samples,
+        "median_seconds": median,
+        "median_absolute_deviation_seconds": statistics.median(deviations),
+        "min_seconds": min(samples),
+        "max_seconds": max(samples),
+    }
+
+
+def _linux_filesystem_type(path: Path, environment: dict[str, str]) -> str:
+    completed = subprocess.run(
+        ["findmnt", "--noheadings", "--output", "FSTYPE", "--target", str(path)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode:
+        raise BenchmarkError(f"unable to identify benchmark filesystem:\n{completed.stderr}")
+    filesystem = completed.stdout.strip()
+    if not filesystem:
+        raise BenchmarkError("findmnt reported an empty benchmark filesystem type")
+    return filesystem
+
+
+_PHASE_NAMES = (
+    "Create output file",
+    "Wait for output file creation",
+    "Compute build ID",
+    "Write data to file",
+    "Flush and unmap output file",
+)
+
+
+def _parse_phase_timings(output: str) -> dict[str, float]:
+    phases: dict[str, float] = {}
+    for line in output.splitlines():
+        for name in _PHASE_NAMES:
+            match = re.search(rf"([0-9]+(?:\.[0-9]+)?)\s+{re.escape(name)}\s*$", line)
+            if match:
+                phases[name] = float(match.group(1)) / 1000.0
+    required = {"Compute build ID", "Write data to file", "Flush and unmap output file"}
+    missing = sorted(required - phases.keys())
+    if missing:
+        raise BenchmarkError(f"reld phase trace omitted required phases: {', '.join(missing)}\n{output}")
+    return phases
+
+
+def capture_reld_phase_trace(
+    captured: LinkCommand,
+    linker: Linker,
+    *,
+    output_dir: Path,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[dict[str, float], int, str]:
+    """Run one untimed, validated reld link with phase instrumentation enabled."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / "phase-trace"
+    driver_dir = output_dir / "driver"
+    driver_dir.mkdir(parents=True, exist_ok=True)
+    if linker.path is None:
+        raise BenchmarkError("no executable resolved for reld phase trace")
+    shim = driver_dir / "ld"
+    shim.unlink(missing_ok=True)
+    shim.symlink_to(linker.path)
+    command, response = replay_command(
+        captured,
+        linker=linker.label,
+        linker_path=linker.path,
+        output=output,
+        response_file=output.with_suffix(".rsp"),
+        driver_linker_dir=driver_dir,
+    )
+    if response is not None:
+        raise BenchmarkError("Linux phase trace unexpectedly required a response file")
+    command.extend(linker.driver_arguments)
+    command.extend(("-Wl,--time", "-Wl,--no-fork"))
+    completed = _run_link(command, cwd=cwd, environment=environment)
+    if completed.returncode:
+        raise BenchmarkError(f"reld phase trace failed:\n{completed.stdout}{completed.stderr}")
+    _validate_executable(output, cwd=cwd, environment=environment)
+    output_size = output.stat().st_size
+    combined_output = completed.stdout + completed.stderr
+    phases = _parse_phase_timings(combined_output)
+    _discard_verified_output(output)
+    return phases, output_size, combined_output
 
 
 def run_benchmark(
@@ -543,12 +691,34 @@ def run_benchmark(
     trials: int,
     warmup: int,
     log: TextIO,
+    output_mode_report: Path | None = None,
 ) -> str:
     environment = benchmark_environment()
     linkers = linkers_for_target(target, reld)
     use_driver_shim = "linux" in target.lower()
     startup_seconds: dict[str, float] | None = None
     final_links: dict[str, dict[str, float]] = {}
+    diagnostic_report: dict[str, object] | None = None
+    if output_mode_report is not None:
+        diagnostic_report = {
+            "schema_version": 1,
+            "target": target,
+            "status": "measured" if use_driver_shim else "not-applicable",
+            "metadata": {},
+            "configurations": {},
+        }
+        if use_driver_shim:
+            workdir.mkdir(parents=True, exist_ok=True)
+            thread_count = os.cpu_count() or 1
+            diagnostic_report["metadata"] = {
+                "runner_os": platform.platform(),
+                "kernel": platform.release(),
+                "machine": platform.machine(),
+                "filesystem": _linux_filesystem_type(workdir, environment),
+                "thread_count": thread_count,
+                "output_mode": "explicit per contender",
+                "timing_scope": "captured final native link only",
+            }
     for configuration in CONFIGURATIONS:
         captured = capture_final_link(
             configuration,
@@ -576,19 +746,65 @@ def run_benchmark(
                 for linker in linkers
             }
         try:
-            final_links[configuration.label] = {
-                linker.label: benchmark_replay(
+            medians, _samples, _sizes, _orders = benchmark_linkers_round_robin(
+                captured,
+                linkers,
+                output_dir=workdir / configuration.profile / "published",
+                cwd=manifest.parent,
+                environment=environment,
+                warmup=warmup,
+                trials=trials,
+                use_driver_shim=use_driver_shim,
+            )
+            final_links[configuration.label] = medians
+
+            if diagnostic_report is not None and use_driver_shim:
+                metadata = diagnostic_report["metadata"]
+                assert isinstance(metadata, dict)
+                thread_count = metadata["thread_count"]
+                common_arguments = (f"-Wl,--threads={thread_count}",)
+                modes = (
+                    Linker("default", reld.absolute(), common_arguments),
+                    Linker("mmap", reld.absolute(), common_arguments + ("-Wl,--mmap-output-file",)),
+                    Linker("buffer", reld.absolute(), common_arguments + ("-Wl,--no-mmap-output-file",)),
+                )
+                _, mode_samples, mode_sizes, mode_orders = benchmark_linkers_round_robin(
                     captured,
-                    linker,
-                    output_dir=workdir / configuration.profile,
+                    modes,
+                    output_dir=workdir / configuration.profile / "output-modes",
                     cwd=manifest.parent,
                     environment=environment,
                     warmup=warmup,
                     trials=trials,
-                    use_driver_shim=use_driver_shim,
+                    use_driver_shim=True,
                 )
-                for linker in linkers
-            }
+                configuration_report: dict[str, object] = {
+                    "trial_orders": mode_orders,
+                    "modes": {},
+                }
+                mode_reports = configuration_report["modes"]
+                assert isinstance(mode_reports, dict)
+                for mode in modes:
+                    sizes = mode_sizes[mode.label]
+                    if not sizes or min(sizes) < 240 * 1024 * 1024:
+                        raise BenchmarkError(f"{configuration.label}/{mode.label} output is not approximately 256 MiB: {sizes}")
+                    phases, phase_output_size, phase_trace = capture_reld_phase_trace(
+                        captured,
+                        mode,
+                        output_dir=workdir / configuration.profile / "phase-traces" / mode.label,
+                        cwd=manifest.parent,
+                        environment=environment,
+                    )
+                    mode_reports[mode.label] = {
+                        **_sample_summary(mode_samples[mode.label]),
+                        "output_sizes_bytes": sizes,
+                        "phase_output_size_bytes": phase_output_size,
+                        "phase_seconds": phases,
+                        "phase_trace": phase_trace,
+                    }
+                configurations = diagnostic_report["configurations"]
+                assert isinstance(configurations, dict)
+                configurations[configuration.label] = configuration_report
         finally:
             # Only one configuration's retained native-link inputs live at a time. Compilation
             # and any Rust LTO preparation still happen once, before this configuration's timed
@@ -608,12 +824,7 @@ def run_benchmark(
         "| Configuration | " + " | ".join(linker.label for linker in linkers) + " |",
         "|:--------------|" + "|".join("----:" for _ in linkers) + "|",
     ]
-    lines.extend(
-        f"| {configuration.label} | "
-        + " | ".join(f"{final_links[configuration.label][linker.label]:.4f}" for linker in linkers)
-        + " |"
-        for configuration in CONFIGURATIONS
-    )
+    lines.extend(f"| {configuration.label} | " + " | ".join(f"{final_links[configuration.label][linker.label]:.4f}" for linker in linkers) + " |" for configuration in CONFIGURATIONS)
     lines.extend(
         [
             "",
@@ -631,6 +842,9 @@ def run_benchmark(
     # calibration diagnosable without subtracting startup or weakening the publication gate.
     log.write(table)
     log.flush()
+    if output_mode_report is not None and diagnostic_report is not None:
+        output_mode_report.parent.mkdir(parents=True, exist_ok=True)
+        output_mode_report.write_text(json.dumps(diagnostic_report, indent=2) + "\n", encoding="utf-8")
     assert_significant_workload(target, startup_seconds, final_links)
     return table
 
@@ -645,6 +859,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-dir", type=Path, default=REPO_ROOT / "target" / "link-benchmark")
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--output-mode-report", type=Path)
     args = parser.parse_args(argv)
 
     if not args.reld.is_file():
@@ -667,6 +882,7 @@ def main(argv: list[str] | None = None) -> int:
                 trials=args.trials,
                 warmup=args.warmup,
                 log=log,
+                output_mode_report=args.output_mode_report,
             )
             # ``run_benchmark`` writes the evidence before applying the significance gate.
     except BenchmarkError as error:

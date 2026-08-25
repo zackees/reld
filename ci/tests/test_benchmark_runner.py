@@ -13,8 +13,10 @@ from ci.benchmark_runner import (
     LinkCommand,
     Linker,
     _discard_verified_output,
+    _parse_phase_timings,
     assert_significant_workload,
     benchmark_environment,
+    benchmark_linkers_round_robin,
     benchmark_replay,
     cargo_capture_command,
     parse_print_link_args,
@@ -87,8 +89,10 @@ def test_each_configuration_is_replayed_then_released_before_the_next_capture(tm
         return 0.01
 
     def fake_replay(captured, selected_linker, **kwargs):
-        del captured, kwargs
+        del captured
         events.append(f"replay:{selected_linker.label}")
+        kwargs["sample_sink"].append(1.0)
+        kwargs["output_size_sink"].append(256 * 1024 * 1024)
         return 1.0
 
     def fake_release(*, profile_dir, target_dir, log):
@@ -120,14 +124,89 @@ def test_each_configuration_is_replayed_then_released_before_the_next_capture(tm
         "capture:no-LTO",
         "startup",
         "replay:wild",
+        "replay:wild",
+        "replay:wild",
+        "replay:wild",
         "release:linkbench-no-lto",
         "capture:ThinLTO",
+        "replay:wild",
+        "replay:wild",
+        "replay:wild",
         "replay:wild",
         "release:linkbench-thin-lto",
         "capture:full-LTO",
         "replay:wild",
+        "replay:wild",
+        "replay:wild",
+        "replay:wild",
         "release:linkbench-full-lto",
     ]
+
+
+def test_linker_trials_rotate_order_and_preserve_every_sample(tmp_path: Path, monkeypatch):
+    captured = LinkCommand("cc", ("main.o", "-o", "/old/app"), Path("/old/app"), False)
+    linkers = tuple(Linker(label, tmp_path / label) for label in ("wild", "reld", "mmap"))
+    calls: list[str] = []
+
+    def fake_replay(captured, linker, *, sample_sink, output_size_sink, **kwargs):
+        del captured, kwargs
+        calls.append(linker.label)
+        sample_sink.append(float(len(calls)))
+        output_size_sink.append(256 * 1024 * 1024)
+        return sample_sink[0]
+
+    monkeypatch.setattr(runner_module, "benchmark_replay", fake_replay)
+
+    medians, samples, sizes, orders = benchmark_linkers_round_robin(
+        captured,
+        linkers,
+        output_dir=tmp_path / "out",
+        cwd=tmp_path,
+        environment={},
+        warmup=1,
+        trials=3,
+        use_driver_shim=True,
+    )
+
+    assert calls == [
+        "wild",
+        "reld",
+        "mmap",
+        "reld",
+        "mmap",
+        "wild",
+        "mmap",
+        "wild",
+        "reld",
+        "wild",
+        "reld",
+        "mmap",
+    ]
+    assert orders == [
+        ["reld", "mmap", "wild"],
+        ["mmap", "wild", "reld"],
+        ["wild", "reld", "mmap"],
+    ]
+    assert all(len(values) == 3 for values in samples.values())
+    assert all(len(values) == 3 for values in sizes.values())
+    assert set(medians) == {"wild", "reld", "mmap"}
+
+
+def test_reld_phase_trace_parser_requires_dominant_output_phases():
+    output = """\
+│ ├──    12.50 Compute build ID
+│ ├──   625.25 Write data to file
+│ └──     8.00 Flush and unmap output file
+"""
+
+    assert _parse_phase_timings(output) == {
+        "Compute build ID": 0.0125,
+        "Write data to file": 0.62525,
+        "Flush and unmap output file": 0.008,
+    }
+
+    with pytest.raises(BenchmarkError, match="omitted required phases"):
+        _parse_phase_timings("12.50 Compute build ID\n")
 
 
 def test_release_capture_artifacts_rejects_outside_directory(tmp_path: Path):
@@ -335,7 +414,7 @@ def test_cargo_capture_command_rejects_shell_fragments():
 
 
 def test_parse_print_link_args_decodes_rust_escaped_windows_paths():
-    output = 'compiler chatter\n"C:\\\\VS\\\\link.exe" "/NOLOGO" ' '"C:\\\\target\\\\app.o" "/OUT:C:\\\\target\\\\app.exe"\n'
+    output = 'compiler chatter\n"C:\\\\VS\\\\link.exe" "/NOLOGO" "C:\\\\target\\\\app.o" "/OUT:C:\\\\target\\\\app.exe"\n'
 
     command = parse_print_link_args(output, windows=True)
 
@@ -348,7 +427,7 @@ def test_parse_print_link_args_decodes_rust_escaped_windows_paths():
 
 
 def test_parse_print_link_args_reads_unix_driver_command():
-    output = 'LC_ALL="C" PATH="/toolchain/bin:/usr/bin" VSLANG="1033" ' '"cc" "main.o" "-Wl,--gc-sections" "-o" "/tmp/app"\n'
+    output = 'LC_ALL="C" PATH="/toolchain/bin:/usr/bin" VSLANG="1033" "cc" "main.o" "-Wl,--gc-sections" "-o" "/tmp/app"\n'
 
     command = parse_print_link_args(output, windows=False)
 
@@ -357,9 +436,7 @@ def test_parse_print_link_args_reads_unix_driver_command():
 
 
 def test_parse_print_link_args_handles_macos_environment_removals():
-    output = (
-        'env -u IPHONEOS_DEPLOYMENT_TARGET -u SDKROOT LC_ALL="C" ' 'PATH="/toolchain/bin:/usr/bin" VSLANG="1033" ZERO_AR_DATE="1" ' '"cc" "symbols.o" "libapp.rlib" "-arch" "arm64" "-o" "/tmp/app"\n'
-    )
+    output = 'env -u IPHONEOS_DEPLOYMENT_TARGET -u SDKROOT LC_ALL="C" PATH="/toolchain/bin:/usr/bin" VSLANG="1033" ZERO_AR_DATE="1" "cc" "symbols.o" "libapp.rlib" "-arch" "arm64" "-o" "/tmp/app"\n'
 
     command = parse_print_link_args(output, windows=False)
 
