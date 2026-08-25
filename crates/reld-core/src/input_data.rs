@@ -110,6 +110,7 @@ pub(crate) struct InputFileRef<'data> {
     pub(crate) filename: &'data Path,
     original_filename: &'data Path,
     pub(crate) modifiers: Modifiers,
+    pub(crate) input_data: Option<&'data dyn InputFileData>,
 }
 
 impl InputFileRef<'_> {
@@ -119,6 +120,7 @@ impl InputFileRef<'_> {
             filename: Path::new(""),
             original_filename: Path::new(""),
             modifiers: Modifiers::default(),
+            input_data: None,
         }
     }
 }
@@ -133,6 +135,7 @@ impl<I: InputFileData> InputFile<I> {
             filename: &self.filename,
             original_filename: &self.original_filename,
             modifiers: self.modifiers,
+            input_data: self.data.as_ref().map(|data| data as &dyn InputFileData),
         }
     }
 }

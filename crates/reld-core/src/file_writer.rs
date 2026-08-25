@@ -25,6 +25,7 @@ use rayon::iter::IndexedParallelIterator;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use rayon::slice::ParallelSliceMut;
+use std::fs::File;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::Path;
@@ -77,6 +78,21 @@ pub(crate) struct OutputBuffer<O: OutputFileData>(O);
 impl<O: OutputFileData> OutputBuffer<O> {
     pub(crate) fn invalidate(&mut self, len: usize) {
         self.0.invalidate(len);
+    }
+
+    pub(crate) fn copy_file_range(
+        &mut self,
+        input: &File,
+        input_offset: u64,
+        output_offset: u64,
+        len: usize,
+    ) -> std::io::Result<bool> {
+        self.0
+            .copy_file_range(input, input_offset, output_offset, len)
+    }
+
+    pub(crate) fn supports_file_range_copy(&self) -> bool {
+        self.0.supports_file_range_copy()
     }
 
     fn finish(self) -> Result {

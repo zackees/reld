@@ -58,6 +58,11 @@ pub enum FileType {
 pub trait InputFileData: Send + Sync + std::fmt::Debug {
     fn bytes(&self) -> &[u8];
 
+    /// Reopens the native file backing these bytes when its identity is unchanged.
+    fn open_for_direct_copy(&self) -> Option<File> {
+        None
+    }
+
     /// Returns whether the input still has the same identity as when it was opened.
     fn verify_unchanged(&self) -> std::io::Result<bool> {
         Ok(true)
@@ -72,10 +77,16 @@ pub trait OutputFileData: Send {
     /// Returns the output buffer for random-access writing.
     fn bytes_mut(&mut self) -> &mut [u8];
 
+    /// Returns whether this output can attempt native file-to-file range copies.
+    fn supports_file_range_copy(&self) -> bool {
+        false
+    }
+
     /// Attempts to copy a byte range directly from an input file into this output.
     ///
     /// Returns `Ok(true)` only when the complete range was copied. Implementations that cannot
-    /// provide a direct file-to-file copy leave the output unchanged and return `Ok(false)`.
+    /// provide a direct file-to-file copy return `Ok(false)`. Callers must overwrite the complete
+    /// destination range on `Ok(false)`, since an OS copy may have made partial progress.
     fn copy_file_range(
         &mut self,
         _input: &File,
@@ -328,6 +339,10 @@ pub struct OsInputFile {
     /// The modification timestamp of the input file just before we opened it. We expect our input
     /// files not to change while we're running.
     modification_time: std::time::SystemTime,
+    #[cfg(target_os = "linux")]
+    device: u64,
+    #[cfg(target_os = "linux")]
+    inode: u64,
 }
 
 impl Deref for OsInputBytes {
@@ -341,6 +356,25 @@ impl Deref for OsInputBytes {
 impl InputFileData for OsInputFile {
     fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    fn open_for_direct_copy(&self) -> Option<File> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let file = File::open(&self.path).ok()?;
+            let metadata = file.metadata().ok()?;
+            (metadata.dev() == self.device
+                && metadata.ino() == self.inode
+                && metadata.len() == self.bytes.len() as u64
+                && metadata.modified().ok()? == self.modification_time)
+                .then_some(file)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     fn verify_unchanged(&self) -> std::io::Result<bool> {
@@ -359,6 +393,27 @@ pub struct OsOutputFile {
     path: Arc<Path>,
 }
 
+#[cfg(target_os = "linux")]
+fn complete_file_range_copy(
+    mut remaining: usize,
+    mut copy: impl FnMut(usize) -> nix::Result<usize>,
+) -> bool {
+    while remaining > 0 {
+        match copy(remaining) {
+            Ok(0) => return false,
+            Ok(copied) if copied <= remaining => remaining -= copied,
+            Ok(_) => return false,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+#[cfg(all(test, target_os = "linux"))]
+static DIRECT_COPY_SUCCESSES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl OutputFileData for OsOutputFile {
     fn bytes(&self) -> &[u8] {
         match &self.buffer {
@@ -371,6 +426,57 @@ impl OutputFileData for OsOutputFile {
         match &mut self.buffer {
             OsOutputBuffer::Mmap(mmap) => mmap,
             OsOutputBuffer::InMemory(bytes) => bytes,
+        }
+    }
+
+    fn supports_file_range_copy(&self) -> bool {
+        cfg!(target_os = "linux") && matches!(self.buffer, OsOutputBuffer::Mmap(_))
+    }
+
+    fn copy_file_range(
+        &mut self,
+        input: &File,
+        input_offset: u64,
+        output_offset: u64,
+        len: usize,
+    ) -> std::io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            if !self.supports_file_range_copy() {
+                return Ok(false);
+            }
+
+            let mut input_offset = i64::try_from(input_offset).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "input offset is too large",
+                )
+            })?;
+            let mut output_offset = i64::try_from(output_offset).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "output offset is too large",
+                )
+            })?;
+            let complete = complete_file_range_copy(len, |remaining| {
+                nix::fcntl::copy_file_range(
+                    input,
+                    Some(&mut input_offset),
+                    &self.file,
+                    Some(&mut output_offset),
+                    remaining,
+                )
+            });
+            if complete {
+                #[cfg(test)]
+                DIRECT_COPY_SUCCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(complete)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (input, input_offset, output_offset, len);
+            Ok(false)
         }
     }
 
@@ -409,15 +515,17 @@ impl FileSystem for OsFileSystem {
         path: &Path,
         #[allow(unused_variables)] prepopulate_maps: bool,
     ) -> Result<(Self::Input, Option<Arc<File>>)> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open input file `{}`", path.display()))?;
+        let file = Arc::new(
+            File::open(path)
+                .with_context(|| format!("Failed to open input file `{}`", path.display()))?,
+        );
 
-        let modification_time = file
+        let metadata = file
             .metadata()
-            .and_then(|meta| meta.modified())
-            .with_context(|| {
-                format!("Failed to read file modification time `{}`", path.display())
-            })?;
+            .with_context(|| format!("Failed to read file metadata `{}`", path.display()))?;
+        let modification_time = metadata.modified().with_context(|| {
+            format!("Failed to read file modification time `{}`", path.display())
+        })?;
 
         let bytes = {
             // Safety: Unfortunately, this is a bit of a compromise. Basically this is only safe if
@@ -443,7 +551,7 @@ impl FileSystem for OsFileSystem {
                 mmap_options.populate();
             }
 
-            let bytes = unsafe { mmap_options.map(&file) }
+            let bytes = unsafe { mmap_options.map(&*file) }
                 .with_context(|| format!("Failed to mmap input file `{}`", path.display()))?;
 
             OsInputBytes(bytes)
@@ -454,8 +562,18 @@ impl FileSystem for OsFileSystem {
                 bytes,
                 path: path.to_owned(),
                 modification_time,
+                #[cfg(target_os = "linux")]
+                device: {
+                    use std::os::unix::fs::MetadataExt as _;
+                    metadata.dev()
+                },
+                #[cfg(target_os = "linux")]
+                inode: {
+                    use std::os::unix::fs::MetadataExt as _;
+                    metadata.ino()
+                },
             },
-            Some(Arc::new(file)),
+            Some(file),
         ))
     }
 
@@ -633,8 +751,86 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "linux")]
+    static DIRECT_COPY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linker_preserves_a_large_directly_copied_section() {
+        use object::Object as _;
+        use object::ObjectSection as _;
+        use object::ObjectSymbol as _;
+
+        let _direct_copy_guard = DIRECT_COPY_TEST_LOCK.lock().unwrap();
+        let direct_copies_before = DIRECT_COPY_SUCCESSES.load(std::sync::atomic::Ordering::Relaxed);
+        let directory = tempfile::tempdir().unwrap();
+        let input_path = directory.path().join("large.o");
+        let output_path = directory.path().join("large.so");
+        let payload = (0u8..=255)
+            .cycle()
+            .take(DIRECT_TEST_SECTION_SIZE)
+            .collect::<Vec<_>>();
+
+        let mut input = object::write::Object::new(
+            object::BinaryFormat::Elf,
+            object::Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let section = input.add_section(
+            Vec::new(),
+            b".reld_direct_copy".to_vec(),
+            object::SectionKind::ReadOnlyData,
+        );
+        input.append_section_data(section, &payload, 1);
+        input.add_symbol(object::write::Symbol {
+            name: b"reld_direct_copy_payload".to_vec(),
+            value: 0,
+            size: payload.len() as u64,
+            kind: object::SymbolKind::Data,
+            scope: object::SymbolScope::Dynamic,
+            weak: false,
+            section: object::write::SymbolSection::Section(section),
+            flags: object::SymbolFlags::None,
+        });
+        std::fs::write(&input_path, input.write().unwrap()).unwrap();
+
+        let arguments = [
+            "reld".to_owned(),
+            "-shared".to_owned(),
+            input_path.to_str().unwrap().to_owned(),
+            "-o".to_owned(),
+            output_path.to_str().unwrap().to_owned(),
+        ];
+        let get_arguments = || arguments.iter().map(String::as_str);
+        let mut args = crate::Args::new(get_arguments).unwrap();
+        args.parse(get_arguments).unwrap();
+        let linker = crate::Linker::new();
+        let linker_output = linker.run(&args).unwrap();
+        assert!(
+            DIRECT_COPY_SUCCESSES.load(std::sync::atomic::Ordering::Relaxed) > direct_copies_before,
+            "the linker did not activate direct section copying"
+        );
+
+        let output = std::fs::read(output_path).unwrap();
+        let output = object::File::parse(output.as_slice()).unwrap();
+        let output_symbol = output.symbol_by_name("reld_direct_copy_payload").unwrap();
+        let output_section = output
+            .section_by_index(output_symbol.section_index().unwrap())
+            .unwrap();
+        let offset = (output_symbol.address() - output_section.address()) as usize;
+        assert_eq!(
+            &output_section.data().unwrap()[offset..offset + payload.len()],
+            payload
+        );
+        drop(linker_output);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const DIRECT_TEST_SECTION_SIZE: usize = 1024 * 1024;
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_output_directly_copies_an_exact_file_range() {
+        let _direct_copy_guard = DIRECT_COPY_TEST_LOCK.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let input_path = directory.path().join("input.bin");
         let output_path = directory.path().join("output.bin");
@@ -653,6 +849,23 @@ mod tests {
 
         assert!(output.copy_file_range(&input, 7, 5, 11).unwrap());
         assert_eq!(&output.bytes()[5..16], b"DIRECT-COPY");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partial_or_failed_native_copy_requires_userspace_fallback() {
+        let mut calls = 0;
+        let complete = complete_file_range_copy(16, |remaining| {
+            calls += 1;
+            if calls == 1 {
+                Ok(remaining / 2)
+            } else {
+                Err(nix::errno::Errno::EXDEV)
+            }
+        });
+
+        assert!(!complete);
+        assert_eq!(calls, 2);
     }
 
     #[cfg(target_os = "linux")]
