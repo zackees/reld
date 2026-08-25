@@ -215,11 +215,16 @@ fn write_gnu_build_id_note(
     layout: &ElfLayout,
 ) -> Result {
     let hash_placeholder;
+    let legacy_hash_placeholder;
     let uuid_placeholder;
     let build_id = match build_id_option {
         BuildIdOption::Fast => {
-            hash_placeholder = compute_hash(sized_output);
-            hash_placeholder.as_bytes()
+            hash_placeholder = compute_fast_hash(sized_output);
+            hash_placeholder.as_slice()
+        }
+        BuildIdOption::Md5 | BuildIdOption::Sha1 => {
+            legacy_hash_placeholder = compute_legacy_hash(sized_output);
+            legacy_hash_placeholder.as_bytes()
         }
         BuildIdOption::Hex(hex) => hex.as_slice(),
         BuildIdOption::Uuid => {
@@ -246,11 +251,40 @@ fn write_gnu_build_id_note(
     Ok(())
 }
 
-fn compute_hash(sized_output: &SizedOutput<impl OutputFileData>) -> blake3::Hash {
+fn compute_fast_hash(sized_output: &SizedOutput<impl OutputFileData>) -> [u8; size_of::<u128>()] {
+    timing_phase!("Compute build ID");
+    fast_build_id(&sized_output.out)
+}
+
+fn fast_build_id(bytes: &[u8]) -> [u8; size_of::<u128>()] {
+    twox_hash::XxHash3_128::oneshot(bytes).to_le_bytes()
+}
+
+fn compute_legacy_hash(sized_output: &SizedOutput<impl OutputFileData>) -> blake3::Hash {
     timing_phase!("Compute build ID");
     blake3::Hasher::new()
         .update_rayon(&sized_output.out)
         .finalize()
+}
+
+#[cfg(test)]
+mod build_id_tests {
+    use super::fast_build_id;
+
+    #[test]
+    fn fast_build_id_hashes_every_output_byte_deterministically() {
+        let original = (0_u8..=255).cycle().take(8192).collect::<Vec<_>>();
+        let expected = fast_build_id(&original);
+
+        assert_eq!(expected.len(), size_of::<u128>());
+        assert_eq!(expected, fast_build_id(&original));
+
+        for index in [0, original.len() / 2, original.len() - 1] {
+            let mut changed = original.clone();
+            changed[index] ^= 1;
+            assert_ne!(expected, fast_build_id(&changed));
+        }
+    }
 }
 
 fn write_file_contents<'data, A: Arch<Platform = Elf>>(
