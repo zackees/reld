@@ -26,6 +26,7 @@ jobs:
           - runner: ubuntu-24.04
             target: x86_64-linux
             reld_driver: target/release/ld.reld
+            baseline_reld: target/issue74-baseline/reld
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
             # COFF format selection is made from argv[0], not Linux's ld.reld shim name.
@@ -108,6 +109,15 @@ jobs:
           $CARGO_COMMAND build --release -p reld
           bash ci/install-driver-shims.sh release
 
+      - name: Build exact Linux issue baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_COMMAND: cargo
+        run: >-
+          uv run --no-sync python -m ci.benchmark_baseline
+          --output target/issue74-baseline/reld
+
       - name: Build Windows COFF reld front door
         if: runner.os == 'Windows'
         shell: bash
@@ -132,6 +142,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           RELD_DRIVER: ${{ matrix.reld_driver }}
+          BASELINE_RELD: ${{ matrix.baseline_reld }}
           CARGO_COMMAND: cargo
         # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. Cargo
         # compiles the one artifact-auditor Rust project once per LTO configuration; every timed
@@ -139,8 +150,11 @@ jobs:
         run: >-
           uv run --no-sync python -m ci.benchmark_runner
           --target "$TARGET" --reld "$RELD_DRIVER"
+          --baseline-reld "$BASELINE_RELD"
           --manifest ci/e2e/link-workload/Cargo.toml
-          --output benchmark-output/benchmark.log --trials 3 --warmup 1
+          --output benchmark-output/benchmark.log
+          --output-mode-report benchmark-output/output-modes.json
+          --trials 3 --warmup 1
 
       - name: Assert benchmark coverage (no silent n/a for expected linkers)
         shell: bash
@@ -173,6 +187,7 @@ jobs:
           path: |
             benchmark-output/benchmark.log
             benchmark-output/metadata.json
+            benchmark-output/output-modes.json
           if-no-files-found: error
 
   aggregate:

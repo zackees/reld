@@ -33,7 +33,7 @@ from typing import Any
 from urllib.request import urlopen
 
 SCHEMA_VERSION = 6
-BENCHMARK_ID = "artifact-auditor-lto-v1"
+BENCHMARK_ID = "artifact-auditor-native-linux-lto-v2"
 HISTORY_MAX_LINES = 1000
 IMAGE_NAME = "benchmark-link.jpg"
 HEADING_PREFIX = "## Link Benchmark:"
@@ -483,13 +483,7 @@ def validate_startup_and_significance(payload: dict[str, Any], target: str) -> l
         reference = REFERENCE_SERIES[target]
         for scenario in CANONICAL_SCENARIOS:
             reference_cell = next(
-                (
-                    entry
-                    for entry in results
-                    if isinstance(entry, dict)
-                    and entry.get("configuration") == scenario
-                    and entry.get("series") == reference
-                ),
+                (entry for entry in results if isinstance(entry, dict) and entry.get("configuration") == scenario and entry.get("series") == reference),
                 None,
             )
             seconds = reference_cell.get("seconds") if reference_cell else None
@@ -497,9 +491,7 @@ def validate_startup_and_significance(payload: dict[str, Any], target: str) -> l
                 continue
             fraction = largest / seconds
             if fraction > MAX_STARTUP_FRACTION:
-                errors.append(
-                    f"{target}: {scenario} is startup-dominated ({fraction:.1%}; limit {MAX_STARTUP_FRACTION:.0%})"
-                )
+                errors.append(f"{target}: {scenario} is startup-dominated ({fraction:.1%}; limit {MAX_STARTUP_FRACTION:.0%})")
     return errors
 
 
@@ -723,10 +715,7 @@ def render_jpg(report: Report, meta: dict[str, Any], out_path: Path) -> None:
         d.line([(20 * SCALE, y * SCALE), ((WIDTH - 20) * SCALE, y * SCALE)], fill=GRID, width=SCALE)
         y += 8
 
-    startup_text = "  |  ".join(
-        f"{series_label(series, meta['runner']['os'], meta.get('target', ''))}: {seconds:.4f}s"
-        for series, seconds in report.startup_seconds.items()
-    )
+    startup_text = "  |  ".join(f"{series_label(series, meta['runner']['os'], meta.get('target', ''))}: {seconds:.4f}s" for series, seconds in report.startup_seconds.items())
     d.text((20 * SCALE, (y + 6) * SCALE), "fixed linker startup (not subtracted)", font=f_meta, fill=FG)
     d.text((20 * SCALE, (y + 25) * SCALE), startup_text or "startup data missing", font=f_meta, fill=MUTED)
 
@@ -757,10 +746,7 @@ def render_html(report: Report, meta: dict[str, Any]) -> str:
             else:
                 cells += '<td class="na">n/a</td>'
         body += f"<tr><td>{sc}</td>{cells}</tr>"
-    startup_body = "".join(
-        f"<tr><td>{series_label(series, runner_os, target)}</td><td>{seconds:.4f}s</td></tr>"
-        for series, seconds in report.startup_seconds.items()
-    )
+    startup_body = "".join(f"<tr><td>{series_label(series, runner_os, target)}</td><td>{seconds:.4f}s</td></tr>" for series, seconds in report.startup_seconds.items())
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>reld benchmarks</title>
 <style>

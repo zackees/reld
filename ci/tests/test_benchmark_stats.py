@@ -57,6 +57,10 @@ SAMPLE_LOG = """
 """
 
 
+def test_benchmark_identity_isolated_after_native_linux_driver_correction():
+    assert BENCHMARK_ID == "artifact-auditor-native-linux-lto-v2"
+
+
 def sample_log_for_target(target: str) -> str:
     series = EXPECTED_SERIES[target]
     startup = {name: 0.0500 for name in series}
