@@ -72,20 +72,6 @@ pub trait OutputFileData: Send {
     /// Returns the output buffer for random-access writing.
     fn bytes_mut(&mut self) -> &mut [u8];
 
-    /// Attempts to copy a byte range directly from an input file into this output.
-    ///
-    /// Returns `Ok(true)` only when the complete range was copied. Implementations that cannot
-    /// provide a direct file-to-file copy leave the output unchanged and return `Ok(false)`.
-    fn copy_file_range(
-        &mut self,
-        _input: &File,
-        _input_offset: u64,
-        _output_offset: u64,
-        _len: usize,
-    ) -> std::io::Result<bool> {
-        Ok(false)
-    }
-
     /// Persist the bytes and apply final file attributes.
     fn finish(self) -> Result;
 
@@ -631,29 +617,6 @@ fn preallocate_output_file(file: &std::fs::File, output_size: u64, should_preall
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_output_directly_copies_an_exact_file_range() {
-        let directory = tempfile::tempdir().unwrap();
-        let input_path = directory.path().join("input.bin");
-        let output_path = directory.path().join("output.bin");
-        std::fs::write(&input_path, b"prefix-DIRECT-COPY-suffix").unwrap();
-        let input = File::open(input_path).unwrap();
-        let mut output = OsFileSystem
-            .create_output(
-                output_path.into(),
-                OutputOptions {
-                    size: 32,
-                    file_replacement_mode: FileReplacementMode::UnlinkAndReplace,
-                    write_mode: Some(FileWriteMode::Mmap),
-                },
-            )
-            .unwrap();
-
-        assert!(output.copy_file_range(&input, 7, 5, 11).unwrap());
-        assert_eq!(&output.bytes()[5..16], b"DIRECT-COPY");
-    }
 
     #[cfg(target_os = "linux")]
     #[test]
