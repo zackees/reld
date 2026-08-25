@@ -33,6 +33,13 @@ def test_configurations_are_exactly_the_three_public_lto_rows():
     ]
 
 
+def test_profiles_use_idiomatic_bounded_codegen_units():
+    manifest = DEFAULT_MANIFEST.read_text(encoding="utf-8")
+
+    assert manifest.count("codegen-units = 16") == 3
+    assert "codegen-units = 256" not in manifest
+
+
 def test_cargo_capture_command_builds_the_idiomatic_project_once():
     command = cargo_capture_command(
         cargo="cargo",

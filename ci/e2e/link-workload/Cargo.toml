@@ -14,7 +14,7 @@ opt-level = 1
 debug = 2
 strip = false
 incremental = false
-codegen-units = 256
+codegen-units = 16
 lto = false
 
 [profile.linkbench-thin-lto]
@@ -23,7 +23,7 @@ opt-level = 1
 debug = 2
 strip = false
 incremental = false
-codegen-units = 256
+codegen-units = 16
 lto = "thin"
 
 [profile.linkbench-full-lto]
@@ -32,5 +32,5 @@ opt-level = 1
 debug = 2
 strip = false
 incremental = false
-codegen-units = 256
+codegen-units = 16
 lto = "fat"
