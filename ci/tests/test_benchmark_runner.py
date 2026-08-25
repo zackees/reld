@@ -71,6 +71,20 @@ def test_cargo_capture_command_builds_the_idiomatic_project_once():
     ]
 
 
+def test_linux_capture_uses_clang_without_gccs_synthetic_lto_plugin():
+    command = cargo_capture_command(
+        cargo="cargo",
+        manifest=Path("ci/e2e/link-workload/Cargo.toml"),
+        profile="linkbench-no-lto",
+        target_dir=Path("target/link-benchmark"),
+        linker="clang",
+    )
+
+    separator = command.index("--")
+    assert command[separator + 1 : separator + 3] == ["-C", "linker=clang"]
+    assert "plugin" not in " ".join(command)
+
+
 def test_each_configuration_is_replayed_then_released_before_the_next_capture(tmp_path: Path, monkeypatch):
     events: list[str] = []
     linker = Linker("wild", tmp_path / "wild")

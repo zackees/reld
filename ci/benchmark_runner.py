@@ -78,10 +78,17 @@ _LINK_DRIVER_NAMES = {
 }
 
 
-def cargo_capture_command(*, cargo: str, manifest: Path, profile: str, target_dir: Path) -> list[str]:
+def cargo_capture_command(
+    *,
+    cargo: str,
+    manifest: Path,
+    profile: str,
+    target_dir: Path,
+    linker: str | None = None,
+) -> list[str]:
     if not cargo or any(character.isspace() for character in cargo):
         raise BenchmarkError("CARGO_COMMAND must name one executable")
-    return [
+    command = [
         cargo,
         "rustc",
         "--locked",
@@ -94,11 +101,18 @@ def cargo_capture_command(*, cargo: str, manifest: Path, profile: str, target_di
         "--target-dir",
         str(target_dir),
         "--",
-        "-C",
-        "save-temps=yes",
-        "--print",
-        "link-args",
     ]
+    if linker is not None:
+        command.extend(("-C", f"linker={linker}"))
+    command.extend(
+        (
+            "-C",
+            "save-temps=yes",
+            "--print",
+            "link-args",
+        )
+    )
+    return command
 
 
 def benchmark_environment() -> dict[str, str]:
@@ -330,12 +344,14 @@ def capture_final_link(
     target_dir: Path,
     environment: dict[str, str],
     log: TextIO,
+    linker: str | None = None,
 ) -> LinkCommand:
     command = cargo_capture_command(
         cargo=cargo,
         manifest=manifest,
         profile=configuration.profile,
         target_dir=target_dir,
+        linker=linker,
     )
     print(f"capturing {configuration.label}: {' '.join(command)}", file=log, flush=True)
     completed = subprocess.run(
@@ -737,6 +753,11 @@ def run_benchmark(
             target_dir=target_dir,
             environment=environment,
             log=log,
+            # GCC's collect2 injects a passive LTO plugin even when rustc has already emitted
+            # native objects. That makes the conservative reld router bridge an otherwise native
+            # final link. Clang is provisioned on Linux and replays the same target-native inputs
+            # without manufacturing a plugin request.
+            linker="clang" if use_driver_shim else None,
         )
         prune_capture_artifacts(
             captured,
