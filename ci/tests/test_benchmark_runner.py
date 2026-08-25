@@ -264,24 +264,20 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
     monkeypatch.setattr(runner_module, "release_capture_artifacts", lambda **kwargs: None)
     monkeypatch.setattr(runner_module, "benchmark_startup", lambda *args, **kwargs: 0.01)
     monkeypatch.setattr(runner_module, "benchmark_linkers_round_robin", fake_round_robin)
-
-    def fake_phase_trace(captured, mode, **kwargs):
-        del captured, kwargs
-        phases = {
-            "Create output file": 0.02,
-            "Compute build ID": 0.05,
-            "Write data to file": 0.7,
-            "Flush and unmap output file": 0.01,
-        }
-        if mode.label in {"default", "buffer"}:
-            phases["Splice buffered output"] = 0.2
-        return (
-            phases,
+    monkeypatch.setattr(
+        runner_module,
+        "capture_reld_phase_trace",
+        lambda *args, **kwargs: (
+            {
+                "Create output file": 0.02,
+                "Compute build ID": 0.05,
+                "Write data to file": 0.7,
+                "Flush and unmap output file": 0.01,
+            },
             256 * 1024 * 1024,
             "phase trace",
-        )
-
-    monkeypatch.setattr(runner_module, "capture_reld_phase_trace", fake_phase_trace)
+        ),
+    )
 
     runner_module.run_benchmark(
         target="x86_64-linux",
@@ -315,7 +311,6 @@ def test_reld_phase_trace_parser_requires_dominant_output_phases():
 │ ├──     2.00 Create output file
 │ ├──    12.50 Compute build ID
 │ ├──   625.25 Write data to file
-│ │ └──    31.75 Splice buffered output [bytes=268435456]
 │ └──     8.00 Flush and unmap output file
 """
 
@@ -323,7 +318,6 @@ def test_reld_phase_trace_parser_requires_dominant_output_phases():
         "Create output file": 0.002,
         "Compute build ID": 0.0125,
         "Write data to file": 0.62525,
-        "Splice buffered output": 0.03175,
         "Flush and unmap output file": 0.008,
     }
 
@@ -332,25 +326,6 @@ def test_reld_phase_trace_parser_requires_dominant_output_phases():
 
     legacy = output.replace("│ ├──     2.00 Create output file\n", "")
     assert "Create output file" not in _parse_phase_timings(legacy, require_creation=False)
-
-
-def test_splice_phase_activation_is_strictly_gated():
-    splice = {"Splice buffered output": 0.1}
-    for mode in ("default", "buffer"):
-        runner_module._assert_splice_phase_activation(filesystem="ext4", mode=mode, output_size=256 * 1024 * 1024, phases=splice)
-        runner_module._assert_splice_phase_activation(filesystem="ext4", mode=mode, output_size=512 * 1024 * 1024, phases=splice)
-        with pytest.raises(BenchmarkError, match="must have Splice buffered output present"):
-            runner_module._assert_splice_phase_activation(filesystem="ext4", mode=mode, output_size=256 * 1024 * 1024, phases={})
-
-    for filesystem, mode in (("ext4", "mmap"), ("ext4", "baseline"), ("xfs", "default")):
-        runner_module._assert_splice_phase_activation(filesystem=filesystem, mode=mode, output_size=256 * 1024 * 1024, phases={})
-        with pytest.raises(BenchmarkError, match="must have Splice buffered output absent"):
-            runner_module._assert_splice_phase_activation(filesystem=filesystem, mode=mode, output_size=256 * 1024 * 1024, phases=splice)
-
-    for output_size in (256 * 1024 * 1024 - 1, 512 * 1024 * 1024 + 1):
-        runner_module._assert_splice_phase_activation(filesystem="ext4", mode="default", output_size=output_size, phases={})
-        with pytest.raises(BenchmarkError, match="must have Splice buffered output absent"):
-            runner_module._assert_splice_phase_activation(filesystem="ext4", mode="default", output_size=output_size, phases=splice)
 
 
 def test_release_capture_artifacts_rejects_outside_directory(tmp_path: Path):

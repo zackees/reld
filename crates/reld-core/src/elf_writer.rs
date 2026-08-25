@@ -113,6 +113,7 @@ use rayon::iter::IntoParallelIterator as _;
 use rayon::iter::IntoParallelRefMutIterator as _;
 use rayon::iter::ParallelBridge as _;
 use rayon::iter::ParallelIterator as _;
+use rayon::slice::ParallelSlice as _;
 use rayon::slice::ParallelSliceMut as _;
 use reld_reloc::elf::DynamicRelocationKind;
 use reld_reloc::elf::RISCV_ATTRIBUTE_VENDOR_NAME;
@@ -257,7 +258,23 @@ fn compute_fast_hash(sized_output: &SizedOutput<impl OutputFileData>) -> [u8; si
 }
 
 fn fast_build_id(bytes: &[u8]) -> [u8; size_of::<u128>()] {
-    twox_hash::XxHash3_128::oneshot(bytes).to_le_bytes()
+    const PARALLEL_THRESHOLD: usize = 4 * 1024 * 1024;
+    const CHUNK_SIZE: usize = 1024 * 1024;
+
+    if bytes.len() < PARALLEL_THRESHOLD {
+        return twox_hash::XxHash3_128::oneshot(bytes).to_le_bytes();
+    }
+
+    let chunk_hashes = bytes
+        .par_chunks(CHUNK_SIZE)
+        .map(twox_hash::XxHash3_128::oneshot)
+        .collect::<Vec<_>>();
+    let mut combined = Vec::with_capacity(size_of::<u64>() + chunk_hashes.len() * size_of::<u128>());
+    combined.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    for hash in chunk_hashes {
+        combined.extend_from_slice(&hash.to_le_bytes());
+    }
+    twox_hash::XxHash3_128::oneshot(&combined).to_le_bytes()
 }
 
 fn compute_legacy_hash(sized_output: &SizedOutput<impl OutputFileData>) -> blake3::Hash {
@@ -280,6 +297,22 @@ mod build_id_tests {
         assert_eq!(expected, fast_build_id(&original));
 
         for index in [0, original.len() / 2, original.len() - 1] {
+            let mut changed = original.clone();
+            changed[index] ^= 1;
+            assert_ne!(expected, fast_build_id(&changed));
+        }
+    }
+
+    #[test]
+    fn parallel_fast_build_id_hashes_chunk_boundaries_and_tail() {
+        let original = (0_u8..=255)
+            .cycle()
+            .take(5 * 1024 * 1024 + 17)
+            .collect::<Vec<_>>();
+        let expected = fast_build_id(&original);
+
+        assert_eq!(expected, fast_build_id(&original));
+        for index in [1024 * 1024 - 1, 1024 * 1024, original.len() - 1] {
             let mut changed = original.clone();
             changed[index] ^= 1;
             assert_ne!(expected, fast_build_id(&changed));
@@ -1684,6 +1717,55 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
     }
 }
 
+enum PreparedObjectSection<'out> {
+    Loaded {
+        section: Section,
+        section_index: object::SectionIndex,
+        out: &'out mut [u8],
+        content_len: usize,
+    },
+    Debug {
+        section: Section,
+        section_index: object::SectionIndex,
+        out: &'out mut [u8],
+        content_len: usize,
+    },
+    FrameData(object::SectionIndex),
+}
+
+impl PreparedObjectSection<'_> {
+    fn populate<A: Arch<Platform = Elf>>(
+        &mut self,
+        object: &ObjectLayout<Elf>,
+        layout: &ElfLayout,
+    ) -> Result {
+        match self {
+            Self::Loaded {
+                section,
+                section_index,
+                out,
+                content_len,
+            }
+            | Self::Debug {
+                section,
+                section_index,
+                out,
+                content_len,
+            } => {
+                *content_len = populate_section_output::<A>(
+                    object,
+                    layout,
+                    *section,
+                    *section_index,
+                    out,
+                )?;
+            }
+            Self::FrameData(_) => {}
+        }
+        Ok(())
+    }
+}
+
 fn write_object<'data, A: Arch<Platform = Elf>>(
     object: &ObjectLayout<'data, Elf>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
@@ -1697,29 +1779,92 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
     let _span = debug_span!("write_file", filename = %object.input).entered();
     let _file_span = layout.args().common().trace_span_for_file(object.file_id);
 
+    let mut prepared_sections = Vec::with_capacity(object.sections.len());
     for (i, sec) in object.sections.iter().enumerate() {
         let section_index = object::SectionIndex(i);
 
         match sec {
             SectionSlot::Loaded(sec) => {
-                table_writer.reset_relr_run();
-                write_object_section::<A>(
+                if should_skip_loaded_section(object, layout, section_index) {
+                    continue;
+                }
+                let out = allocate_section_output(
                     object,
                     layout,
                     *sec,
                     section_index,
                     buffers,
+                )?;
+                prepared_sections.push(PreparedObjectSection::Loaded {
+                    section: *sec,
+                    section_index,
+                    out,
+                    content_len: 0,
+                });
+            }
+            SectionSlot::LoadedDebugInfo(sec) => {
+                if should_skip_debug_section(object, layout, section_index) {
+                    continue;
+                }
+                let out = allocate_section_output(
+                    object,
+                    layout,
+                    *sec,
+                    section_index,
+                    buffers,
+                )?;
+                prepared_sections.push(PreparedObjectSection::Debug {
+                    section: *sec,
+                    section_index,
+                    out,
+                    content_len: 0,
+                });
+            }
+            SectionSlot::FrameData(section_index) => {
+                prepared_sections.push(PreparedObjectSection::FrameData(*section_index));
+            }
+            _ => (),
+        }
+    }
+
+    prepared_sections
+        .par_iter_mut()
+        .try_for_each(|prepared| prepared.populate::<A>(object, layout))?;
+
+    for prepared in prepared_sections {
+        match prepared {
+            PreparedObjectSection::Loaded {
+                section_index,
+                out,
+                content_len,
+                ..
+            } => {
+                table_writer.reset_relr_run();
+                relocate_object_section::<A>(
+                    object,
+                    layout,
+                    section_index,
+                    &mut out[..content_len],
                     table_writer,
                     trace,
                 )?;
             }
-            SectionSlot::LoadedDebugInfo(sec) => {
-                write_debug_section::<A>(object, layout, *sec, section_index, buffers)?;
+            PreparedObjectSection::Debug {
+                section_index,
+                out,
+                content_len,
+                ..
+            } => {
+                relocate_debug_section::<A>(
+                    object,
+                    layout,
+                    section_index,
+                    &mut out[..content_len],
+                )?;
             }
-            SectionSlot::FrameData(section_index) => {
-                write_eh_frame_data::<A>(object, *section_index, layout, table_writer, trace)?;
+            PreparedObjectSection::FrameData(section_index) => {
+                write_eh_frame_data::<A>(object, section_index, layout, table_writer, trace)?;
             }
-            _ => (),
         }
     }
     for (symbol_id, resolution) in layout.resolutions_in_range(object.symbol_id_range) {
@@ -2066,12 +2211,11 @@ fn write_rela_sections<'data>(
     Ok(())
 }
 
-fn write_object_section<'data, A: Arch<Platform = Elf>>(
+fn relocate_object_section<'data, A: Arch<Platform = Elf>>(
     object: &ObjectLayout<'data, Elf>,
     layout: &ElfLayout<'data>,
-    section: Section,
     section_index: object::SectionIndex,
-    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    out: &mut [u8],
     table_writer: &mut TableWriter,
     trace: &TraceOutput,
 ) -> Result {
@@ -2086,8 +2230,6 @@ fn write_object_section<'data, A: Arch<Platform = Elf>>(
             return Ok(());
         }
     }
-
-    let out = write_section_raw::<A>(object, layout, section, section_index, buffers)?;
 
     // We need to reverse the contents and adjust relocations because .ctors/.dtors are executed in
     // reverse order while .init_array/.fini_array are executed in forward order.
@@ -2209,12 +2351,11 @@ fn write_section_reversed<'data, A: Arch<Platform = Elf>>(
     Ok(())
 }
 
-fn write_debug_section<'data, A: Arch<Platform = Elf>>(
+fn relocate_debug_section<'data, A: Arch<Platform = Elf>>(
     object: &ObjectLayout<'data, Elf>,
     layout: &ElfLayout<'data>,
-    section: Section,
     section_index: object::SectionIndex,
-    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    out: &mut [u8],
 ) -> Result {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
     let section_id = part_id.output_section_id::<Elf>();
@@ -2224,7 +2365,6 @@ fn write_debug_section<'data, A: Arch<Platform = Elf>>(
         return Ok(());
     }
 
-    let out = write_section_raw::<A>(object, layout, section, section_index, buffers)?;
     let relocations = object.relocations(section_index)?;
     let result = match relocations {
         elf::RelocationList::Rela(rela) => apply_debug_relocations::<A, Rela, _>(
@@ -2248,77 +2388,116 @@ fn write_debug_section<'data, A: Arch<Platform = Elf>>(
     Ok(())
 }
 
-fn write_section_raw<'out, 'data, A: Arch<Platform = Elf>>(
-    object: &ObjectLayout<'data, Elf>,
+fn should_skip_loaded_section(
+    object: &ObjectLayout<Elf>,
+    layout: &ElfLayout,
+    section_index: object::SectionIndex,
+) -> bool {
+    if !layout.args().should_output_partial_object() {
+        return false;
+    }
+
+    let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+    let section_type = layout
+        .output_sections
+        .output_info(part_id.output_section_id::<Elf>())
+        .section_attributes
+        .ty();
+    section_type.is_rela() || section_type.is_rel()
+}
+
+fn should_skip_debug_section(
+    object: &ObjectLayout<Elf>,
+    layout: &ElfLayout,
+    section_index: object::SectionIndex,
+) -> bool {
+    let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+    layout
+        .compressed_debug_sections
+        .get(part_id.output_section_id::<Elf>())
+        .is_some()
+}
+
+fn allocate_section_output<'out>(
+    object: &ObjectLayout<Elf>,
     layout: &ElfLayout,
     sec: Section,
     section_index: object::SectionIndex,
-    buffers: &'out mut OutputSectionPartMap<&mut [u8]>,
+    buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
 ) -> Result<&'out mut [u8]> {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
-    if layout
+    if !layout
         .output_sections
         .has_data_in_file(part_id.output_section_id::<Elf>())
     {
-        let section_buffer = buffers.get_mut(part_id);
-        let allocation_size = sec.capacity(part_id, &layout.output_sections) as usize;
-        if section_buffer.len() < allocation_size {
-            bail!(
-                "Insufficient space allocated to section `{}`. Tried to take {} bytes, but only {} remain",
-                object.object.section_display_name(section_index),
-                allocation_size,
-                section_buffer.len()
-            );
+        return Ok(&mut []);
+    }
+
+    let section_buffer = buffers.get_mut(part_id);
+    let allocation_size = sec.capacity(part_id, &layout.output_sections) as usize;
+    if section_buffer.len() < allocation_size {
+        bail!(
+            "Insufficient space allocated to section `{}`. Tried to take {} bytes, but only {} remain",
+            object.object.section_display_name(section_index),
+            allocation_size,
+            section_buffer.len()
+        );
+    }
+    Ok(section_buffer.split_off_mut(..allocation_size).unwrap())
+}
+
+fn populate_section_output<A: Arch<Platform = Elf>>(
+    object: &ObjectLayout<Elf>,
+    layout: &ElfLayout,
+    sec: Section,
+    section_index: object::SectionIndex,
+    out: &mut [u8],
+) -> Result<usize> {
+    if out.is_empty() {
+        return Ok(0);
+    }
+
+    let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+    let object_section = object.object.section(section_index)?;
+    let relax_deltas = object.section_relax_deltas.get(section_index.0);
+    let section_info = layout
+        .output_sections
+        .output_info(part_id.output_section_id::<Elf>());
+
+    match relax_deltas {
+        None => {
+            let section_size = object.object.section_size(object_section)? as usize;
+            let (content, padding) = out.split_at_mut(section_size);
+            object.object.copy_section_data(object_section, content)?;
+            fill_section_padding::<A>(padding, section_info);
+            Ok(section_size)
         }
-        let out = section_buffer.split_off_mut(..allocation_size).unwrap();
-        let object_section = object.object.section(section_index)?;
-        let relax_deltas = object.section_relax_deltas.get(section_index.0);
+        Some(deltas) => {
+            let input_data = object.object.raw_section_data(object_section)?;
+            let effective_size = sec.size as usize;
+            let mut input_pos: usize = 0;
+            let mut output_pos: usize = 0;
 
-        let section_info = layout
-            .output_sections
-            .output_info(part_id.output_section_id::<Elf>());
-        match relax_deltas {
-            None => {
-                let section_size = object.object.section_size(object_section)?;
-                let (out, padding) = out.split_at_mut(section_size as usize);
-                object.object.copy_section_data(object_section, out)?;
-                fill_section_padding::<A>(padding, section_info);
-                Ok(out)
-            }
-            Some(deltas) => {
-                let input_data = object.object.raw_section_data(object_section)?;
-                let effective_size = sec.size as usize;
-
-                let mut input_pos: usize = 0;
-                let mut output_pos: usize = 0;
-
-                for delta in deltas.deltas() {
-                    let skip_start = delta.input_offset as usize;
-                    // Copy everything from input_pos up to the deletion point.
-                    let copy_len = skip_start - input_pos;
-                    if copy_len > 0 {
-                        out[output_pos..output_pos + copy_len]
-                            .copy_from_slice(&input_data[input_pos..skip_start]);
-                        output_pos += copy_len;
-                    }
-                    // Skip over the deleted bytes in the input.
-                    input_pos = skip_start + delta.bytes_deleted as usize;
+            for delta in deltas.deltas() {
+                let skip_start = delta.input_offset as usize;
+                let copy_len = skip_start - input_pos;
+                if copy_len > 0 {
+                    out[output_pos..output_pos + copy_len]
+                        .copy_from_slice(&input_data[input_pos..skip_start]);
+                    output_pos += copy_len;
                 }
-
-                // Copy the remainder after the last deletion.
-                let remaining = input_data.len() - input_pos;
-                if remaining > 0 {
-                    out[output_pos..output_pos + remaining]
-                        .copy_from_slice(&input_data[input_pos..]);
-                    output_pos += remaining;
-                }
-                fill_section_padding::<A>(&mut out[output_pos..], section_info);
-
-                Ok(&mut out[..effective_size])
+                input_pos = skip_start + delta.bytes_deleted as usize;
             }
+
+            let remaining = input_data.len() - input_pos;
+            if remaining > 0 {
+                out[output_pos..output_pos + remaining]
+                    .copy_from_slice(&input_data[input_pos..]);
+                output_pos += remaining;
+            }
+            fill_section_padding::<A>(&mut out[output_pos..], section_info);
+            Ok(effective_size)
         }
-    } else {
-        Ok(&mut [])
     }
 }
 
@@ -4325,13 +4504,28 @@ fn write_epilogue<A: Arch<Platform = Elf>>(
             unreachable!();
         };
 
-        if let SectionSlot::Sorted(sec) = &object.sections[sorted_section.section_index.0] {
-            write_object_section::<A>(
+        if let SectionSlot::Sorted(sec) = &object.sections[sorted_section.section_index.0]
+            && !should_skip_loaded_section(object, layout, sorted_section.section_index)
+        {
+            let out = allocate_section_output(
                 object,
                 layout,
                 sec.section,
                 sorted_section.section_index,
                 buffers,
+            )?;
+            let content_len = populate_section_output::<A>(
+                object,
+                layout,
+                sec.section,
+                sorted_section.section_index,
+                out,
+            )?;
+            relocate_object_section::<A>(
+                object,
+                layout,
+                sorted_section.section_index,
+                &mut out[..content_len],
                 table_writer,
                 trace,
             )?;
