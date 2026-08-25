@@ -27,6 +27,7 @@ from typing import TextIO
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "ci" / "e2e" / "link-workload" / "Cargo.toml"
 BENCHMARK_PACKAGE = "linkbench-app"
+ISSUE_74_BASELINE_SHA = "be6a8cd032ea6dc788978264c860fe761d5090b6"
 MIN_REFERENCE_LINK_SECONDS = 0.500
 MAX_STARTUP_FRACTION = 0.10
 MIN_OUTPUT_MODE_IMPROVEMENT = 0.10
@@ -266,10 +267,11 @@ def reference_linker_for_target(target: str) -> str:
     return {"linux": "wild", "macos": "ld64.lld", "windows": "lld"}[_target_family(target)]
 
 
-def reld_output_mode_linkers(reld: Path, thread_count: int) -> tuple[Linker, ...]:
-    """Return explicit native-reld output modes for the Linux writer diagnostic."""
+def reld_output_mode_linkers(reld: Path, baseline_reld: Path, thread_count: int) -> tuple[Linker, ...]:
+    """Return HEAD modes plus the fixed pre-issue baseline for the Linux diagnostic."""
     common_arguments = ("-Wl,--engine=reld", f"-Wl,--threads={thread_count}")
     return (
+        Linker("baseline", baseline_reld.absolute(), common_arguments + ("-Wl,--mmap-output-file",)),
         Linker("default", reld.absolute(), common_arguments),
         Linker("mmap", reld.absolute(), common_arguments + ("-Wl,--mmap-output-file",)),
         Linker("buffer", reld.absolute(), common_arguments + ("-Wl,--no-mmap-output-file",)),
@@ -338,7 +340,7 @@ def assert_significant_workload(
 
 
 def assert_output_mode_improvement(diagnostic_report: dict[str, object]) -> None:
-    """Require the optimized Linux default to beat the prior explicit-mmap path in every row."""
+    """Require HEAD to beat the exact pre-issue baseline binary in every Linux row."""
     if diagnostic_report.get("status") != "measured":
         return
     configurations = diagnostic_report.get("configurations")
@@ -350,16 +352,20 @@ def assert_output_mode_improvement(diagnostic_report: dict[str, object]) -> None
         configuration_report = configurations.get(configuration.label)
         modes = configuration_report.get("modes") if isinstance(configuration_report, dict) else None
         default = modes.get("default") if isinstance(modes, dict) else None
+        baseline = modes.get("baseline") if isinstance(modes, dict) else None
         mmap = modes.get("mmap") if isinstance(modes, dict) else None
         default_seconds = default.get("median_seconds") if isinstance(default, dict) else None
+        baseline_seconds = baseline.get("median_seconds") if isinstance(baseline, dict) else None
         mmap_seconds = mmap.get("median_seconds") if isinstance(mmap, dict) else None
-        if not isinstance(default_seconds, int | float) or not isinstance(mmap_seconds, int | float) or mmap_seconds <= 0:
-            failures.append(f"{configuration.label}: missing paired default/mmap medians")
+        if not isinstance(default_seconds, int | float) or not isinstance(baseline_seconds, int | float) or baseline_seconds <= 0:
+            failures.append(f"{configuration.label}: missing paired HEAD/baseline medians")
             continue
-        improvement = 1.0 - (default_seconds / mmap_seconds)
-        configuration_report["default_vs_mmap_improvement_fraction"] = improvement
+        improvement = 1.0 - (default_seconds / baseline_seconds)
+        configuration_report["head_vs_baseline_improvement_fraction"] = improvement
+        if isinstance(mmap_seconds, int | float) and mmap_seconds > 0:
+            configuration_report["default_vs_mmap_improvement_fraction"] = 1.0 - (default_seconds / mmap_seconds)
         if improvement + 1e-12 < MIN_OUTPUT_MODE_IMPROVEMENT:
-            failures.append(f"{configuration.label}: default improved {improvement:.1%} over mmap ({default_seconds:.4f}s vs {mmap_seconds:.4f}s; required {MIN_OUTPUT_MODE_IMPROVEMENT:.0%})")
+            failures.append(f"{configuration.label}: HEAD improved {improvement:.1%} over baseline ({default_seconds:.4f}s vs {baseline_seconds:.4f}s; required {MIN_OUTPUT_MODE_IMPROVEMENT:.0%})")
     if failures:
         raise BenchmarkError("large-output optimization missed its paired performance gate:\n" + "\n".join(failures))
 
@@ -746,6 +752,7 @@ def run_benchmark(
     warmup: int,
     log: TextIO,
     output_mode_report: Path | None = None,
+    baseline_reld: Path | None = None,
 ) -> str:
     environment = benchmark_environment()
     linkers = linkers_for_target(target, reld)
@@ -762,6 +769,8 @@ def run_benchmark(
             "configurations": {},
         }
         if use_driver_shim:
+            if baseline_reld is None or not baseline_reld.is_file():
+                raise BenchmarkError("Linux output-mode diagnostics require the exact baseline reld binary")
             workdir.mkdir(parents=True, exist_ok=True)
             thread_count = os.cpu_count() or 1
             diagnostic_report["metadata"] = {
@@ -772,6 +781,7 @@ def run_benchmark(
                 "thread_count": thread_count,
                 "output_mode": "explicit per contender",
                 "timing_scope": "captured final native link only",
+                "baseline_sha": ISSUE_74_BASELINE_SHA,
             }
     for configuration in CONFIGURATIONS:
         captured = capture_final_link(
@@ -821,7 +831,8 @@ def run_benchmark(
                 metadata = diagnostic_report["metadata"]
                 assert isinstance(metadata, dict)
                 thread_count = metadata["thread_count"]
-                modes = reld_output_mode_linkers(reld, thread_count)
+                assert baseline_reld is not None
+                modes = reld_output_mode_linkers(reld, baseline_reld, thread_count)
                 _, mode_samples, mode_sizes, mode_orders = benchmark_linkers_round_robin(
                     captured,
                     modes,
@@ -921,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--output-mode-report", type=Path)
+    parser.add_argument("--baseline-reld", type=Path)
     args = parser.parse_args(argv)
 
     if not args.reld.is_file():
@@ -944,6 +956,7 @@ def main(argv: list[str] | None = None) -> int:
                 warmup=args.warmup,
                 log=log,
                 output_mode_report=args.output_mode_report,
+                baseline_reld=args.baseline_reld,
             )
             # ``run_benchmark`` writes the evidence before applying the significance gate.
     except BenchmarkError as error:

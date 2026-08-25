@@ -212,6 +212,8 @@ def test_linker_trials_rotate_order_and_preserve_every_sample(tmp_path: Path, mo
 
 def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_path: Path, monkeypatch):
     report_path = tmp_path / "output-modes.json"
+    baseline_reld = tmp_path / "baseline-reld"
+    baseline_reld.write_bytes(b"baseline")
     wild = Linker("wild", tmp_path / "wild")
 
     def fake_capture(configuration, **kwargs):
@@ -260,6 +262,7 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
         warmup=1,
         log=StringIO(),
         output_mode_report=report_path,
+        baseline_reld=baseline_reld,
     )
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -268,7 +271,7 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
     assert report["metadata"]["timing_scope"] == "captured final native link only"
     assert set(report["configurations"]) == {"no-LTO", "ThinLTO", "full-LTO"}
     no_lto = report["configurations"]["no-LTO"]
-    assert set(no_lto["modes"]) == {"default", "mmap", "buffer"}
+    assert set(no_lto["modes"]) == {"baseline", "default", "mmap", "buffer"}
     assert no_lto["modes"]["default"]["samples_seconds"] == [0.7, 0.8, 0.9]
     assert no_lto["modes"]["default"]["output_sizes_bytes"] == [256 * 1024 * 1024] * 3
     assert no_lto["modes"]["default"]["phase_seconds"]["Write data to file"] == 0.7
@@ -337,13 +340,14 @@ def test_startup_probe_is_target_correct(tmp_path: Path):
 
 
 def test_output_mode_diagnostics_force_the_native_reld_engine(tmp_path: Path):
-    modes = reld_output_mode_linkers(tmp_path / "ld.reld", 4)
+    modes = reld_output_mode_linkers(tmp_path / "ld.reld", tmp_path / "baseline-reld", 4)
 
-    assert [mode.label for mode in modes] == ["default", "mmap", "buffer"]
+    assert [mode.label for mode in modes] == ["baseline", "default", "mmap", "buffer"]
     assert all("-Wl,--engine=reld" in mode.driver_arguments for mode in modes)
     assert all("-Wl,--threads=4" in mode.driver_arguments for mode in modes)
-    assert "-Wl,--mmap-output-file" in modes[1].driver_arguments
-    assert "-Wl,--no-mmap-output-file" in modes[2].driver_arguments
+    assert "-Wl,--mmap-output-file" in modes[0].driver_arguments
+    assert "-Wl,--mmap-output-file" in modes[2].driver_arguments
+    assert "-Wl,--no-mmap-output-file" in modes[3].driver_arguments
 
 
 def test_published_linux_reld_forces_the_native_engine(tmp_path: Path, monkeypatch):
@@ -361,6 +365,7 @@ def test_paired_output_mode_gate_requires_ten_percent_in_every_lto_row():
             "configurations": {
                 configuration.label: {
                     "modes": {
+                        "baseline": {"median_seconds": 1.0},
                         "default": {"median_seconds": 1.0 - improvements[configuration.label]},
                         "mmap": {"median_seconds": 1.0},
                     }
@@ -371,10 +376,10 @@ def test_paired_output_mode_gate_requires_ten_percent_in_every_lto_row():
 
     passing = report({"no-LTO": 0.12, "ThinLTO": 0.11, "full-LTO": 0.10})
     assert_output_mode_improvement(passing)
-    assert passing["configurations"]["no-LTO"]["default_vs_mmap_improvement_fraction"] == pytest.approx(0.12)
+    assert passing["configurations"]["no-LTO"]["head_vs_baseline_improvement_fraction"] == pytest.approx(0.12)
 
     failing = report({"no-LTO": 0.12, "ThinLTO": 0.05, "full-LTO": 0.11})
-    with pytest.raises(BenchmarkError, match=r"ThinLTO: default improved 5\.0%"):
+    with pytest.raises(BenchmarkError, match=r"ThinLTO: HEAD improved 5\.0%"):
         assert_output_mode_improvement(failing)
 
 
