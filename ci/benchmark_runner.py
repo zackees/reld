@@ -682,14 +682,20 @@ _PHASE_NAMES = (
     "Compute build ID",
     "Write data to file",
     "Flush and unmap output file",
+    "Splice buffered output",
 )
+_SPLICE_OUTPUT_MIN_BYTES = 256 * 1024 * 1024
+_SPLICE_OUTPUT_MAX_BYTES = 512 * 1024 * 1024
 
 
 def _parse_phase_timings(output: str, *, require_creation: bool = True) -> dict[str, float]:
     phases: dict[str, float] = {}
     for line in output.splitlines():
         for name in _PHASE_NAMES:
-            match = re.search(rf"([0-9]+(?:\.[0-9]+)?)\s+{re.escape(name)}\s*$", line)
+            match = re.search(
+                rf"([0-9]+(?:\.[0-9]+)?)\s+{re.escape(name)}(?:\s+\[[^]]*\])?\s*$",
+                line,
+            )
             if match:
                 phases[name] = float(match.group(1)) / 1000.0
     required = {"Compute build ID", "Write data to file", "Flush and unmap output file"}
@@ -699,6 +705,14 @@ def _parse_phase_timings(output: str, *, require_creation: bool = True) -> dict[
     if missing:
         raise BenchmarkError(f"reld phase trace omitted required phases: {', '.join(missing)}\n{output}")
     return phases
+
+
+def _assert_splice_phase_activation(*, filesystem: str, mode: str, output_size: int, phases: dict[str, float]) -> None:
+    expected = filesystem == "ext4" and mode in {"default", "buffer"} and _SPLICE_OUTPUT_MIN_BYTES <= output_size <= _SPLICE_OUTPUT_MAX_BYTES
+    active = "Splice buffered output" in phases
+    if active != expected:
+        expectation = "present" if expected else "absent"
+        raise BenchmarkError(f"{mode} phase trace must have Splice buffered output {expectation} on {filesystem}, but it was {'present' if active else 'absent'}")
 
 
 def capture_reld_phase_trace(
@@ -866,6 +880,12 @@ def run_benchmark(
                         cwd=manifest.parent,
                         environment=environment,
                         require_creation=mode.label != "baseline",
+                    )
+                    _assert_splice_phase_activation(
+                        filesystem=str(metadata["filesystem"]),
+                        mode=mode.label,
+                        output_size=phase_output_size,
+                        phases=phases,
                     )
                     mode_reports[mode.label] = {
                         **_sample_summary(mode_samples[mode.label]),

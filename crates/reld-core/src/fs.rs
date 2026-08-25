@@ -5,6 +5,8 @@
 
 use crate::error::Context as _;
 use crate::error::Result;
+#[cfg(target_os = "linux")]
+use crate::timing_phase;
 use memmap2::Mmap;
 use memmap2::MmapOptions;
 use std::fs::File;
@@ -339,6 +341,8 @@ impl InputFileData for OsInputFile {
 enum OsOutputBuffer {
     Mmap(memmap2::MmapMut),
     InMemory(Vec<u8>),
+    #[cfg(target_os = "linux")]
+    Splice(memmap2::MmapMut),
 }
 
 pub struct OsOutputFile {
@@ -352,6 +356,8 @@ impl OutputFileData for OsOutputFile {
         match &self.buffer {
             OsOutputBuffer::Mmap(mmap) => mmap,
             OsOutputBuffer::InMemory(bytes) => bytes,
+            #[cfg(target_os = "linux")]
+            OsOutputBuffer::Splice(bytes) => bytes,
         }
     }
 
@@ -359,6 +365,8 @@ impl OutputFileData for OsOutputFile {
         match &mut self.buffer {
             OsOutputBuffer::Mmap(mmap) => mmap,
             OsOutputBuffer::InMemory(bytes) => bytes,
+            #[cfg(target_os = "linux")]
+            OsOutputBuffer::Splice(bytes) => bytes,
         }
     }
 
@@ -367,6 +375,27 @@ impl OutputFileData for OsOutputFile {
             (&self.file)
                 .write_all(bytes)
                 .with_context(|| format!("Failed to write to {}", self.path.display()))?;
+        }
+        #[cfg(target_os = "linux")]
+        if let OsOutputBuffer::Splice(bytes) = &self.buffer {
+            timing_phase!("Splice buffered output", bytes = bytes.len());
+            match splice_buffer_to_file(&self.file, bytes) {
+                Ok(SpliceOutcome::Complete) => {}
+                Ok(SpliceOutcome::Fallback) => {
+                    use std::os::unix::fs::FileExt as _;
+
+                    self.file.write_all_at(bytes, 0).with_context(|| {
+                        format!(
+                            "Failed to write to {} after splice fallback",
+                            self.path.display()
+                        )
+                    })?;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("Failed to splice to {}", self.path.display()));
+                }
+            }
         }
 
         // Making the file executable is best-effort only. For example if we're writing to a pipe or
@@ -526,7 +555,21 @@ impl FileSystem for OsFileSystem {
                 // writing to the file, we'll discover that when we go to write the content later
                 // on.
                 let _ = file.set_len(options.size);
-                OsOutputBuffer::InMemory(vec![0; options.size as usize])
+                #[cfg(target_os = "linux")]
+                if should_use_splice_buffer_for_file(&file, options.size, file_write_mode) {
+                    let size = usize::try_from(options.size)
+                        .context("Output is too large for the current address space")?;
+                    OsOutputBuffer::Splice(
+                        memmap2::MmapMut::map_anon(size)
+                            .context("Failed to allocate splice-capable output buffer")?,
+                    )
+                } else {
+                    OsOutputBuffer::InMemory(vec![0; options.size as usize])
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    OsOutputBuffer::InMemory(vec![0; options.size as usize])
+                }
             }
         };
         Ok(OsOutputFile { file, buffer, path })
@@ -582,13 +625,229 @@ fn default_file_write_mode_for_filesystem_type(
     FileWriteMode::Mmap
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn should_use_splice_buffer_for_filesystem_type(
-    _filesystem_type: Option<nix::sys::statfs::FsType>,
-    _output_size: u64,
-    _write_mode: FileWriteMode,
+    filesystem_type: Option<nix::sys::statfs::FsType>,
+    output_size: u64,
+    write_mode: FileWriteMode,
 ) -> bool {
-    false
+    write_mode == FileWriteMode::BufferThenWrite
+        && filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+        && (LARGE_EXT4_BUFFERED_OUTPUT_MIN..=LARGE_EXT4_BUFFERED_OUTPUT_MAX).contains(&output_size)
+}
+
+#[cfg(target_os = "linux")]
+fn should_use_splice_buffer_for_file(
+    file: &std::fs::File,
+    output_size: u64,
+    write_mode: FileWriteMode,
+) -> bool {
+    should_use_splice_buffer_for_filesystem_type(
+        nix::sys::statfs::fstatfs(file)
+            .map(|stat| stat.filesystem_type())
+            .ok(),
+        output_size,
+        write_mode,
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpliceOutcome {
+    Complete,
+    Fallback,
+}
+
+#[cfg(target_os = "linux")]
+fn splice_buffer_to_file(file: &File, bytes: &[u8]) -> std::io::Result<SpliceOutcome> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::fd::FromRawFd as _;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::fs::FileExt as _;
+
+    // SAFETY: sysconf reads process configuration for a constant selector and dereferences no
+    // caller-provided pointers.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 || bytes.as_ptr().align_offset(page_size as usize) != 0 {
+        return Ok(SpliceOutcome::Fallback);
+    }
+    let page_size = page_size as usize;
+    let aligned_len = bytes.len() / page_size * page_size;
+    if aligned_len == 0 {
+        return Ok(SpliceOutcome::Fallback);
+    }
+
+    let mut raw_pipe = [-1; 2];
+    // SAFETY: raw_pipe points to writable storage for exactly the two descriptors pipe2 returns.
+    if unsafe { libc::pipe2(raw_pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Ok(SpliceOutcome::Fallback);
+    }
+    // SAFETY: successful pipe2 returned two distinct, owned descriptors, each wrapped exactly
+    // once here.
+    let pipe_read = unsafe { OwnedFd::from_raw_fd(raw_pipe[0]) };
+    // SAFETY: see above; the write descriptor is distinct from the read descriptor.
+    let pipe_write = unsafe { OwnedFd::from_raw_fd(raw_pipe[1]) };
+    // SAFETY: pipe_write is a live pipe descriptor and F_SETPIPE_SZ takes a scalar size. Raising
+    // the capacity is only an optimization, so permission or policy failures are harmless.
+    unsafe {
+        libc::fcntl(pipe_write.as_raw_fd(), libc::F_SETPIPE_SZ, 1024 * 1024);
+    }
+    // SAFETY: pipe_write remains a live pipe descriptor and F_GETPIPE_SZ takes no third argument.
+    let pipe_capacity = unsafe { libc::fcntl(pipe_write.as_raw_fd(), libc::F_GETPIPE_SZ) };
+    if pipe_capacity <= 0 {
+        return Ok(SpliceOutcome::Fallback);
+    }
+    // Gifted requests must contain complete pages. The pipe is empty before each vmsplice call,
+    // so limiting the request to its actual page-rounded capacity prevents a blocking producer
+    // from waiting for a consumer that cannot run until vmsplice returns.
+    let gift_request_limit = pipe_capacity as usize / page_size * page_size;
+    if gift_request_limit == 0 {
+        return Ok(SpliceOutcome::Fallback);
+    }
+
+    // Probe one page without gifting ownership. If either primitive is unavailable, the buffer is
+    // still wholly ours and the caller can safely overwrite the output through write_all_at.
+    let mut output_offset = 0_i64;
+    if transfer_splice_range(
+        &pipe_read,
+        &pipe_write,
+        file,
+        &bytes[..page_size],
+        &mut output_offset,
+        false,
+        page_size,
+        page_size,
+    )
+    .is_err()
+    {
+        return Ok(SpliceOutcome::Fallback);
+    }
+
+    // SPLICE_F_GIFT promises that these complete anonymous pages will never be modified again.
+    // finish consumes the output, we wait for every gifted byte to leave the pipe, and the mapping
+    // is only unmapped after this function returns. Any error after this point is therefore fatal:
+    // falling back would access pages whose ownership has already been gifted.
+    transfer_splice_range(
+        &pipe_read,
+        &pipe_write,
+        file,
+        &bytes[page_size..aligned_len],
+        &mut output_offset,
+        true,
+        gift_request_limit,
+        page_size,
+    )?;
+
+    if aligned_len < bytes.len() {
+        file.write_all_at(&bytes[aligned_len..], aligned_len as u64)?;
+    }
+    Ok(SpliceOutcome::Complete)
+}
+
+#[cfg(target_os = "linux")]
+fn transfer_splice_range(
+    pipe_read: &std::os::fd::OwnedFd,
+    pipe_write: &std::os::fd::OwnedFd,
+    output: &File,
+    bytes: &[u8],
+    output_offset: &mut i64,
+    gift: bool,
+    supply_limit: usize,
+    page_size: usize,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    complete_splice_range(
+        bytes.len(),
+        |offset, remaining| {
+            let request_len = remaining.min(supply_limit);
+            let iov = libc::iovec {
+                iov_base: bytes[offset..].as_ptr().cast_mut().cast(),
+                iov_len: request_len,
+            };
+            let flags = if gift { libc::SPLICE_F_GIFT } else { 0 };
+            // SAFETY: iov references the live output mapping for this blocking call. Its length
+            // is bounded by the empty pipe's capacity; gifted requests start on page boundaries,
+            // contain whole pages, and the caller prevents every subsequent mutation.
+            let result =
+                unsafe { libc::vmsplice(pipe_write.as_raw_fd(), &raw const iov, 1, flags) };
+            if result < 0 {
+                Err(std::io::Error::last_os_error())
+            } else if gift && !(result as usize).is_multiple_of(page_size) {
+                Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "vmsplice accepted a non-page-aligned gifted range",
+                ))
+            } else {
+                Ok(result as usize)
+            }
+        },
+        |remaining| {
+            // SAFETY: both descriptors remain owned for this call and output_offset points to
+            // live, writable storage whose value the kernel advances after a successful transfer.
+            let result = unsafe {
+                libc::splice(
+                    pipe_read.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    output.as_raw_fd(),
+                    output_offset,
+                    remaining,
+                    libc::SPLICE_F_MOVE,
+                )
+            };
+            if result < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(result as usize)
+            }
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn complete_splice_range(
+    len: usize,
+    mut supply: impl FnMut(usize, usize) -> std::io::Result<usize>,
+    mut drain: impl FnMut(usize) -> std::io::Result<usize>,
+) -> std::io::Result<()> {
+    let mut offset = 0;
+    while offset < len {
+        let supplied = retry_interrupted(|| supply(offset, len - offset))?;
+        require_progress("vmsplice", supplied)?;
+
+        let mut consumed = 0;
+        while consumed < supplied {
+            let moved = retry_interrupted(|| drain(supplied - consumed))?;
+            require_progress("splice", moved)?;
+            consumed += moved;
+        }
+        offset += supplied;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retry_interrupted(
+    mut operation: impl FnMut() -> std::io::Result<usize>,
+) -> std::io::Result<usize> {
+    loop {
+        match operation() {
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn require_progress(operation: &'static str, transferred: usize) -> std::io::Result<()> {
+    if transferred == 0 {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("{operation} transferred no bytes"),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -672,6 +931,96 @@ mod tests {
             LARGE_EXT4_BUFFERED_OUTPUT_MIN,
             FileWriteMode::BufferThenWrite,
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn splice_buffer_exceeding_pipe_capacity_preserves_pages_and_unaligned_tail() {
+        use std::io::Read as _;
+        use std::io::Seek as _;
+        use std::io::SeekFrom;
+
+        // This exceeds even the requested 1 MiB pipe capacity, proving the implementation
+        // interleaves bounded supplies and drains instead of blocking on one giant vmsplice.
+        let len = 2 * 1024 * 1024 + 137;
+        let mut bytes = memmap2::MmapMut::map_anon(len).unwrap();
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let expected = bytes.to_vec();
+        let mut output = tempfile::tempfile().unwrap();
+        output.set_len(len as u64).unwrap();
+
+        assert_eq!(
+            splice_buffer_to_file(&output, &bytes).unwrap(),
+            SpliceOutcome::Complete
+        );
+        output.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = Vec::new();
+        output.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn splice_range_retries_interrupts_and_short_transfers() {
+        let mut supply_calls = 0;
+        let mut drain_calls = 0;
+        complete_splice_range(
+            17,
+            |_, remaining| {
+                supply_calls += 1;
+                if supply_calls == 1 {
+                    return Err(std::io::Error::from(ErrorKind::Interrupted));
+                }
+                Ok(remaining.min(5))
+            },
+            |remaining| {
+                drain_calls += 1;
+                if drain_calls == 1 {
+                    return Err(std::io::Error::from(ErrorKind::Interrupted));
+                }
+                Ok(remaining.min(3))
+            },
+        )
+        .unwrap();
+
+        assert!(supply_calls > 4);
+        assert!(drain_calls > 7);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn splice_range_rejects_zero_progress_and_partial_failure() {
+        let zero = complete_splice_range(8, |_, _| Ok(0), |_| unreachable!()).unwrap_err();
+        assert_eq!(zero.kind(), std::io::ErrorKind::WriteZero);
+
+        let mut supplied = false;
+        let partial = complete_splice_range(
+            8,
+            |_, _| {
+                supplied = true;
+                Ok(4)
+            },
+            |_| Err(std::io::Error::from(ErrorKind::BrokenPipe)),
+        )
+        .unwrap_err();
+        assert!(supplied);
+        assert_eq!(partial.kind(), ErrorKind::BrokenPipe);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsupported_probe_falls_back_before_gifting_pages() {
+        // SAFETY: sysconf reads process configuration for a constant selector.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let bytes = memmap2::MmapMut::map_anon(page_size * 2).unwrap();
+        let output = File::options().write(true).open("/dev/full").unwrap();
+
+        assert_eq!(
+            splice_buffer_to_file(&output, &bytes).unwrap(),
+            SpliceOutcome::Fallback
+        );
     }
 }
 
