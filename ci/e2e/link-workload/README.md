@@ -8,5 +8,8 @@ It also retains a compiled policy-signature table, mirroring scanners that ship 
 executable, so every platform performs enough native section work for the significance gate.
 
 The benchmark compiles this project once for each Cargo LTO profile, captures rustc's real final
-linker command, and replays only that command. Compilation and Rust LTO preparation are never
-included in measured final-link latency.
+linker command, and replays only that command for every measured linker. It finishes every replay
+for one configuration and releases those retained inputs before compiling the next configuration,
+so the three large LTO captures never accumulate on a hosted runner. Compilation, Rust LTO
+preparation, capture cleanup, and executable validation are never included in measured final-link
+latency.

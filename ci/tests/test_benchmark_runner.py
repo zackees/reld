@@ -68,6 +68,85 @@ def test_cargo_capture_command_builds_the_idiomatic_project_once():
     ]
 
 
+def test_each_configuration_is_replayed_then_released_before_the_next_capture(tmp_path: Path, monkeypatch):
+    events: list[str] = []
+    linker = Linker("wild", tmp_path / "wild")
+
+    def fake_capture(configuration, **kwargs):
+        del kwargs
+        events.append(f"capture:{configuration.label}")
+        output = tmp_path / configuration.profile / "app"
+        return LinkCommand("cc", ("input.o", "-o", str(output)), output, False)
+
+    def fake_prune(captured, *, profile_dir, log):
+        del captured, profile_dir, log
+
+    def fake_startup(*args, **kwargs):
+        del args, kwargs
+        events.append("startup")
+        return 0.01
+
+    def fake_replay(captured, selected_linker, **kwargs):
+        del captured, kwargs
+        events.append(f"replay:{selected_linker.label}")
+        return 1.0
+
+    def fake_release(*, profile_dir, target_dir, log):
+        del target_dir
+        del log
+        events.append(f"release:{profile_dir.name}")
+
+    monkeypatch.setattr(runner_module, "linkers_for_target", lambda target, reld: (linker,))
+    monkeypatch.setattr(runner_module, "benchmark_environment", lambda: {})
+    monkeypatch.setattr(runner_module, "capture_final_link", fake_capture)
+    monkeypatch.setattr(runner_module, "prune_capture_artifacts", fake_prune)
+    monkeypatch.setattr(runner_module, "benchmark_startup", fake_startup)
+    monkeypatch.setattr(runner_module, "benchmark_replay", fake_replay)
+    monkeypatch.setattr(runner_module, "release_capture_artifacts", fake_release)
+
+    runner_module.run_benchmark(
+        target="x86_64-linux",
+        reld=tmp_path / "reld",
+        manifest=tmp_path / "Cargo.toml",
+        workdir=tmp_path / "work",
+        target_dir=tmp_path / "target",
+        cargo="cargo",
+        trials=3,
+        warmup=1,
+        log=StringIO(),
+    )
+
+    assert events == [
+        "capture:no-LTO",
+        "startup",
+        "replay:wild",
+        "release:linkbench-no-lto",
+        "capture:ThinLTO",
+        "replay:wild",
+        "release:linkbench-thin-lto",
+        "capture:full-LTO",
+        "replay:wild",
+        "release:linkbench-full-lto",
+    ]
+
+
+def test_release_capture_artifacts_rejects_outside_directory(tmp_path: Path):
+    target_dir = tmp_path / "target"
+    outside = tmp_path / "linkbench-no-lto"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(BenchmarkError, match="refusing to release unsafe capture profile"):
+        runner_module.release_capture_artifacts(
+            profile_dir=outside,
+            target_dir=target_dir,
+            log=StringIO(),
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
 def test_default_workload_replaces_startup_dominated_sqlite_bridge():
     assert DEFAULT_MANIFEST.as_posix().endswith("ci/e2e/link-workload/Cargo.toml")
     assert BENCHMARK_PACKAGE == "linkbench-app"
@@ -79,7 +158,7 @@ def test_compiled_policy_is_calibrated_for_fast_macos_final_links():
     # The first exact-SHA macOS run measured 160 MiB at only 0.3169s under full LTO,
     # while the bridged reld front door needed 0.1539s to start. Keep enough real,
     # runtime-consumed policy data for the strict <=10% fixed-startup gate.
-    assert "1024 * 1024 * 1024" in rules.read_text(encoding="utf-8")
+    assert "928 * 1024 * 1024" in rules.read_text(encoding="utf-8")
 
 
 def test_startup_probe_is_target_correct(tmp_path: Path):

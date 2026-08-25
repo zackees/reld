@@ -371,6 +371,24 @@ def prune_capture_artifacts(command: LinkCommand, *, profile_dir: Path, log: Tex
     )
 
 
+def release_capture_artifacts(*, profile_dir: Path, target_dir: Path, log: TextIO) -> None:
+    """Release one configuration after every linker has replayed its captured link."""
+    allowed_profiles = {configuration.profile for configuration in CONFIGURATIONS}
+    resolved_target = target_dir.resolve()
+    is_junction = getattr(profile_dir, "is_junction", lambda: False)
+    if (
+        profile_dir.name not in allowed_profiles
+        or profile_dir.parent.resolve() != resolved_target
+        or profile_dir.is_symlink()
+        or is_junction()
+        or profile_dir.resolve().parent != resolved_target
+    ):
+        raise BenchmarkError(f"refusing to release unsafe capture profile: {profile_dir}")
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir)
+    print(f"released capture profile {profile_dir.name}", file=log, flush=True)
+
+
 def _run_link(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -529,7 +547,8 @@ def run_benchmark(
     environment = benchmark_environment()
     linkers = linkers_for_target(target, reld)
     use_driver_shim = "linux" in target.lower()
-    captured_links: dict[str, LinkCommand] = {}
+    startup_seconds: dict[str, float] | None = None
+    final_links: dict[str, dict[str, float]] = {}
     for configuration in CONFIGURATIONS:
         captured = capture_final_link(
             configuration,
@@ -544,35 +563,44 @@ def run_benchmark(
             profile_dir=target_dir / configuration.profile,
             log=log,
         )
-        captured_links[configuration.label] = captured
-    first_captured = captured_links[CONFIGURATIONS[0].label]
-    startup_seconds = {
-        linker.label: benchmark_startup(
-            target,
-            linker,
-            captured=first_captured,
-            environment=environment,
-            warmup=warmup,
-            trials=trials,
-        )
-        for linker in linkers
-    }
-    final_links: dict[str, dict[str, float]] = {}
-    for configuration in CONFIGURATIONS:
-        captured = captured_links[configuration.label]
-        final_links[configuration.label] = {
-            linker.label: benchmark_replay(
-                captured,
-                linker,
-                output_dir=workdir / configuration.profile,
-                cwd=manifest.parent,
-                environment=environment,
-                warmup=warmup,
-                trials=trials,
-                use_driver_shim=use_driver_shim,
+        if startup_seconds is None:
+            startup_seconds = {
+                linker.label: benchmark_startup(
+                    target,
+                    linker,
+                    captured=captured,
+                    environment=environment,
+                    warmup=warmup,
+                    trials=trials,
+                )
+                for linker in linkers
+            }
+        try:
+            final_links[configuration.label] = {
+                linker.label: benchmark_replay(
+                    captured,
+                    linker,
+                    output_dir=workdir / configuration.profile,
+                    cwd=manifest.parent,
+                    environment=environment,
+                    warmup=warmup,
+                    trials=trials,
+                    use_driver_shim=use_driver_shim,
+                )
+                for linker in linkers
+            }
+        finally:
+            # Only one configuration's retained native-link inputs live at a time. Compilation
+            # and any Rust LTO preparation still happen once, before this configuration's timed
+            # loop; removing its profile afterward cannot affect the already-recorded samples.
+            release_capture_artifacts(
+                profile_dir=target_dir / configuration.profile,
+                target_dir=target_dir,
+                log=log,
             )
-            for linker in linkers
-        }
+
+    if startup_seconds is None:  # CONFIGURATIONS is intentionally non-empty; keep typing honest.
+        raise BenchmarkError("startup timings are missing")
 
     lines = [
         f"## Link Benchmark: {target}",
