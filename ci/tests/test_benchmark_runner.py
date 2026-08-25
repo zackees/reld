@@ -21,6 +21,7 @@ from ci.benchmark_runner import (
     cargo_capture_command,
     parse_print_link_args,
     prune_capture_artifacts,
+    reld_output_mode_linkers,
     replay_command,
     replace_output,
     startup_probe_command,
@@ -250,6 +251,16 @@ def test_startup_probe_is_target_correct(tmp_path: Path):
     assert startup_probe_command("x86_64-linux", linker) == [str(linker.path), "--version"]
     assert startup_probe_command("aarch64-apple-darwin", linker) == [str(linker.path), "-v"]
     assert startup_probe_command("x86_64-pc-windows-msvc", linker) == [str(linker.path), "/?"]
+
+
+def test_output_mode_diagnostics_force_the_native_reld_engine(tmp_path: Path):
+    modes = reld_output_mode_linkers(tmp_path / "ld.reld", 4)
+
+    assert [mode.label for mode in modes] == ["default", "mmap", "buffer"]
+    assert all("-Wl,--engine=reld" in mode.driver_arguments for mode in modes)
+    assert all("-Wl,--threads=4" in mode.driver_arguments for mode in modes)
+    assert "-Wl,--mmap-output-file" in modes[1].driver_arguments
+    assert "-Wl,--no-mmap-output-file" in modes[2].driver_arguments
 
 
 def test_old_sqlite_bridge_is_red_and_significant_workload_is_green():

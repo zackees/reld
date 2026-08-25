@@ -251,6 +251,16 @@ def reference_linker_for_target(target: str) -> str:
     return {"linux": "wild", "macos": "ld64.lld", "windows": "lld"}[_target_family(target)]
 
 
+def reld_output_mode_linkers(reld: Path, thread_count: int) -> tuple[Linker, ...]:
+    """Return explicit native-reld output modes for the Linux writer diagnostic."""
+    common_arguments = ("-Wl,--engine=reld", f"-Wl,--threads={thread_count}")
+    return (
+        Linker("default", reld.absolute(), common_arguments),
+        Linker("mmap", reld.absolute(), common_arguments + ("-Wl,--mmap-output-file",)),
+        Linker("buffer", reld.absolute(), common_arguments + ("-Wl,--no-mmap-output-file",)),
+    )
+
+
 def startup_probe_command(target: str, linker: Linker, captured: LinkCommand | None = None) -> list[str]:
     """Build a target-correct, no-link-work command that still loads the concrete linker."""
     executable = str(linker.path) if linker.path is not None else None
@@ -762,12 +772,7 @@ def run_benchmark(
                 metadata = diagnostic_report["metadata"]
                 assert isinstance(metadata, dict)
                 thread_count = metadata["thread_count"]
-                common_arguments = (f"-Wl,--threads={thread_count}",)
-                modes = (
-                    Linker("default", reld.absolute(), common_arguments),
-                    Linker("mmap", reld.absolute(), common_arguments + ("-Wl,--mmap-output-file",)),
-                    Linker("buffer", reld.absolute(), common_arguments + ("-Wl,--no-mmap-output-file",)),
-                )
+                modes = reld_output_mode_linkers(reld, thread_count)
                 _, mode_samples, mode_sizes, mode_orders = benchmark_linkers_round_robin(
                     captured,
                     modes,
