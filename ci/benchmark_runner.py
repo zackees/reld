@@ -29,6 +29,7 @@ DEFAULT_MANIFEST = REPO_ROOT / "ci" / "e2e" / "link-workload" / "Cargo.toml"
 BENCHMARK_PACKAGE = "linkbench-app"
 MIN_REFERENCE_LINK_SECONDS = 0.500
 MAX_STARTUP_FRACTION = 0.10
+MIN_OUTPUT_MODE_IMPROVEMENT = 0.10
 
 
 class BenchmarkError(RuntimeError):
@@ -244,7 +245,7 @@ def linkers_for_target(target: str, reld: Path) -> tuple[Linker, ...]:
             Linker("lld", _required_tool("ld.lld")),
             Linker("mold", _required_tool("ld.mold", "mold")),
             Linker("wild", _required_tool("ld.wild", "wild")),
-            Linker("reld", reld.absolute()),
+            Linker("reld", reld.absolute(), ("-Wl,--engine=reld",)),
         )
     raise BenchmarkError(f"unsupported benchmark target {target!r}")
 
@@ -334,6 +335,33 @@ def assert_significant_workload(
     if failures:
         calibration = f" (calibration target: {MIN_REFERENCE_LINK_SECONDS:.3f}s reference link)"
         raise BenchmarkError("startup-dominated workload" + calibration + ":\n" + "\n".join(failures))
+
+
+def assert_output_mode_improvement(diagnostic_report: dict[str, object]) -> None:
+    """Require the optimized Linux default to beat the prior explicit-mmap path in every row."""
+    if diagnostic_report.get("status") != "measured":
+        return
+    configurations = diagnostic_report.get("configurations")
+    if not isinstance(configurations, dict):
+        raise BenchmarkError("output-mode diagnostics omitted configurations")
+
+    failures: list[str] = []
+    for configuration in CONFIGURATIONS:
+        configuration_report = configurations.get(configuration.label)
+        modes = configuration_report.get("modes") if isinstance(configuration_report, dict) else None
+        default = modes.get("default") if isinstance(modes, dict) else None
+        mmap = modes.get("mmap") if isinstance(modes, dict) else None
+        default_seconds = default.get("median_seconds") if isinstance(default, dict) else None
+        mmap_seconds = mmap.get("median_seconds") if isinstance(mmap, dict) else None
+        if not isinstance(default_seconds, int | float) or not isinstance(mmap_seconds, int | float) or mmap_seconds <= 0:
+            failures.append(f"{configuration.label}: missing paired default/mmap medians")
+            continue
+        improvement = 1.0 - (default_seconds / mmap_seconds)
+        configuration_report["default_vs_mmap_improvement_fraction"] = improvement
+        if improvement + 1e-12 < MIN_OUTPUT_MODE_IMPROVEMENT:
+            failures.append(f"{configuration.label}: default improved {improvement:.1%} over mmap ({default_seconds:.4f}s vs {mmap_seconds:.4f}s; required {MIN_OUTPUT_MODE_IMPROVEMENT:.0%})")
+    if failures:
+        raise BenchmarkError("large-output optimization missed its paired performance gate:\n" + "\n".join(failures))
 
 
 def capture_final_link(
@@ -658,7 +686,7 @@ def _parse_phase_timings(output: str) -> dict[str, float]:
             match = re.search(rf"([0-9]+(?:\.[0-9]+)?)\s+{re.escape(name)}\s*$", line)
             if match:
                 phases[name] = float(match.group(1)) / 1000.0
-    required = {"Compute build ID", "Write data to file", "Flush and unmap output file"}
+    required = {"Create output file", "Compute build ID", "Write data to file", "Flush and unmap output file"}
     missing = sorted(required - phases.keys())
     if missing:
         raise BenchmarkError(f"reld phase trace omitted required phases: {', '.join(missing)}\n{output}")
@@ -868,9 +896,16 @@ def run_benchmark(
     # calibration diagnosable without subtracting startup or weakening the publication gate.
     log.write(table)
     log.flush()
+    output_mode_error: BenchmarkError | None = None
     if output_mode_report is not None and diagnostic_report is not None:
+        try:
+            assert_output_mode_improvement(diagnostic_report)
+        except BenchmarkError as error:
+            output_mode_error = error
         output_mode_report.parent.mkdir(parents=True, exist_ok=True)
         output_mode_report.write_text(json.dumps(diagnostic_report, indent=2) + "\n", encoding="utf-8")
+    if output_mode_error is not None:
+        raise output_mode_error
     assert_significant_workload(target, startup_seconds, final_links)
     return table
 

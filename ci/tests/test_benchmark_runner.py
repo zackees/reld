@@ -1,5 +1,6 @@
 import os
 import json
+import statistics
 from io import StringIO
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from ci.benchmark_runner import (
     Linker,
     _discard_verified_output,
     _parse_phase_timings,
+    assert_output_mode_improvement,
     assert_significant_workload,
     benchmark_environment,
     benchmark_linkers_round_robin,
@@ -219,10 +221,10 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
 
     def fake_round_robin(captured, linkers, **kwargs):
         del captured, kwargs
-        samples = {linker.label: [0.9, 1.0, 1.1] for linker in linkers}
+        samples = {linker.label: ([0.7, 0.8, 0.9] if linker.label == "default" else [0.9, 1.0, 1.1]) for linker in linkers}
         sizes = {linker.label: [256 * 1024 * 1024] * 3 for linker in linkers}
         orders = [[linker.label for linker in linkers]] * 3
-        return ({linker.label: 1.0 for linker in linkers}, samples, sizes, orders)
+        return ({linker.label: statistics.median(samples[linker.label]) for linker in linkers}, samples, sizes, orders)
 
     monkeypatch.setattr(runner_module, "linkers_for_target", lambda target, reld: (wild,))
     monkeypatch.setattr(runner_module, "benchmark_environment", lambda: {})
@@ -237,6 +239,7 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
         "capture_reld_phase_trace",
         lambda *args, **kwargs: (
             {
+                "Create output file": 0.02,
                 "Compute build ID": 0.05,
                 "Write data to file": 0.7,
                 "Flush and unmap output file": 0.01,
@@ -266,19 +269,21 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
     assert set(report["configurations"]) == {"no-LTO", "ThinLTO", "full-LTO"}
     no_lto = report["configurations"]["no-LTO"]
     assert set(no_lto["modes"]) == {"default", "mmap", "buffer"}
-    assert no_lto["modes"]["default"]["samples_seconds"] == [0.9, 1.0, 1.1]
+    assert no_lto["modes"]["default"]["samples_seconds"] == [0.7, 0.8, 0.9]
     assert no_lto["modes"]["default"]["output_sizes_bytes"] == [256 * 1024 * 1024] * 3
     assert no_lto["modes"]["default"]["phase_seconds"]["Write data to file"] == 0.7
 
 
 def test_reld_phase_trace_parser_requires_dominant_output_phases():
     output = """\
+│ ├──     2.00 Create output file
 │ ├──    12.50 Compute build ID
 │ ├──   625.25 Write data to file
 │ └──     8.00 Flush and unmap output file
 """
 
     assert _parse_phase_timings(output) == {
+        "Create output file": 0.002,
         "Compute build ID": 0.0125,
         "Write data to file": 0.62525,
         "Flush and unmap output file": 0.008,
@@ -339,6 +344,38 @@ def test_output_mode_diagnostics_force_the_native_reld_engine(tmp_path: Path):
     assert all("-Wl,--threads=4" in mode.driver_arguments for mode in modes)
     assert "-Wl,--mmap-output-file" in modes[1].driver_arguments
     assert "-Wl,--no-mmap-output-file" in modes[2].driver_arguments
+
+
+def test_published_linux_reld_forces_the_native_engine(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(runner_module, "_required_tool", lambda *names: tmp_path / names[0])
+
+    reld = next(linker for linker in runner_module.linkers_for_target("x86_64-linux", tmp_path / "reld") if linker.label == "reld")
+
+    assert reld.driver_arguments == ("-Wl,--engine=reld",)
+
+
+def test_paired_output_mode_gate_requires_ten_percent_in_every_lto_row():
+    def report(improvements: dict[str, float]) -> dict[str, object]:
+        return {
+            "status": "measured",
+            "configurations": {
+                configuration.label: {
+                    "modes": {
+                        "default": {"median_seconds": 1.0 - improvements[configuration.label]},
+                        "mmap": {"median_seconds": 1.0},
+                    }
+                }
+                for configuration in CONFIGURATIONS
+            },
+        }
+
+    passing = report({"no-LTO": 0.12, "ThinLTO": 0.11, "full-LTO": 0.10})
+    assert_output_mode_improvement(passing)
+    assert passing["configurations"]["no-LTO"]["default_vs_mmap_improvement_fraction"] == pytest.approx(0.12)
+
+    failing = report({"no-LTO": 0.12, "ThinLTO": 0.05, "full-LTO": 0.11})
+    with pytest.raises(BenchmarkError, match=r"ThinLTO: default improved 5\.0%"):
+        assert_output_mode_improvement(failing)
 
 
 def test_old_sqlite_bridge_is_red_and_significant_workload_is_green():

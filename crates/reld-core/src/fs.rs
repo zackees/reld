@@ -7,8 +7,6 @@ use crate::error::Context as _;
 use crate::error::Result;
 use memmap2::Mmap;
 use memmap2::MmapOptions;
-#[cfg(unix)]
-use rayon::prelude::*;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::io::Write as _;
@@ -361,7 +359,8 @@ impl OutputFileData for OsOutputFile {
 
     fn finish(self) -> Result {
         if let OsOutputBuffer::InMemory(bytes) = &self.buffer {
-            write_buffer_to_file(&self.file, bytes)
+            (&self.file)
+                .write_all(bytes)
                 .with_context(|| format!("Failed to write to {}", self.path.display()))?;
         }
 
@@ -382,35 +381,6 @@ impl OutputFileData for OsOutputFile {
         #[cfg(not(target_os = "macos"))]
         let _ = len;
     }
-}
-
-#[cfg(unix)]
-const PARALLEL_FILE_WRITE_SIZE_THRESHOLD: usize = 1_000_000;
-#[cfg(unix)]
-const PARALLEL_FILE_WRITE_CHUNKS_PER_THREAD: usize = 8;
-
-fn write_buffer_to_file(mut file: &File, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    if bytes.len() >= PARALLEL_FILE_WRITE_SIZE_THRESHOLD
-        && rayon::current_num_threads() > 1
-        && file.metadata().is_ok_and(|metadata| metadata.is_file())
-    {
-        use std::os::unix::fs::FileExt as _;
-
-        let target_chunks =
-            rayon::current_num_threads().saturating_mul(PARALLEL_FILE_WRITE_CHUNKS_PER_THREAD);
-        let chunk_size = bytes
-            .len()
-            .div_ceil(target_chunks)
-            .max(PARALLEL_FILE_WRITE_SIZE_THRESHOLD);
-        bytes
-            .par_chunks(chunk_size)
-            .enumerate()
-            .try_for_each(|(index, chunk)| file.write_all_at(chunk, (index * chunk_size) as u64))?;
-        return Ok(());
-    }
-
-    file.write_all(bytes)
 }
 
 impl FileSystem for OsFileSystem {
@@ -528,6 +498,8 @@ impl FileSystem for OsFileSystem {
             }
         };
 
+        let should_prefault_output = options.write_mode.is_none()
+            && should_prefault_output_mmap_for_file(&file, options.size);
         let file_write_mode = options
             .write_mode
             .unwrap_or_else(|| default_file_write_mode_for_file(&file, options.size));
@@ -538,7 +510,10 @@ impl FileSystem for OsFileSystem {
                 // to mmap the file and if it fails, fall back to non-mmapped output.
                 if file.set_len(options.size).is_ok() {
                     match unsafe { MmapOptions::new().map_mut(&file) } {
-                        Ok(mmap) => OsOutputBuffer::Mmap(mmap),
+                        Ok(mmap) => {
+                            prefault_output_mmap(&mmap, should_prefault_output);
+                            OsOutputBuffer::Mmap(mmap)
+                        }
                         Err(_) => OsOutputBuffer::InMemory(vec![0; options.size as usize]),
                     }
                 } else {
@@ -585,24 +560,55 @@ fn default_file_write_mode_for_file(file: &std::fs::File, output_size: u64) -> F
 #[cfg(any(target_os = "android", target_os = "linux"))]
 fn default_file_write_mode_for_filesystem_type(
     filesystem_type: Option<nix::sys::statfs::FsType>,
-    output_size: u64,
+    _output_size: u64,
 ) -> FileWriteMode {
-    const EXT4_BUFFERED_OUTPUT_THRESHOLD: u64 = 64 * 1024 * 1024;
-
     match filesystem_type {
         // Preserve the existing Btrfs/vfat policy at every size.
         Some(nix::sys::statfs::BTRFS_SUPER_MAGIC | nix::sys::statfs::MSDOS_SUPER_MAGIC) => {
             FileWriteMode::BufferThenWrite
         }
-        // ext4 was measured directly on GitHub's Linux runner in issue #74. Keep mmap for small
-        // outputs so ordinary link latency is unchanged; large outputs use parallel ranged writes.
-        Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
-            if output_size >= EXT4_BUFFERED_OUTPUT_THRESHOLD =>
-        {
-            FileWriteMode::BufferThenWrite
-        }
         _ => FileWriteMode::Mmap,
     }
+}
+
+fn should_prefault_output_mmap_for_file(file: &std::fs::File, output_size: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        should_prefault_output_mmap_for_filesystem_type(
+            nix::sys::statfs::fstatfs(file)
+                .map(|stat| stat.filesystem_type())
+                .ok(),
+            output_size,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, output_size);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn should_prefault_output_mmap_for_filesystem_type(
+    filesystem_type: Option<nix::sys::statfs::FsType>,
+    output_size: u64,
+) -> bool {
+    const EXT4_PREFAULT_THRESHOLD: u64 = 64 * 1024 * 1024;
+
+    filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+        && output_size >= EXT4_PREFAULT_THRESHOLD
+}
+
+fn prefault_output_mmap(mmap: &memmap2::MmapMut, should_prefault: bool) {
+    #[cfg(target_os = "linux")]
+    if should_prefault {
+        // Output creation runs on a background Rayon task, so this moves the unavoidable writable
+        // page faults off the writer's critical path and overlaps them with layout. Kernels older
+        // than 5.14 reject MADV_POPULATE_WRITE; in that case the normal fault-on-write path remains.
+        let _ = mmap.advise(memmap2::Advice::PopulateWrite);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (mmap, should_prefault);
 }
 
 #[cfg(all(test, unix))]
@@ -630,31 +636,18 @@ mod tests {
             default_file_write_mode_for_filesystem_type(None, 256 * 1024 * 1024),
             FileWriteMode::Mmap
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parallel_ranged_write_preserves_every_byte() {
-        use std::io::Read as _;
-        use std::io::Seek as _;
-
-        let mut file = tempfile::tempfile().unwrap();
-        let bytes: Vec<u8> = (0..PARALLEL_FILE_WRITE_SIZE_THRESHOLD * 2)
-            .map(|index| (index % 251) as u8)
-            .collect();
-        file.set_len(bytes.len() as u64).unwrap();
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .unwrap();
-
-        pool.install(|| write_buffer_to_file(&file, &bytes))
-            .unwrap();
-
-        file.rewind().unwrap();
-        let mut actual = Vec::new();
-        file.read_to_end(&mut actual).unwrap();
-        assert_eq!(actual, bytes);
+        assert!(should_prefault_output_mmap_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            256 * 1024 * 1024,
+        ));
+        assert!(!should_prefault_output_mmap_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            1024 * 1024,
+        ));
+        assert!(!should_prefault_output_mmap_for_filesystem_type(
+            None,
+            256 * 1024 * 1024,
+        ));
     }
 }
 

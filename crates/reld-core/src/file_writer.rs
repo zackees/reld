@@ -39,6 +39,10 @@ pub(crate) const SECTION_PAR_COPY_SIZE_THRESHOLD: usize = 1_000_000;
 /// turning a large contiguous copy into thousands of tiny tasks.
 const SECTION_PAR_COPY_CHUNKS_PER_THREAD: usize = 8;
 
+/// Preserve the original one-range-per-worker scheduler for ordinary sections. Only retained
+/// sections large enough to dominate a link need the finer-grained rebalancing from issue #74.
+const LARGE_SECTION_PAR_REBALANCE_THRESHOLD: usize = 64 * 1024 * 1024;
+
 pub struct Output<F: FileSystem> {
     path: Arc<Path>,
     creator: FileCreator<F::Output>,
@@ -148,7 +152,7 @@ impl<F: FileSystem> Output<F> {
                 let file_system = Arc::clone(&self.file_system);
 
                 rayon::spawn(move || {
-                    verbose_timing_phase!("Create output file");
+                    timing_phase!("Create output file");
 
                     if output_config.file_replacement_mode == FileReplacementMode::UnlinkAndReplace
                     {
@@ -440,6 +444,11 @@ fn write_layout_to<'data, P: Platform>(
 /// Small sections are copied with a single `copy_from_slice` call. Large sections may be split
 /// into chunks and copied in parallel on multiple threads.
 pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8]) {
+    assert_eq!(
+        data.len(),
+        out.len(),
+        "section input and output lengths differ"
+    );
     if data.len() >= SECTION_PAR_COPY_SIZE_THRESHOLD {
         let threads = rayon::current_num_threads();
         let chunk_size = section_copy_chunk_size(data.len(), threads);
@@ -455,6 +464,10 @@ pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8]) {
 fn section_copy_chunk_size(data_len: usize, threads: usize) -> usize {
     if threads <= 1 {
         return data_len.max(1);
+    }
+
+    if data_len < LARGE_SECTION_PAR_REBALANCE_THRESHOLD {
+        return (data_len / threads).max(1);
     }
 
     let target_chunks = threads.saturating_mul(SECTION_PAR_COPY_CHUNKS_PER_THREAD);
@@ -479,11 +492,16 @@ mod tests {
     }
 
     #[test]
-    fn parallel_copy_chunks_are_never_smaller_than_the_parallel_threshold() {
+    fn rebalanced_large_section_chunks_are_never_smaller_than_the_parallel_threshold() {
         assert_eq!(
-            section_copy_chunk_size(SECTION_PAR_COPY_SIZE_THRESHOLD, 64),
+            section_copy_chunk_size(64 * 1024 * 1024, 64),
             SECTION_PAR_COPY_SIZE_THRESHOLD
         );
+    }
+
+    #[test]
+    fn ordinary_section_chunking_matches_the_original_scheduler() {
+        assert_eq!(section_copy_chunk_size(2 * 1024 * 1024, 4), 512 * 1024);
     }
 
     #[test]
@@ -508,5 +526,11 @@ mod tests {
         pool.install(|| copy_section_data(&data, &mut out));
 
         assert_eq!(out, data);
+    }
+
+    #[test]
+    #[should_panic(expected = "section input and output lengths differ")]
+    fn parallel_copy_rejects_mismatched_lengths() {
+        copy_section_data(&vec![1; SECTION_PAR_COPY_SIZE_THRESHOLD], &mut [0; 1]);
     }
 }
