@@ -32,6 +32,13 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 
+/// Threshold size for using parallel copy for section data copying.
+pub(crate) const SECTION_PAR_COPY_SIZE_THRESHOLD: usize = 1_000_000;
+
+/// Give Rayon enough independent ranges to rebalance page-fault and writeback variance without
+/// turning a large contiguous copy into thousands of tiny tasks.
+const SECTION_PAR_COPY_CHUNKS_PER_THREAD: usize = 8;
+
 pub struct Output<F: FileSystem> {
     path: Arc<Path>,
     creator: FileCreator<F::Output>,
@@ -433,9 +440,6 @@ fn write_layout_to<'data, P: Platform>(
 /// Small sections are copied with a single `copy_from_slice` call. Large sections may be split
 /// into chunks and copied in parallel on multiple threads.
 pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8]) {
-    /// Threshold size for using parallel copy for section data copying.
-    pub(crate) const SECTION_PAR_COPY_SIZE_THRESHOLD: usize = 1_000_000;
-
     if data.len() >= SECTION_PAR_COPY_SIZE_THRESHOLD {
         let threads = rayon::current_num_threads();
         let chunk_size = section_copy_chunk_size(data.len(), threads);
@@ -449,11 +453,20 @@ pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8]) {
 }
 
 fn section_copy_chunk_size(data_len: usize, threads: usize) -> usize {
-    (data_len / threads).max(1)
+    if threads <= 1 {
+        return data_len.max(1);
+    }
+
+    let target_chunks = threads.saturating_mul(SECTION_PAR_COPY_CHUNKS_PER_THREAD);
+    data_len
+        .div_ceil(target_chunks)
+        .max(SECTION_PAR_COPY_SIZE_THRESHOLD)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::SECTION_PAR_COPY_SIZE_THRESHOLD;
+    use super::copy_section_data;
     use super::section_copy_chunk_size;
 
     /// Issue #74: a retained 256 MiB section must expose enough work items for Rayon to
@@ -463,5 +476,37 @@ mod tests {
         let chunk_size = section_copy_chunk_size(256 * 1024 * 1024, 4);
 
         assert!(chunk_size <= 8 * 1024 * 1024, "chunk size was {chunk_size}");
+    }
+
+    #[test]
+    fn parallel_copy_chunks_are_never_smaller_than_the_parallel_threshold() {
+        assert_eq!(
+            section_copy_chunk_size(SECTION_PAR_COPY_SIZE_THRESHOLD, 64),
+            SECTION_PAR_COPY_SIZE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn single_thread_copy_remains_one_contiguous_range() {
+        assert_eq!(
+            section_copy_chunk_size(256 * 1024 * 1024, 1),
+            256 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn rebalanced_parallel_copy_preserves_every_byte() {
+        let data: Vec<u8> = (0..SECTION_PAR_COPY_SIZE_THRESHOLD * 2)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut out = vec![0; data.len()];
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+
+        pool.install(|| copy_section_data(&data, &mut out));
+
+        assert_eq!(out, data);
     }
 }
