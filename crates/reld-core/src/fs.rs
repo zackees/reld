@@ -18,6 +18,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const LARGE_BUFFERED_OUTPUT_THRESHOLD: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileReplacementMode {
     /// The existing output file, if any, will be unlinked (deleted) and a new file with the same
@@ -355,6 +357,7 @@ pub struct OsOutputFile {
     buffer: OsOutputBuffer,
     path: Arc<Path>,
     preflushed_range: Option<Range<usize>>,
+    can_preflush: bool,
 }
 
 impl OutputFileData for OsOutputFile {
@@ -380,8 +383,13 @@ impl OutputFileData for OsOutputFile {
         let OsOutputBuffer::InMemory(bytes) = &self.buffer else {
             return Ok(compute(self.bytes()));
         };
+        if !self.can_preflush {
+            return Ok(compute(bytes));
+        }
 
-        let mut file = self.file.try_clone()?;
+        let Ok(mut file) = self.file.try_clone() else {
+            return Ok(compute(bytes));
+        };
         let result = std::thread::scope(|scope| -> Result<T> {
             let writer = scope.spawn(|| -> std::io::Result<()> {
                 file.seek(SeekFrom::Start(0))?;
@@ -568,12 +576,16 @@ impl FileSystem for OsFileSystem {
                 OsOutputBuffer::InMemory(vec![0; options.size as usize])
             }
         };
+        let can_preflush = file_write_mode == FileWriteMode::BufferThenWrite
+            && options.size >= LARGE_BUFFERED_OUTPUT_THRESHOLD
+            && file.metadata().is_ok_and(|metadata| metadata.is_file());
 
         Ok(OsOutputFile {
             file,
             buffer,
             path,
             preflushed_range: None,
+            can_preflush,
         })
     }
 
@@ -606,8 +618,6 @@ fn default_file_write_mode_for_filesystem_type(
     filesystem_type: Option<nix::sys::statfs::FsType>,
     output_size: u64,
 ) -> FileWriteMode {
-    const LARGE_EXT4_BUFFERED_OUTPUT_THRESHOLD: u64 = 256 * 1024 * 1024;
-
     match filesystem_type {
         // Preserve the existing Btrfs/vfat policy at every size.
         Some(nix::sys::statfs::BTRFS_SUPER_MAGIC | nix::sys::statfs::MSDOS_SUPER_MAGIC) => {
@@ -615,7 +625,7 @@ fn default_file_write_mode_for_filesystem_type(
         }
         #[cfg(target_os = "linux")]
         Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
-            if output_size >= LARGE_EXT4_BUFFERED_OUTPUT_THRESHOLD =>
+            if output_size >= LARGE_BUFFERED_OUTPUT_THRESHOLD =>
         {
             FileWriteMode::BufferThenWrite
         }
@@ -626,6 +636,7 @@ fn default_file_write_mode_for_filesystem_type(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::io::Read as _;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -652,8 +663,6 @@ mod tests {
 
     #[test]
     fn buffered_preflush_patches_only_the_post_hash_range() {
-        use std::io::Read as _;
-
         let file = tempfile::tempfile().unwrap();
         let mut reader = file.try_clone().unwrap();
         let original: Vec<u8> = (0..64).collect();
@@ -662,6 +671,7 @@ mod tests {
             buffer: OsOutputBuffer::InMemory(original.clone()),
             path: Arc::from(Path::new("preflush-test")),
             preflushed_range: None,
+            can_preflush: true,
         };
 
         let sum = output
@@ -679,6 +689,31 @@ mod tests {
         expected[8..12].copy_from_slice(&[200, 201, 202, 203]);
         assert_eq!(actual, expected);
         assert_eq!(sum, (0_u64..64).sum());
+    }
+
+    #[test]
+    fn small_buffer_keeps_the_original_serial_finish_path() {
+        let file = tempfile::tempfile().unwrap();
+        let mut reader = file.try_clone().unwrap();
+        let bytes = vec![7; 64];
+        let mut output = OsOutputFile {
+            file,
+            buffer: OsOutputBuffer::InMemory(bytes.clone()),
+            path: Arc::from(Path::new("small-buffer-test")),
+            preflushed_range: None,
+            can_preflush: false,
+        };
+
+        output
+            .compute_while_preflushing(8..12, |data| assert_eq!(data, bytes))
+            .unwrap();
+        assert_eq!(reader.metadata().unwrap().len(), 0);
+        output.finish().unwrap();
+
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
     }
 }
 
