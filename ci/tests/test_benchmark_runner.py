@@ -210,6 +210,33 @@ def test_linker_trials_rotate_order_and_preserve_every_sample(tmp_path: Path, mo
     assert set(medians) == {"wild", "reld", "mmap"}
 
 
+def test_four_diagnostic_contenders_each_occupy_every_round_position(tmp_path: Path, monkeypatch):
+    captured = LinkCommand("cc", ("main.o", "-o", "/old/app"), Path("/old/app"), False)
+    linkers = tuple(Linker(label, tmp_path / label) for label in ("baseline", "default", "mmap", "buffer"))
+
+    def fake_replay(captured, linker, *, sample_sink, output_size_sink, **kwargs):
+        del captured, linker, kwargs
+        sample_sink.append(1.0)
+        output_size_sink.append(256 * 1024 * 1024)
+        return 1.0
+
+    monkeypatch.setattr(runner_module, "benchmark_replay", fake_replay)
+
+    _, _, _, orders = benchmark_linkers_round_robin(
+        captured,
+        linkers,
+        output_dir=tmp_path / "out",
+        cwd=tmp_path,
+        environment={},
+        warmup=1,
+        trials=4,
+        use_driver_shim=True,
+    )
+
+    for linker in linkers:
+        assert {order.index(linker.label) for order in orders} == {0, 1, 2, 3}
+
+
 def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_path: Path, monkeypatch):
     report_path = tmp_path / "output-modes.json"
     baseline_reld = tmp_path / "baseline-reld"
@@ -222,10 +249,11 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
         return LinkCommand("clang", ("input.o", "-o", str(output)), output, False)
 
     def fake_round_robin(captured, linkers, **kwargs):
-        del captured, kwargs
-        samples = {linker.label: ([0.7, 0.8, 0.9] if linker.label == "default" else [0.9, 1.0, 1.1]) for linker in linkers}
-        sizes = {linker.label: [256 * 1024 * 1024] * 3 for linker in linkers}
-        orders = [[linker.label for linker in linkers]] * 3
+        del captured
+        trial_count = kwargs["trials"]
+        samples = {linker.label: ([0.8] * trial_count if linker.label == "default" else [1.0] * trial_count) for linker in linkers}
+        sizes = {linker.label: [256 * 1024 * 1024] * trial_count for linker in linkers}
+        orders = [[linker.label for linker in linkers]] * trial_count
         return ({linker.label: statistics.median(samples[linker.label]) for linker in linkers}, samples, sizes, orders)
 
     monkeypatch.setattr(runner_module, "linkers_for_target", lambda target, reld: (wild,))
@@ -272,8 +300,9 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
     assert set(report["configurations"]) == {"no-LTO", "ThinLTO", "full-LTO"}
     no_lto = report["configurations"]["no-LTO"]
     assert set(no_lto["modes"]) == {"baseline", "default", "mmap", "buffer"}
-    assert no_lto["modes"]["default"]["samples_seconds"] == [0.7, 0.8, 0.9]
-    assert no_lto["modes"]["default"]["output_sizes_bytes"] == [256 * 1024 * 1024] * 3
+    assert no_lto["trials_per_mode"] == 4
+    assert no_lto["modes"]["default"]["samples_seconds"] == [0.8] * 4
+    assert no_lto["modes"]["default"]["output_sizes_bytes"] == [256 * 1024 * 1024] * 4
     assert no_lto["modes"]["default"]["phase_seconds"]["Write data to file"] == 0.7
 
 
@@ -294,6 +323,9 @@ def test_reld_phase_trace_parser_requires_dominant_output_phases():
 
     with pytest.raises(BenchmarkError, match="omitted required phases"):
         _parse_phase_timings("12.50 Compute build ID\n")
+
+    legacy = output.replace("│ ├──     2.00 Create output file\n", "")
+    assert "Create output file" not in _parse_phase_timings(legacy, require_creation=False)
 
 
 def test_release_capture_artifacts_rejects_outside_directory(tmp_path: Path):

@@ -685,14 +685,16 @@ _PHASE_NAMES = (
 )
 
 
-def _parse_phase_timings(output: str) -> dict[str, float]:
+def _parse_phase_timings(output: str, *, require_creation: bool = True) -> dict[str, float]:
     phases: dict[str, float] = {}
     for line in output.splitlines():
         for name in _PHASE_NAMES:
             match = re.search(rf"([0-9]+(?:\.[0-9]+)?)\s+{re.escape(name)}\s*$", line)
             if match:
                 phases[name] = float(match.group(1)) / 1000.0
-    required = {"Create output file", "Compute build ID", "Write data to file", "Flush and unmap output file"}
+    required = {"Compute build ID", "Write data to file", "Flush and unmap output file"}
+    if require_creation:
+        required.add("Create output file")
     missing = sorted(required - phases.keys())
     if missing:
         raise BenchmarkError(f"reld phase trace omitted required phases: {', '.join(missing)}\n{output}")
@@ -706,6 +708,7 @@ def capture_reld_phase_trace(
     output_dir: Path,
     cwd: Path,
     environment: dict[str, str],
+    require_creation: bool = True,
 ) -> tuple[dict[str, float], int, str]:
     """Run one untimed, validated reld link with phase instrumentation enabled."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -735,7 +738,7 @@ def capture_reld_phase_trace(
     _validate_executable(output, cwd=cwd, environment=environment)
     output_size = output.stat().st_size
     combined_output = completed.stdout + completed.stderr
-    phases = _parse_phase_timings(combined_output)
+    phases = _parse_phase_timings(combined_output, require_creation=require_creation)
     _discard_verified_output(output)
     return phases, output_size, combined_output
 
@@ -833,6 +836,8 @@ def run_benchmark(
                 thread_count = metadata["thread_count"]
                 assert baseline_reld is not None
                 modes = reld_output_mode_linkers(reld, baseline_reld, thread_count)
+                diagnostic_trials = max(trials, len(modes))
+                diagnostic_trials = diagnostic_trials + (-diagnostic_trials % len(modes))
                 _, mode_samples, mode_sizes, mode_orders = benchmark_linkers_round_robin(
                     captured,
                     modes,
@@ -840,11 +845,12 @@ def run_benchmark(
                     cwd=manifest.parent,
                     environment=environment,
                     warmup=warmup,
-                    trials=trials,
+                    trials=diagnostic_trials,
                     use_driver_shim=True,
                 )
                 configuration_report: dict[str, object] = {
                     "trial_orders": mode_orders,
+                    "trials_per_mode": diagnostic_trials,
                     "modes": {},
                 }
                 mode_reports = configuration_report["modes"]
@@ -859,6 +865,7 @@ def run_benchmark(
                         output_dir=workdir / configuration.profile / "phase-traces" / mode.label,
                         cwd=manifest.parent,
                         environment=environment,
+                        require_creation=mode.label != "baseline",
                     )
                     mode_reports[mode.label] = {
                         **_sample_summary(mode_samples[mode.label]),
@@ -866,6 +873,7 @@ def run_benchmark(
                         "phase_output_size_bytes": phase_output_size,
                         "phase_seconds": phases,
                         "phase_trace": phase_trace,
+                        "phase_schema": "legacy-pre-creation-instrumentation" if mode.label == "baseline" else "current",
                     }
                 configurations = diagnostic_report["configurations"]
                 assert isinstance(configurations, dict)
