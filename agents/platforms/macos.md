@@ -32,13 +32,24 @@ Every executable must run on a native macOS runner with exact exit status, stdou
 dynamic-library loading when the change touches dylibs, rpaths, exports, fixups, or signing. A link
 performed or inspected only on Linux is not acceptance evidence.
 
+## Consumer acceptance
+
+The three-platform consumer job builds the host-named `reld` Mach-O driver through `setup-soldr`,
+then links the pinned Rust and C/C++ consumers through that release executable. Set
+`RELD_INVOCATION_LOG` for every build
+and require a successful JSONL record naming each expected final artifact and the `ld64.lld`
+bridge. This invocation record is mandatory even when verbose compiler output appears to name reld.
+Then run `xsv count`, the full pinned PCRE2 CTest suite, and the C++ name-mangling CTest natively.
+
 ## Where macOS policy lives
 
 - Bridge and routing implementation: `crates/reld/src/` and `crates/reld-core/src/`
 - Cross-platform mode validation: `ci/linker_modes.py`
 - Benchmark replay and execution oracle: `ci/benchmark_runner.py`
+- Consumer acceptance driver: `ci/consumer_acceptance.py`
 - Platform workflows: `.github/workflows/ci.yml`, `.github/workflows/linker-modes.yml`, and
-  `.github/workflows/benchmark-stats.yml`
+  `.github/workflows/benchmark-stats.yml`; consumer acceptance runs in
+  `.github/workflows/linker-artifacts.yml`
 
 When native Mach-O code generation lands, update this guide in the same change to name its pinned
 behavioral baseline and native structural/differential test suite.

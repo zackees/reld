@@ -5,6 +5,7 @@ pub(crate) mod archive;
 pub mod args;
 pub mod bridge;
 pub use bridge::BridgeTarget;
+pub use bridge::log_successful_invocation;
 pub use bridge::run_bridge;
 pub use bridge::select_route;
 pub(crate) mod compression;

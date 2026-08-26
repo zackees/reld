@@ -276,6 +276,34 @@ not by forking a new routing path per engine; see
 | `--engine=` / `RELD_ENGINE` override | Shipped |
 | Per-decision routing log | Shipped |
 
+### 4.6 Acceptance proof and dependency budget
+
+Consumer acceptance uses two independent layers. First, setting `RELD_INVOCATION_LOG` to an
+optional log path makes the linker append a JSONL record only after a successful link. The test
+must read that log and match the exact expected output artifact and selected engine; merely putting
+`reld-link` on `PATH` or configuring a compiler linker variable does not prove that it was invoked.
+Second, the test must execute the linked Rust/C/C++ program or its complete test suite with exact
+success expectations. Invocation evidence proves which linker handled the artifact; execution
+evidence proves that the resulting program works at the exercised boundary. Neither layer replaces
+the artifact-equivalence requirements in §3.1. The consumer gate therefore also compiles one object
+once, links the same output path twice each with invocation logging disabled and enabled under
+platform-specific deterministic options, requires self-determinism and raw byte identity across
+the modes, then executes it. This focused check prevents audit instrumentation from changing the
+artifact and exercises native ELF's parent-success path as well as the platform bridges.
+
+The linker's existing dependency graph is a fixed budget. Logging, routing, diagnostics, and other
+features must use the standard library or crates already approved in the graph. Adding any direct,
+development, build, target-specific, feature-gated, or transitive crate requires explicit developer
+approval before the manifest or lockfile is changed. Agents cannot self-approve a crate, infer
+approval from the requested feature, or update a dependency baseline to bypass the rule. The
+planned automated gate is tracked by [issue #88](https://github.com/zackees/reld/issues/88), and
+its failure must tell the agent that explicit developer approval is required and how to request a
+reviewed baseline update.
+
+The platform-specific engines, artifact references, deterministic-field rules, and native
+acceptance commands remain decentralized in the guides under `agents/platforms/`. A shared CI or
+linker change must update each affected guide rather than moving platform details into this file.
+
 ## 5. Honest risks
 
 Recorded here so they are not rediscovered later as surprises.

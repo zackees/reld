@@ -26,23 +26,26 @@ fn run() -> reld_core::error::Result {
     let route = reld_core::select_route(&raw_args, args.link_target())?;
 
     if route.is_bridge() {
-        return reld_core::run_bridge(raw_args, route);
-    }
-    route.log_native();
-
-    args.set_version(VERSION);
-    args.parse(std::env::args)?;
-
-    if reld_core::should_fork(&args) {
-        // Safety: We haven't spawned any threads yet.
-        unsafe { reld_core::run_in_subprocess(args) };
+        reld_core::run_bridge(raw_args.clone(), route)?;
     } else {
-        // Run the linker in this process without forking.
+        route.log_native();
 
-        // Note, we need to setup tracing before worker, otherwise the threads won't contribute to
-        // counters such as --time=cycles,instructions etc.
-        reld_core::setup_tracing(&args)?;
+        args.set_version(VERSION);
+        args.parse(std::env::args)?;
 
-        reld_core::run(args)
+        if reld_core::should_fork(&args) {
+            // Safety: We haven't spawned any threads yet.
+            unsafe { reld_core::run_in_subprocess(args)? };
+        } else {
+            // Run the linker in this process without forking.
+
+            // Note, we need to setup tracing before worker, otherwise the threads won't contribute to
+            // counters such as --time=cycles,instructions etc.
+            reld_core::setup_tracing(&args)?;
+
+            reld_core::run(args)?;
+        }
     }
+
+    reld_core::log_successful_invocation(&raw_args, route)
 }

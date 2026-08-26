@@ -23,6 +23,8 @@ use crate::error::Context;
 use crate::error::Result;
 use std::ffi::OsStr;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -210,6 +212,12 @@ pub const RELD_ENGINE_ENV: &str = "RELD_ENGINE";
 /// Enables one routing-decision line on stderr when present in the environment.
 pub const RELD_LOG_ENGINE_ENV: &str = "RELD_LOG_ENGINE";
 
+/// Appends one JSON object after every successful link when set to a file path.
+///
+/// This is an acceptance-test audit channel, deliberately separate from human-readable stderr
+/// logging. A record is written only after the selected native or bridge engine returns success.
+pub const RELD_INVOCATION_LOG_ENV: &str = "RELD_INVOCATION_LOG";
+
 fn route_logging_enabled() -> bool {
     std::env::var_os(RELD_LOG_ENGINE_ENV).is_some()
 }
@@ -219,6 +227,172 @@ fn route_logging_enabled() -> bool {
 pub struct Route {
     engine: &'static Engine,
     reason: SelectionReason,
+}
+
+fn decode_response_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read linker response file `{}`", path.display()))?;
+    if bytes.starts_with(&[0xff, 0xfe])
+        || (bytes.len() >= 2 && bytes.len().is_multiple_of(2) && bytes[1] == 0)
+    {
+        let words: Vec<u16> = bytes
+            .chunks_exact(2)
+            .skip(usize::from(bytes.starts_with(&[0xff, 0xfe])))
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return String::from_utf16(&words)
+            .with_context(|| format!("Invalid UTF-16 linker response file `{}`", path.display()));
+    }
+    String::from_utf8(bytes)
+        .with_context(|| format!("Invalid UTF-8 linker response file `{}`", path.display()))
+}
+
+fn response_arguments(contents: &str) -> Result<Vec<OsString>> {
+    let mut arguments = Vec::new();
+    let mut argument = String::new();
+    let mut quote = None;
+    for character in contents.chars() {
+        match (quote, character) {
+            (None, '\'' | '"') => quote = Some(character),
+            (Some(open), close) if open == close => quote = None,
+            (None, character) if character.is_whitespace() => {
+                if !argument.is_empty() {
+                    arguments.push(OsString::from(std::mem::take(&mut argument)));
+                }
+            }
+            (_, character) => argument.push(character),
+        }
+    }
+    if let Some(quote) = quote {
+        bail!("Unclosed `{quote}` in linker response file");
+    }
+    if !argument.is_empty() {
+        arguments.push(OsString::from(argument));
+    }
+    Ok(arguments)
+}
+
+fn requested_output_in(argv: &[OsString], response_depth: usize) -> Result<Option<String>> {
+    let mut arguments = argv.iter();
+    while let Some(argument) = arguments.next() {
+        let value = argument.to_string_lossy();
+        if let Some(path) = value.strip_prefix('@') {
+            if response_depth >= 16 {
+                bail!("Linker response-file nesting exceeds 16 levels at `{path}`");
+            }
+            let nested = response_arguments(&decode_response_file(Path::new(path))?)?;
+            if let Some(output) = requested_output_in(&nested, response_depth + 1)? {
+                return Ok(Some(output));
+            }
+            continue;
+        }
+        if value == "-o" {
+            return Ok(arguments
+                .next()
+                .map(|output| output.to_string_lossy().into_owned()));
+        }
+        let lowercase = value.to_ascii_lowercase();
+        if let Some(output) = lowercase
+            .strip_prefix("/out:")
+            .or_else(|| lowercase.strip_prefix("-out:"))
+        {
+            let prefix_length = value.len() - output.len();
+            return Ok(Some(value[prefix_length..].to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn requested_output(argv: &[OsString]) -> Result<Option<String>> {
+    requested_output_in(&argv[1..], 0)
+}
+
+fn append_json_string(encoded: &mut String, value: &str) {
+    encoded.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{08}' => encoded.push_str("\\b"),
+            '\u{0c}' => encoded.push_str("\\f"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            character if character <= '\u{1f}' => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let value = character as usize;
+                encoded.push_str("\\u00");
+                encoded.push(HEX[value >> 4] as char);
+                encoded.push(HEX[value & 0x0f] as char);
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+}
+
+fn encode_invocation_record(
+    argv: &[OsString],
+    route: Route,
+    working_directory: &Path,
+    output: Option<&str>,
+) -> String {
+    let mut encoded = String::from("{\"schema\":1,\"status\":\"success\",\"process_id\":");
+    encoded.push_str(&std::process::id().to_string());
+    encoded.push_str(",\"working_directory\":");
+    append_json_string(&mut encoded, &working_directory.to_string_lossy());
+    encoded.push_str(",\"engine\":");
+    append_json_string(&mut encoded, route.engine.name);
+    encoded.push_str(",\"route_kind\":");
+    append_json_string(
+        &mut encoded,
+        if route.engine.native {
+            "native"
+        } else {
+            "bridge"
+        },
+    );
+    encoded.push_str(",\"reason\":");
+    append_json_string(&mut encoded, route.reason.label());
+    encoded.push_str(",\"output\":");
+    if let Some(output) = output {
+        append_json_string(&mut encoded, output);
+    } else {
+        encoded.push_str("null");
+    }
+    encoded.push_str(",\"arguments\":[");
+    for (index, argument) in argv.iter().skip(1).enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        append_json_string(&mut encoded, &argument.to_string_lossy());
+    }
+    encoded.push_str("]}\n");
+    encoded
+}
+
+/// Records one successfully completed linker invocation when [`RELD_INVOCATION_LOG_ENV`] is set.
+///
+/// The JSONL record includes enough information for an external test to match the exact output
+/// artifact and selected engine. Failure to append is an error: silently losing the audit record
+/// would let an acceptance test pass without proving that reld handled the link.
+pub fn log_successful_invocation(argv: &[OsString], route: Route) -> Result<()> {
+    let Some(path) = std::env::var_os(RELD_INVOCATION_LOG_ENV) else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let working_directory = std::env::current_dir()
+        .with_context(|| "Failed to determine the linker working directory".to_owned())?;
+    let output = requested_output(argv)?;
+    let encoded = encode_invocation_record(argv, route, &working_directory, output.as_deref());
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open invocation log `{}`", path.display()))?;
+    log.write_all(encoded.as_bytes())
+        .with_context(|| format!("Failed to append invocation log `{}`", path.display()))?;
+    Ok(())
 }
 
 impl Route {
@@ -812,7 +986,7 @@ mod tests {
     use std::sync::Mutex;
 
     // Environment variable mutation isn't thread-safe, so serialize the tests that touch
-    // `RELD_BRIDGE_LINKER`.
+    // linker-control environment variables.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvVarGuard {
@@ -905,6 +1079,74 @@ mod tests {
         assert!(
             message.contains("does not exist"),
             "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn successful_invocation_log_records_exact_output_and_route() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let log = TempFile::create("successful-invocation.jsonl");
+        let _guard = EnvVarGuard::set(RELD_INVOCATION_LOG_ENV, log.path().to_str().unwrap());
+        let argv = vec![
+            OsString::from("reld-link"),
+            OsString::from("input.obj"),
+            OsString::from("/OUT:C:/build/consumer.exe"),
+        ];
+        let route = Route {
+            engine: &COFF_LLD_ENGINE,
+            reason: SelectionReason::Default,
+        };
+
+        log_successful_invocation(&argv, route).unwrap();
+
+        let contents = std::fs::read_to_string(log.path()).unwrap();
+        let lines: Vec<_> = contents.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let record: serde_yaml::Value = serde_yaml::from_str(lines[0]).unwrap();
+        assert_eq!(record["schema"], 1);
+        assert_eq!(record["status"], "success");
+        assert_eq!(record["engine"], "lld-link");
+        assert_eq!(record["route_kind"], "bridge");
+        assert_eq!(record["reason"], "default");
+        assert_eq!(record["output"], "C:/build/consumer.exe");
+        assert_eq!(record["arguments"][0], "input.obj");
+        assert_eq!(record["arguments"][1], "/OUT:C:/build/consumer.exe");
+        assert!(record["process_id"].as_u64().unwrap() > 0);
+        assert!(!record["working_directory"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn requested_output_preserves_gnu_and_coff_path_spelling() {
+        let gnu = vec![
+            OsString::from("reld"),
+            OsString::from("-o"),
+            OsString::from("Build/Mixed Case/app"),
+        ];
+        assert_eq!(
+            requested_output(&gnu).unwrap().as_deref(),
+            Some("Build/Mixed Case/app")
+        );
+
+        let coff = vec![
+            OsString::from("reld-link"),
+            OsString::from("-OUT:C:/Build/Mixed Case/app.exe"),
+        ];
+        assert_eq!(
+            requested_output(&coff).unwrap().as_deref(),
+            Some("C:/Build/Mixed Case/app.exe")
+        );
+
+        let response = TempFile::create_with_contents(
+            "coff-output-response",
+            br#"input.obj "/OUT:C:\Build\Mixed Case\response.exe" /DEBUG"#,
+        );
+        let response_argv = vec![
+            OsString::from("reld-link"),
+            OsString::from(format!("@{}", response.path().display())),
+        ];
+        assert_eq!(
+            requested_output(&response_argv).unwrap().as_deref(),
+            Some(r"C:\Build\Mixed Case\response.exe")
         );
     }
 
