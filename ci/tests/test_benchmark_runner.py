@@ -574,6 +574,57 @@ def test_locked_windows_output_is_quarantined_without_delete_retries(tmp_path: P
     assert quarantine == quarantined[0]
 
 
+def test_windows_round_robin_does_not_reuse_locked_trial_output(tmp_path: Path, monkeypatch):
+    captured = LinkCommand(
+        r"C:\VS\link.exe",
+        ("main.obj", r"/OUT:C:\capture\app.exe"),
+        Path(r"C:\capture\app.exe"),
+        True,
+    )
+    attempted: list[Path] = []
+
+    def fake_run(command, *, cwd, environment):
+        del cwd, environment
+        response_file = Path(command[1][1:])
+        output_line = next(
+            line.strip('"')
+            for line in response_file.read_text(encoding="utf-8").splitlines()
+            if line.strip('"').upper().startswith("/OUT:")
+        )
+        output = Path(output_line[5:])
+        if output.exists():
+            return runner_module.subprocess.CompletedProcess(
+                command,
+                1104,
+                "",
+                f"LINK : fatal error LNK1104: cannot open file '{output}'",
+            )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"executable")
+        attempted.append(output)
+        return runner_module.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner_module, "_run_link", fake_run)
+    monkeypatch.setattr(runner_module, "_validate_executable", lambda *args, **kwargs: None)
+    # Reproduce the Windows fallback when the verified executable remains locked and cannot move.
+    monkeypatch.setattr(runner_module, "_discard_verified_output", lambda output: None)
+
+    benchmark_linkers_round_robin(
+        captured,
+        (Linker("link.exe"),),
+        oracle=ExecutableOracle("OK reference\n", ""),
+        output_dir=tmp_path / "published",
+        cwd=tmp_path,
+        environment={},
+        warmup=0,
+        trials=2,
+        use_driver_shim=False,
+    )
+
+    assert len(attempted) == 2
+    assert len(set(attempted)) == 2
+
+
 def test_quarantine_cleanup_runs_after_all_timed_links(tmp_path: Path, monkeypatch):
     original_output = tmp_path / "cargo-output"
     captured = LinkCommand("cc", ("main.o", "-o", str(original_output)), original_output, False)

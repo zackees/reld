@@ -662,7 +662,10 @@ def benchmark_linkers_round_robin(
                 captured,
                 linker,
                 oracle=oracle,
-                output_dir=output_dir / linker.label.replace("/", "-"),
+                # Each round must use a fresh /OUT path. A verified Windows executable can remain
+                # locked long enough that neither unlink nor quarantine succeeds; reusing the
+                # previous round's path would then make link.exe fail with LNK1104.
+                output_dir=output_dir / linker.label.replace("/", "-") / f"round-{round_index}",
                 cwd=cwd,
                 environment=environment,
                 warmup=0,
