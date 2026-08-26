@@ -1736,6 +1736,8 @@ enum PreparedObjectSection<'out> {
 
 const MONOLITHIC_OBJECT_SECTION_THRESHOLD: usize = 4096;
 const PARALLEL_DEBUG_RELOCATION_MIN: usize = 64 * 1024;
+// Byte and bit-mask relocations modify at most eight bytes. A paired ULEB128
+// relocation can modify all ten bytes required to encode a u64.
 const MAX_DEBUG_RELOCATION_WRITE_SIZE: u64 = u64::BITS.div_ceil(7) as u64;
 
 impl PreparedObjectSection<'_> {
@@ -2763,7 +2765,9 @@ fn debug_relocation_write_size<A: Arch<Platform = Elf>, R: Relocation<Platform =
     }
     Ok(match info.size {
         RelocationSize::ByteSize(size) => size,
-        RelocationSize::BitMasking(mask) => mask.instruction.write_windows_size(),
+        // Some bit-masking relocations span two instructions. Use the full u64 window here even
+        // though their current write helper reports the size of one instruction.
+        RelocationSize::BitMasking(_) => size_of::<u64>(),
     })
 }
 
@@ -2864,7 +2868,6 @@ fn debug_relocation_shard_ranges_parallel(
 
                 let first_offset = offset_at(start);
                 let mut previous_offset = first_offset;
-                let mut max_write_end = 0;
                 for index in start..end {
                     let offset = offset_at(index);
                     if index > start && previous_offset > offset {
@@ -2873,20 +2876,37 @@ fn debug_relocation_shard_ranges_parallel(
                     if offset > output_len as u64 {
                         return Ok(None);
                     }
+                    previous_offset = offset;
+                }
+
+                // With sorted offsets, relocations more than the maximum write size behind the
+                // final offset cannot extend beyond it. Decode relocation sizes only for this
+                // small tail instead of repeating that work for every relocation. Invalid types
+                // outside the tail are still diagnosed when their shard applies the relocations.
+                let last_offset = previous_offset;
+                let mut max_write_end = last_offset;
+                for index in (start..end).rev() {
+                    let offset = offset_at(index);
+                    if offset.saturating_add(MAX_DEBUG_RELOCATION_WRITE_SIZE) <= last_offset {
+                        break;
+                    }
+                    let write_size = write_size_at(index)? as u64;
+                    if write_size > MAX_DEBUG_RELOCATION_WRITE_SIZE {
+                        return Ok(None);
+                    }
                     let write_end = offset
-                        .checked_add(write_size_at(index)? as u64)
+                        .checked_add(write_size)
                         .context("Debug relocation write range overflow")?;
                     if write_end > output_len as u64 {
                         return Ok(None);
                     }
                     max_write_end = max_write_end.max(write_end);
-                    previous_offset = offset;
                 }
 
                 Ok(Some(DebugRelocationShardSummary {
                     relocations: start..end,
                     first_offset,
-                    last_offset: previous_offset,
+                    last_offset,
                     max_write_end,
                 }))
             },
@@ -3173,7 +3193,7 @@ mod debug_relocation_shard_tests {
     }
 
     #[test]
-    fn parallel_preflight_propagates_write_size_errors_in_input_order() {
+    fn parallel_preflight_propagates_tail_write_size_errors_in_input_order() {
         let offsets = [0, 4, 8, 12];
         let error = debug_relocation_shard_ranges_parallel(
             offsets.len(),
@@ -3192,6 +3212,28 @@ mod debug_relocation_shard_tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "relocation 1 failed");
+    }
+
+    #[test]
+    fn parallel_preflight_only_decodes_tail_relocation_sizes() {
+        let offsets = (0..32).map(|index| index * 4).collect::<Vec<_>>();
+        let size_queries = std::sync::atomic::AtomicUsize::new(0);
+
+        let ranges = debug_relocation_shard_ranges_parallel(
+            offsets.len(),
+            128,
+            4,
+            |index| offsets[index],
+            |_| {
+                size_queries.fetch_add(1, Relaxed);
+                Ok(4)
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(size_queries.load(Relaxed), 12);
     }
 
     #[test]
