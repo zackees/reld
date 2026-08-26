@@ -1,11 +1,28 @@
 name: Benchmark Stats
 
-# Run one independently rendered benchmark for each supported target. The publish job is still
-# guarded to the default branch: dispatching this workflow on a PR validates every runner and
-# uploads all generated data without changing the public benchmark branch.
+# Performance branches select their runner by path so platform-specific iteration does not spend
+# time on unrelated hosts. Scheduled runs and perf/all branches retain full-platform validation.
+# The publish job is still guarded to the default branch.
 
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: Platforms to benchmark
+        required: true
+        default: linux
+        type: choice
+        options:
+          - linux
+          - windows
+          - macos
+          - all
+  push:
+    branches:
+      - "perf/linux/**"
+      - "perf/windows/**"
+      - "perf/macos/**"
+      - "perf/all/**"
   schedule:
     - cron: "17 9 * * *"
 
@@ -22,20 +39,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-linux
-            reld_driver: target/release/ld.reld
-            baseline_reld: target/issue74-baseline/reld
-          - runner: windows-2022
-            target: x86_64-pc-windows-msvc
-            # COFF format selection is made from argv[0], not Linux's ld.reld shim name.
-            reld_driver: target/release/reld-link.exe
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            # Mach-O format selection is also made from argv[0].
-            reld_driver: target/release/ld64.reld
-    runs-on: ${{ matrix.runner }}
+        target: >-
+          ${{ fromJSON(
+            (github.event_name == 'schedule' || inputs.platforms == 'all' || startsWith(github.ref_name, 'perf/all/'))
+            && '["x86_64-linux","x86_64-pc-windows-msvc","aarch64-apple-darwin"]'
+            || (inputs.platforms == 'windows' || startsWith(github.ref_name, 'perf/windows/'))
+            && '["x86_64-pc-windows-msvc"]'
+            || (inputs.platforms == 'macos' || startsWith(github.ref_name, 'perf/macos/'))
+            && '["aarch64-apple-darwin"]'
+            || '["x86_64-linux"]'
+          ) }}
+    runs-on: >-
+      ${{ matrix.target == 'x86_64-linux' && 'ubuntu-24.04'
+          || matrix.target == 'x86_64-pc-windows-msvc' && 'windows-2022'
+          || 'macos-14' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -141,8 +158,11 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          RELD_DRIVER: ${{ matrix.reld_driver }}
-          BASELINE_RELD: ${{ matrix.baseline_reld }}
+          RELD_DRIVER: >-
+            ${{ matrix.target == 'x86_64-linux' && 'target/release/ld.reld'
+                || matrix.target == 'x86_64-pc-windows-msvc' && 'target/release/reld-link.exe'
+                || 'target/release/ld64.reld' }}
+          BASELINE_RELD: ${{ matrix.target == 'x86_64-linux' && 'target/issue74-baseline/reld' || '' }}
           CARGO_COMMAND: cargo
         # Python owns child-process resolution so Git Bash cannot shadow MSVC link.exe. Cargo
         # compiles the one artifact-auditor Rust project once per LTO configuration; every timed
@@ -193,6 +213,8 @@ jobs:
   aggregate:
     name: Render and publish per-target graphs
     needs: benchmark
+    # Run only after an all-platform benchmark; subset runs publish their raw log and job summary.
+    if: ${{ github.event_name == 'schedule' || inputs.platforms == 'all' || startsWith(github.ref_name, 'perf/all/') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -307,7 +329,11 @@ jobs:
   freshness:
     name: Verify published benchmark freshness
     needs: [benchmark, aggregate]
-    if: ${{ always() && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    if: >-
+      ${{ always()
+          && (github.event_name == 'schedule'
+              || ((inputs.platforms == 'all' || startsWith(github.ref_name, 'perf/all/'))
+                  && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
