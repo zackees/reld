@@ -1,25 +1,25 @@
 #include "reld_mangled.hpp"
 
-#include <iostream>
-#include <string>
-#include <vector>
+extern "C" int puts(const char* text);
 
 int main() {
     using reld::consumer::abi::Accumulator;
+    using reld::consumer::abi::destroy_formatter;
     using reld::consumer::abi::make_formatter;
     using reld::consumer::abi::weighted_sum;
 
     const Accumulator accumulator;
-    const int folded = accumulator.fold(std::vector<int>{2, 3, 5, 7});
-    const std::string joined = accumulator.fold("mangled", "symbols");
+    const int folded = accumulator.fold(2, 3, 5, 7);
+    const long combined = accumulator.fold(3L, 5L);
     const int weighted = weighted_sum(4, 6);
-    const auto formatter = make_formatter("reld-cxx-");
+    auto* formatter = make_formatter(100);
 
-    if (folded != 17 || joined != "mangled::symbols" || weighted != 42 ||
-        formatter->render(weighted) != "reld-cxx-42") {
+    const bool valid = folded == 17 && combined == 98 && weighted == 42 && formatter->render(weighted) == 142;
+    destroy_formatter(formatter);
+    if (!valid) {
         return 1;
     }
 
-    std::cout << "reld-cxx-name-mangling-ok\n";
+    puts("reld-cxx-name-mangling-ok");
     return 0;
 }

@@ -1,16 +1,13 @@
 #include "reld_mangled.hpp"
 
-#include <numeric>
-#include <utility>
-
 namespace reld::consumer::abi {
 
-int Accumulator::fold(const std::vector<int>& values) const {
-    return std::accumulate(values.begin(), values.end(), 0);
+int Accumulator::fold(int first, int second, int third, int fourth) const {
+    return first + second + third + fourth;
 }
 
-std::string Accumulator::fold(std::string_view left, std::string_view right) const {
-    return std::string(left) + "::" + std::string(right);
+long Accumulator::fold(long left, long right) const {
+    return left * 11 + right * 13;
 }
 
 template <typename T>
@@ -26,20 +23,24 @@ namespace {
 
 class PrefixFormatter final : public Formatter {
 public:
-    explicit PrefixFormatter(std::string prefix) : prefix_(std::move(prefix)) {}
+    explicit PrefixFormatter(int prefix) : prefix_(prefix) {}
 
-    std::string render(int value) const override {
-        return prefix_ + std::to_string(value);
+    int render(int value) const override {
+        return prefix_ + value;
     }
 
 private:
-    std::string prefix_;
+    int prefix_;
 };
 
 } // namespace
 
-std::unique_ptr<Formatter> make_formatter(std::string prefix) {
-    return std::make_unique<PrefixFormatter>(std::move(prefix));
+Formatter* make_formatter(int prefix) {
+    return new PrefixFormatter(prefix);
+}
+
+void destroy_formatter(Formatter* formatter) {
+    delete formatter;
 }
 
 } // namespace reld::consumer::abi

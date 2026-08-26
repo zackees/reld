@@ -175,9 +175,10 @@ def test_cpp_fixture_exercises_cross_translation_unit_mangling() -> None:
 
     assert "namespace reld::consumer::abi" in header
     assert "extern template int weighted_sum<int>" in header
-    assert "virtual std::string render" in header
+    assert "virtual int render" in header
+    assert "long fold(long left, long right)" in header
     assert "template int weighted_sum<int>" in implementation
-    assert 'formatter->render(weighted) != "reld-cxx-42"' in consumer
+    assert "formatter->render(weighted) == 142" in consumer
 
 
 def test_three_platform_artifact_workflow_runs_consumer_acceptance() -> None:
