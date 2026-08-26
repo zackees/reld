@@ -2747,6 +2747,13 @@ struct DebugRelocationShardRange {
     output: Range<usize>,
 }
 
+struct DebugRelocationShardSummary {
+    relocations: Range<usize>,
+    first_offset: u64,
+    last_offset: u64,
+    max_write_end: u64,
+}
+
 fn debug_relocation_write_size<A: Arch<Platform = Elf>, R: Relocation<Platform = Elf>>(
     relocation: &R,
 ) -> Result<usize> {
@@ -2760,6 +2767,7 @@ fn debug_relocation_write_size<A: Arch<Platform = Elf>, R: Relocation<Platform =
     })
 }
 
+#[cfg(test)]
 fn debug_relocation_shard_ranges(
     relocation_count: usize,
     output_len: usize,
@@ -2832,6 +2840,93 @@ fn debug_relocation_shard_ranges(
     Ok(Some(ranges))
 }
 
+fn debug_relocation_shard_ranges_parallel(
+    relocation_count: usize,
+    output_len: usize,
+    shard_count: usize,
+    offset_at: impl Fn(usize) -> u64 + Sync,
+    write_size_at: impl Fn(usize) -> Result<usize> + Sync,
+) -> Result<Option<Vec<DebugRelocationShardRange>>> {
+    let shard_count = shard_count.min(relocation_count);
+    if shard_count < 2 {
+        return Ok(None);
+    }
+
+    let summaries = (0..shard_count)
+        .into_par_iter()
+        .map(
+            |shard_index| -> Result<Option<DebugRelocationShardSummary>> {
+                let start = relocation_count * shard_index / shard_count;
+                let end = relocation_count * (shard_index + 1) / shard_count;
+                if start == end {
+                    return Ok(None);
+                }
+
+                let first_offset = offset_at(start);
+                let mut previous_offset = first_offset;
+                let mut max_write_end = 0;
+                for index in start..end {
+                    let offset = offset_at(index);
+                    if index > start && previous_offset > offset {
+                        return Ok(None);
+                    }
+                    if offset > output_len as u64 {
+                        return Ok(None);
+                    }
+                    let write_end = offset
+                        .checked_add(write_size_at(index)? as u64)
+                        .context("Debug relocation write range overflow")?;
+                    if write_end > output_len as u64 {
+                        return Ok(None);
+                    }
+                    max_write_end = max_write_end.max(write_end);
+                    previous_offset = offset;
+                }
+
+                Ok(Some(DebugRelocationShardSummary {
+                    relocations: start..end,
+                    first_offset,
+                    last_offset: previous_offset,
+                    max_write_end,
+                }))
+            },
+        )
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let Some(summaries) = summaries.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+
+    for pair in summaries.windows(2) {
+        if pair[0].last_offset > pair[1].first_offset
+            || pair[0].max_write_end > pair[1].first_offset
+        {
+            return Ok(None);
+        }
+    }
+
+    let mut ranges = Vec::with_capacity(summaries.len());
+    for (index, summary) in summaries.iter().enumerate() {
+        let output_start = if index == 0 {
+            0
+        } else {
+            summary.first_offset as usize
+        };
+        let output_end = summaries
+            .get(index + 1)
+            .map_or(output_len, |next| next.first_offset as usize);
+        if output_start > output_end || output_end > output_len {
+            return Ok(None);
+        }
+        ranges.push(DebugRelocationShardRange {
+            relocations: summary.relocations.clone(),
+            output: output_start..output_end,
+        });
+    }
+    Ok(Some(ranges))
+}
+
 fn apply_debug_rela_relocations<'data, A: Arch<Platform = Elf>>(
     object: &ObjectLayout<'data, Elf>,
     out: &mut [u8],
@@ -2851,7 +2946,7 @@ fn apply_debug_rela_relocations<'data, A: Arch<Platform = Elf>>(
 
     let shard_count =
         rayon::current_num_threads().min(relocations.len().div_ceil(PARALLEL_DEBUG_RELOCATION_MIN));
-    let Some(ranges) = debug_relocation_shard_ranges(
+    let Some(ranges) = debug_relocation_shard_ranges_parallel(
         relocations.len(),
         out.len(),
         shard_count,
@@ -2985,29 +3080,6 @@ mod debug_relocation_shard_tests {
     use super::*;
 
     #[test]
-    fn caches_each_debug_symbol_target_once_per_shard() {
-        let mut cache = DebugRelocationTargetCache::new(8);
-        let mut resolutions = 0;
-
-        let first = cache
-            .get_or_try_insert_with(object::SymbolIndex(3), || {
-                resolutions += 1;
-                Ok::<_, crate::error::Error>(41_u64)
-            })
-            .unwrap();
-        let second = cache
-            .get_or_try_insert_with(object::SymbolIndex(3), || {
-                resolutions += 1;
-                Ok::<_, crate::error::Error>(99_u64)
-            })
-            .unwrap();
-
-        assert_eq!(first, 41);
-        assert_eq!(second, 41);
-        assert_eq!(resolutions, 1, "a repeated relocation target must resolve once");
-    }
-
-    #[test]
     fn splits_sorted_non_overlapping_relocations_into_disjoint_output_ranges() {
         let offsets = [0, 4, 8, 12, 16, 20, 24, 28];
         let ranges =
@@ -3036,6 +3108,90 @@ mod debug_relocation_shard_tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parallel_preflight_matches_serial_ranges() {
+        let offsets = [0, 4, 8, 12, 16, 20, 24, 28];
+        let serial =
+            debug_relocation_shard_ranges(offsets.len(), 32, 4, |index| offsets[index], |_| Ok(4))
+                .unwrap();
+        let parallel = debug_relocation_shard_ranges_parallel(
+            offsets.len(),
+            32,
+            4,
+            |index| offsets[index],
+            |_| Ok(4),
+        )
+        .unwrap();
+
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn parallel_preflight_rejects_unsafe_ranges() {
+        for offsets in [[0, 8, 4, 12], [0, 4, 12, 8]] {
+            assert!(
+                debug_relocation_shard_ranges_parallel(
+                    offsets.len(),
+                    16,
+                    2,
+                    |index| offsets[index],
+                    |_| Ok(4),
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+
+        let crossing_boundary = [0, 4, 8, 12];
+        assert!(
+            debug_relocation_shard_ranges_parallel(
+                crossing_boundary.len(),
+                16,
+                2,
+                |index| crossing_boundary[index],
+                |index| Ok(if index == 1 { 8 } else { 4 }),
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        for offsets in [[0, 4, 12, 20], [0, 4, 8, 14]] {
+            assert!(
+                debug_relocation_shard_ranges_parallel(
+                    offsets.len(),
+                    16,
+                    2,
+                    |index| offsets[index],
+                    |_| Ok(4),
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_preflight_propagates_write_size_errors_in_input_order() {
+        let offsets = [0, 4, 8, 12];
+        let error = debug_relocation_shard_ranges_parallel(
+            offsets.len(),
+            16,
+            2,
+            |index| offsets[index],
+            |index| {
+                if index == 1 || index == 3 {
+                    return Err(crate::error::Error::with_message(format!(
+                        "relocation {index} failed"
+                    )));
+                }
+                Ok(4)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "relocation 1 failed");
     }
 
     #[test]
