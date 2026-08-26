@@ -133,11 +133,10 @@ facing summary.
 ## Why this is worth doing
 
 Dropping release linking as a goal is not a limitation to apologize for — it is the design
-freedom that makes the rest tractable. LTO deferred, no PGO/BOLT interaction, no
-reproducible-build determinism, and a correctness bar of "correct on this developer's machine
-right now" instead
-of "byte-identical and correct for every downstream consumer forever." That bar is what has
-historically consumed years and killed prior efforts outright.
+freedom that makes the rest tractable. LTO is deferred, with no PGO/BOLT interaction or
+cross-machine and cross-toolchain reproducible-build guarantee. Behavior-preserving changes still
+require artifact equivalence: performance-only and output-path changes are byte-identical by
+default. See [DESIGN.md §3.1](DESIGN.md) for the distinction and required evidence.
 
 And the evidence says throughput is the wrong thing to chase. On a 46 MB debug Rust binary on
 `x86_64-pc-windows-gnu`, `ld.bfd` and `ld.lld` measure **statistically identical**. If a
@@ -150,7 +149,7 @@ the clearest signal available that this is the unserved need.
 ## Non-goals
 
 - Release / shipping builds
-- Byte-for-byte reproducible output
+- Cross-machine and cross-toolchain reproducible builds as a release guarantee
 - Drop-in `ld` replacement for distro build systems
 
 Use `lld`, `wild`, or your platform linker for those. `reld` is for the 200th rebuild of the
