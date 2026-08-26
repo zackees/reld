@@ -175,11 +175,10 @@ struct FormatCoverage {
 
 impl FormatCoverage {
     fn percentage(&self) -> u64 {
-        if self.total_relocations == 0 {
-            0
-        } else {
-            self.diffed_relocations.saturating_mul(100) / self.total_relocations
-        }
+        self.diffed_relocations
+            .saturating_mul(100)
+            .checked_div(self.total_relocations)
+            .unwrap_or(0)
     }
 }
 

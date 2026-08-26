@@ -929,11 +929,10 @@ impl Display for Coverage {
         writeln!(
             f,
             "Diffed {total_diffed} of {total_bytes} section bytes ({}%)",
-            if total_bytes == 0 {
-                0
-            } else {
-                total_diffed * 100 / total_bytes
-            }
+            total_diffed
+                .checked_mul(100)
+                .and_then(|scaled| scaled.checked_div(total_bytes))
+                .unwrap_or(0)
         )?;
         writeln!(
             f,
@@ -956,7 +955,10 @@ impl Coverage {
 
     fn relocation_percentage(&self) -> u64 {
         let (diffed, total) = self.relocation_counts();
-        if total == 0 { 0 } else { diffed * 100 / total }
+        diffed
+            .checked_mul(100)
+            .and_then(|scaled| scaled.checked_div(total))
+            .unwrap_or(0)
     }
 }
 

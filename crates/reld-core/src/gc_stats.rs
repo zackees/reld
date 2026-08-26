@@ -141,7 +141,11 @@ fn write_gc_stats<'data, P: Platform>(
         if total == 0 {
             continue;
         }
-        let percent = f.discarded * 100 / total;
+        let percent = f
+            .discarded
+            .checked_mul(100)
+            .and_then(|scaled| scaled.checked_div(total))
+            .unwrap_or(0);
         writeln!(
             &mut out,
             "Discarded {}. {percent}% of {} from {}",
