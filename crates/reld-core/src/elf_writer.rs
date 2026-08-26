@@ -1734,11 +1734,13 @@ enum PreparedObjectSection<'out> {
     FrameData(object::SectionIndex),
 }
 
+const MONOLITHIC_OBJECT_SECTION_THRESHOLD: usize = 4096;
+
 impl PreparedObjectSection<'_> {
-    fn populate<'data, A: Arch<Platform = Elf>>(
+    fn populate<A: Arch<Platform = Elf>>(
         &mut self,
-        object: &ObjectLayout<'data, Elf>,
-        layout: &ElfLayout<'data>,
+        object: &ObjectLayout<Elf>,
+        layout: &ElfLayout,
     ) -> Result {
         match self {
             Self::Loaded {
@@ -1746,20 +1748,15 @@ impl PreparedObjectSection<'_> {
                 section_index,
                 out,
                 content_len,
-            } => {
-                *content_len =
-                    populate_section_output::<A>(object, layout, *section, *section_index, out)?;
             }
-            Self::Debug {
+            | Self::Debug {
                 section,
                 section_index,
                 out,
                 content_len,
             } => {
-                let len =
+                *content_len =
                     populate_section_output::<A>(object, layout, *section, *section_index, out)?;
-                relocate_debug_section::<A>(object, layout, *section_index, &mut out[..len])?;
-                *content_len = len;
             }
             Self::FrameData(_) => {}
         }
@@ -1779,73 +1776,101 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
 
     let _span = debug_span!("write_file", filename = %object.input).entered();
     let _file_span = layout.args().common().trace_span_for_file(object.file_id);
+    let trace_monolithic_phases = object.sections.len() >= MONOLITHIC_OBJECT_SECTION_THRESHOLD;
 
     let mut prepared_sections = Vec::with_capacity(object.sections.len());
-    for (i, sec) in object.sections.iter().enumerate() {
-        let section_index = object::SectionIndex(i);
+    {
+        let _timing = trace_monolithic_phases
+            .then(|| crate::timing_guard!("Allocate monolithic object sections"));
+        for (i, sec) in object.sections.iter().enumerate() {
+            let section_index = object::SectionIndex(i);
 
-        match sec {
-            SectionSlot::Loaded(sec) => {
-                if should_skip_loaded_section(object, layout, section_index) {
-                    continue;
+            match sec {
+                SectionSlot::Loaded(sec) => {
+                    if should_skip_loaded_section(object, layout, section_index) {
+                        continue;
+                    }
+                    let out =
+                        allocate_section_output(object, layout, *sec, section_index, buffers)?;
+                    prepared_sections.push(PreparedObjectSection::Loaded {
+                        section: *sec,
+                        section_index,
+                        out,
+                        content_len: 0,
+                    });
                 }
-                let out = allocate_section_output(object, layout, *sec, section_index, buffers)?;
-                prepared_sections.push(PreparedObjectSection::Loaded {
-                    section: *sec,
-                    section_index,
-                    out,
-                    content_len: 0,
-                });
-            }
-            SectionSlot::LoadedDebugInfo(sec) => {
-                if should_skip_debug_section(object, layout, section_index) {
-                    continue;
+                SectionSlot::LoadedDebugInfo(sec) => {
+                    if should_skip_debug_section(object, layout, section_index) {
+                        continue;
+                    }
+                    let out =
+                        allocate_section_output(object, layout, *sec, section_index, buffers)?;
+                    prepared_sections.push(PreparedObjectSection::Debug {
+                        section: *sec,
+                        section_index,
+                        out,
+                        content_len: 0,
+                    });
                 }
-                let out = allocate_section_output(object, layout, *sec, section_index, buffers)?;
-                prepared_sections.push(PreparedObjectSection::Debug {
-                    section: *sec,
-                    section_index,
-                    out,
-                    content_len: 0,
-                });
+                SectionSlot::FrameData(section_index) => {
+                    prepared_sections.push(PreparedObjectSection::FrameData(*section_index));
+                }
+                _ => (),
             }
-            SectionSlot::FrameData(section_index) => {
-                prepared_sections.push(PreparedObjectSection::FrameData(*section_index));
-            }
-            _ => (),
         }
     }
 
-    prepared_sections
-        .par_iter_mut()
-        .try_for_each(|prepared| prepared.populate::<A>(object, layout))?;
+    {
+        let _timing = trace_monolithic_phases
+            .then(|| crate::timing_guard!("Populate monolithic object sections"));
+        prepared_sections
+            .par_iter_mut()
+            .try_for_each(|prepared| prepared.populate::<A>(object, layout))?;
+    }
 
-    for prepared in prepared_sections {
-        match prepared {
-            PreparedObjectSection::Loaded {
-                section_index,
-                out,
-                content_len,
-                ..
-            } => {
-                table_writer.reset_relr_run();
-                relocate_object_section::<A>(
-                    object,
-                    layout,
+    {
+        let _timing = trace_monolithic_phases
+            .then(|| crate::timing_guard!("Relocate monolithic object sections"));
+        for prepared in prepared_sections {
+            match prepared {
+                PreparedObjectSection::Loaded {
                     section_index,
-                    &mut out[..content_len],
-                    table_writer,
-                    trace,
-                )?;
-            }
-            PreparedObjectSection::Debug {
-                section_index: _, ..
-            } => {}
-            PreparedObjectSection::FrameData(section_index) => {
-                write_eh_frame_data::<A>(object, section_index, layout, table_writer, trace)?;
+                    out,
+                    content_len,
+                    ..
+                } => {
+                    table_writer.reset_relr_run();
+                    relocate_object_section::<A>(
+                        object,
+                        layout,
+                        section_index,
+                        &mut out[..content_len],
+                        table_writer,
+                        trace,
+                    )?;
+                }
+                PreparedObjectSection::Debug {
+                    section_index,
+                    out,
+                    content_len,
+                    ..
+                } => {
+                    relocate_debug_section::<A>(
+                        object,
+                        layout,
+                        section_index,
+                        &mut out[..content_len],
+                    )?;
+                }
+                PreparedObjectSection::FrameData(section_index) => {
+                    write_eh_frame_data::<A>(object, section_index, layout, table_writer, trace)?;
+                }
             }
         }
     }
+
+    let _timing =
+        trace_monolithic_phases.then(|| crate::timing_guard!("Write monolithic object symbols"));
     for (symbol_id, resolution) in layout.resolutions_in_range(object.symbol_id_range) {
         let _span = tracing::trace_span!("Symbol", %symbol_id).entered();
         if let Some(res) = resolution {
