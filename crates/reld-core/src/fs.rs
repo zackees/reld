@@ -19,6 +19,10 @@ use std::sync::Arc;
 const LARGE_EXT4_BUFFERED_OUTPUT_MIN: u64 = 256 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const LARGE_EXT4_BUFFERED_OUTPUT_MAX: u64 = 512 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const PARALLEL_OUTPUT_WRITE_MIN: usize = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const PARALLEL_OUTPUT_WRITE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileReplacementMode {
@@ -345,6 +349,7 @@ pub struct OsOutputFile {
     file: File,
     buffer: OsOutputBuffer,
     path: Arc<Path>,
+    parallel_buffer_write: bool,
 }
 
 impl OutputFileData for OsOutputFile {
@@ -364,8 +369,7 @@ impl OutputFileData for OsOutputFile {
 
     fn finish(self) -> Result {
         if let OsOutputBuffer::InMemory(bytes) = &self.buffer {
-            (&self.file)
-                .write_all(bytes)
+            write_output_buffer(&self.file, bytes, self.parallel_buffer_write)
                 .with_context(|| format!("Failed to write to {}", self.path.display()))?;
         }
 
@@ -386,6 +390,39 @@ impl OutputFileData for OsOutputFile {
         #[cfg(not(target_os = "macos"))]
         let _ = len;
     }
+}
+
+fn write_output_buffer(file: &File, bytes: &[u8], parallel: bool) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if parallel && bytes.len() >= PARALLEL_OUTPUT_WRITE_MIN && file.metadata()?.is_file() {
+        return write_output_buffer_parallel(file, bytes, PARALLEL_OUTPUT_WRITE_CHUNK_SIZE);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = parallel;
+
+    let mut file = file;
+    file.write_all(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn write_output_buffer_parallel(
+    file: &File,
+    bytes: &[u8],
+    chunk_size: usize,
+) -> std::io::Result<()> {
+    use rayon::iter::IndexedParallelIterator as _;
+    use rayon::iter::ParallelIterator as _;
+    use rayon::slice::ParallelSlice as _;
+    use std::os::unix::fs::FileExt as _;
+
+    debug_assert!(chunk_size > 0);
+    bytes
+        .par_chunks(chunk_size)
+        .enumerate()
+        .try_for_each(|(chunk_index, chunk)| {
+            file.write_all_at(chunk, (chunk_index * chunk_size) as u64)
+        })
 }
 
 impl FileSystem for OsFileSystem {
@@ -506,6 +543,7 @@ impl FileSystem for OsFileSystem {
         let file_write_mode = options
             .write_mode
             .unwrap_or_else(|| default_file_write_mode_for_file(&file, options.size));
+        let parallel_buffer_write = should_parallel_buffer_write(&file, options.size);
 
         let buffer = match file_write_mode {
             FileWriteMode::Mmap => {
@@ -529,7 +567,12 @@ impl FileSystem for OsFileSystem {
                 OsOutputBuffer::InMemory(vec![0; options.size as usize])
             }
         };
-        Ok(OsOutputFile { file, buffer, path })
+        Ok(OsOutputFile {
+            file,
+            buffer,
+            path,
+            parallel_buffer_write,
+        })
     }
 
     fn write_auxiliary(&self, path: &Path, bytes: &[u8]) -> Result {
@@ -537,6 +580,32 @@ impl FileSystem for OsFileSystem {
         (&file).write_all(bytes)?;
         Ok(())
     }
+}
+
+fn should_parallel_buffer_write(file: &File, output_size: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        should_parallel_buffer_write_for_filesystem_type(
+            nix::sys::statfs::fstatfs(file)
+                .map(|stat| stat.filesystem_type())
+                .ok(),
+            output_size,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, output_size);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn should_parallel_buffer_write_for_filesystem_type(
+    filesystem_type: Option<nix::sys::statfs::FsType>,
+    output_size: u64,
+) -> bool {
+    filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+        && (LARGE_EXT4_BUFFERED_OUTPUT_MIN..=LARGE_EXT4_BUFFERED_OUTPUT_MAX).contains(&output_size)
 }
 
 fn default_file_write_mode_for_file(file: &std::fs::File, output_size: u64) -> FileWriteMode {
@@ -588,6 +657,25 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn parallel_output_write_preserves_chunk_boundaries_and_tail() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("parallel-output");
+        let mut file = File::create(&path).unwrap();
+        let expected = (0_u8..=255).cycle().take(4096 + 17).collect::<Vec<_>>();
+        file.set_len(expected.len() as u64).unwrap();
+
+        write_output_buffer_parallel(&file, &expected, 1024).unwrap();
+
+        let mut actual = Vec::new();
+        file = File::open(path).unwrap();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn large_linux_ext4_outputs_use_the_measured_buffered_policy() {
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
@@ -596,6 +684,18 @@ mod tests {
             ),
             FileWriteMode::BufferThenWrite
         );
+        assert!(should_parallel_buffer_write_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+        ));
+        assert!(!should_parallel_buffer_write_for_filesystem_type(
+            Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+        ));
+        assert!(!should_parallel_buffer_write_for_filesystem_type(
+            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            LARGE_EXT4_BUFFERED_OUTPUT_MAX + 1,
+        ));
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
                 Some(nix::sys::statfs::EXT4_SUPER_MAGIC),

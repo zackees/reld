@@ -21,6 +21,26 @@ def test_benchmark_workflow_publishes_one_directory_per_target():
     assert not OBSOLETE_ASSET_WORKFLOW.exists()
 
 
+def test_benchmark_workflow_scopes_perf_branches_to_requested_platform():
+    text = WORKFLOW.read_text()
+
+    # Iteration branches must not allocate the two unrelated hosted runners. A final
+    # cross-platform run remains available explicitly and schedules continue to run all.
+    assert '"perf/linux/**"' in text
+    assert '"perf/windows/**"' in text
+    assert '"perf/macos/**"' in text
+    assert '"perf/all/**"' in text
+    assert "description: Platforms to benchmark" in text
+    assert "default: linux" in text
+    assert "startsWith(github.ref_name, 'perf/windows/')" in text
+    assert "startsWith(github.ref_name, 'perf/macos/')" in text
+    assert "startsWith(github.ref_name, 'perf/all/')" in text
+    assert "inputs.platforms == 'all'" in text
+    assert "inputs.platforms == 'windows'" in text
+    assert "inputs.platforms == 'macos'" in text
+    assert "Run only after an all-platform benchmark" in text
+
+
 def test_benchmark_workflow_gates_expected_linker_coverage():
     text = WORKFLOW.read_text()
 
@@ -32,9 +52,9 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     # Every target supplies its own front door; no permanent pending bridge path may survive.
     assert "--reld-pending" not in text
     assert "reld_pending:" not in text
-    assert "reld_driver: target/release/ld.reld" in text
-    assert "reld_driver: target/release/reld-link.exe" in text
-    assert "reld_driver: target/release/ld64.reld" in text
+    assert "'target/release/ld.reld'" in text
+    assert "'target/release/reld-link.exe'" in text
+    assert "'target/release/ld64.reld'" in text
     assert '--reld "$RELD_DRIVER"' in text
     assert "pwsh" not in text.lower()
     assert "powershell" not in text.lower()
