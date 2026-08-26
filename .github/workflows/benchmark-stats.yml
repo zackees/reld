@@ -70,7 +70,7 @@ jobs:
         with:
           toolset: "14.44"
 
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
       - name: Free Linux runner disk for retained linker inputs
         if: runner.os == 'Linux'

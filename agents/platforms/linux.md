@@ -5,6 +5,8 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 ## Current architecture and references
 
+- Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
+  `stable`.
 - Fast non-LTO links use `reld`'s native ELF engine inherited from `wild`.
 - LTO and other unsupported native capabilities route to the bundled `ld.lld` bridge.
 - For inherited native behavior, the artifact reference is the exact pinned `wild` fork commit from

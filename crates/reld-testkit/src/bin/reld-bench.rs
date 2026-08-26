@@ -117,12 +117,10 @@ fn scenarios() -> Vec<(String, WorkloadSpec)> {
 
 /// `-fuse-ld=` values. `""` means the compiler default.
 fn default_linkers() -> Vec<&'static str> {
-    if cfg!(target_os = "windows") {
-        vec!["", "lld"]
-    } else if cfg!(target_os = "macos") {
-        vec!["", "ld64.lld"]
-    } else {
-        vec!["bfd", "lld", "mold", "wild"]
+    cfg_select! {
+        target_os = "windows" => vec!["", "lld"],
+        target_os = "macos" => vec!["", "ld64.lld"],
+        target_os = "linux" => vec!["bfd", "lld", "mold", "wild"],
     }
 }
 
@@ -130,12 +128,10 @@ fn display_linker(linker: &str) -> &str {
     if !linker.is_empty() {
         return linker;
     }
-    if cfg!(target_os = "windows") {
-        "link.exe"
-    } else if cfg!(target_os = "macos") {
-        "ld"
-    } else {
-        "default"
+    cfg_select! {
+        target_os = "windows" => "link.exe",
+        target_os = "macos" => "ld",
+        target_os = "linux" => "default",
     }
 }
 

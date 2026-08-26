@@ -262,10 +262,10 @@ enum PlatformKind {
 
 impl PlatformKind {
     fn host() -> Self {
-        if cfg!(target_os = "macos") {
-            PlatformKind::MachO
-        } else {
-            PlatformKind::Elf
+        cfg_select! {
+            target_os = "windows" => PlatformKind::Coff,
+            target_os = "macos" => PlatformKind::MachO,
+            target_os = "linux" => PlatformKind::Elf,
         }
     }
 

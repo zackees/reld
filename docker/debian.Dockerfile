@@ -3,7 +3,7 @@
 # docker build --progress=plain -t reld-dev-debian . -f docker/debian.Dockerfile
 # docker run -it reld-dev-debian
 
-FROM rust:1.94 AS chef
+FROM rust:1.95.0 AS chef
 RUN apt-get update && \
     apt-get install -y \
         clang \

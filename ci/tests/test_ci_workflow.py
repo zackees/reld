@@ -2,6 +2,21 @@ from pathlib import Path
 
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml"
+REPO_ROOT = WORKFLOW.parents[2]
+
+
+def test_normal_toolchains_pin_the_rust_195_msrv():
+    rust_toolchain = (REPO_ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+    manifest = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    workflow_texts = [
+        (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        for name in ("ci.yml", "linker-modes.yml", "stress.yml", "benchmark-stats.yml")
+    ]
+
+    assert 'rust-version = "1.95"' in manifest
+    assert 'channel = "1.95.0"' in rust_toolchain
+    assert "RUST_VERSION: 1.95.0" in workflow_texts[0]
+    assert all("e081816240890017053eacbb1bdf337761dc5582 # 1.95.0" in text for text in workflow_texts)
 
 
 def test_ci_caches_linux_reference_linkers():

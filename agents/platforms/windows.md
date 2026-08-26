@@ -5,12 +5,16 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 ## Current architecture and references
 
+- Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
+  `stable`.
 - Windows links currently use reld's `lld-link` bridge; native PE/COFF code generation is future
   work.
 - The byte-identity reference for bridge-only changes is the same pinned `lld-link` backend invoked
   directly with the same effective arguments, inputs, environment, and deterministic options.
 - Pin the LLVM/Rust toolchain that supplies `lld-link`. `link.exe` is a compatibility reference,
   not a byte-identity reference, because it has different PE/COFF and PDB policies.
+- `x86_64-pc-windows-gnu` is compile-checked from Linux but is not yet a consumer-acceptance
+  route or advertised runtime platform; its GNU-dialect acceptance work remains tracked by #90.
 
 ## Required evidence
 

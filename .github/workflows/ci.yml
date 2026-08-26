@@ -16,7 +16,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_COMMAND: cargo
-  RUST_VERSION: 1.94.1
+  RUST_VERSION: 1.95.0
   NIGHTLY_TOOLCHAIN: nightly-2026-08-01
   CLANG_VERSION: 22.1.8
   CLANG_PACKAGE_VERSION: "1:22.1.8~++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80"
@@ -38,7 +38,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: rustfmt, clippy
       - uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # cargo-deny
@@ -105,7 +105,7 @@ jobs:
         with:
           version: 18.1.8
 
-      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ matrix.target }}
 
@@ -378,7 +378,7 @@ jobs:
           # rustc's default flavor for aarch64-apple-darwin is the cc-wrapped "darwin-cc" (clang
           # driver args). To hand reld raw ld64-native argv (which it forwards straight to
           # ld64.lld, per the BR-3 bridge), select the direct/non-cc "ld64.lld" flavor. That
-          # string is a valid rustc 1.94 -C linker-flavor value (verified against the compiler's
+          # string is a valid rustc 1.95 -C linker-flavor value (verified against the compiler's
           # own accepted list) and emits Mach-O/ld64 args (-syslibroot/-lSystem/-arch/-platform_version).
           export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$reld"
           export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-Clinker-flavor=ld64.lld"
@@ -496,7 +496,7 @@ jobs:
           sudo apt-get "${APT_OPTIONS[@]}" update
           sudo apt-get "${APT_OPTIONS[@]}" install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
-      - uses: dtolnay/rust-toolchain@e43eeffd51aefeea929f4ea14e09fd077153e788 # 1.94.1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ matrix.target }}
 

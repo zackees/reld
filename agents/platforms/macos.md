@@ -5,6 +5,8 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 ## Current architecture and references
 
+- Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
+  `stable`.
 - macOS links currently use reld's `ld64.lld` bridge; native Mach-O code generation is future work.
 - The byte-identity reference for bridge-only changes is the same pinned `ld64.lld` backend invoked
   directly with the same effective arguments, inputs, environment, and deterministic options.

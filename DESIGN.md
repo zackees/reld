@@ -44,6 +44,11 @@ compatibility that has historically consumed years — and killed prior efforts 
 
 Windows, Linux, and macOS are first-class from day one. Not "Linux plus ports."
 
+The minimum supported Rust version is **1.95**. Normal contributor and CI toolchains pin Rust
+1.95.0 rather than a floating `stable`; sanitizer and fuzz jobs remain explicit nightly exceptions.
+Rust 1.95's `cfg_select!` makes every host-platform route exhaustive: an unlisted target fails to
+compile instead of silently inheriting Linux behavior.
+
 | Platform | Object format | Notes |
 |---|---|---|
 | Linux | ELF | Baseline; the format `wild` already does well |
