@@ -12,10 +12,12 @@ from ci.benchmark_runner import (
     CONFIGURATIONS,
     DEFAULT_MANIFEST,
     BenchmarkError,
+    ExecutableOracle,
     LinkCommand,
     Linker,
     _discard_verified_output,
     _parse_phase_timings,
+    _validate_executable,
     assert_output_mode_improvement,
     assert_significant_workload,
     benchmark_environment,
@@ -99,7 +101,13 @@ def test_each_configuration_is_replayed_then_released_before_the_next_capture(tm
         return LinkCommand("cc", ("input.o", "-o", str(output)), output, False)
 
     def fake_prune(captured, *, profile_dir, log):
-        del captured, profile_dir, log
+        del captured, log
+        events.append(f"prune:{profile_dir.name}")
+
+    def fake_oracle(output, **kwargs):
+        del kwargs
+        events.append(f"oracle:{output.parent.name}")
+        return ExecutableOracle("OK reference\n", "")
 
     def fake_startup(*args, **kwargs):
         del args, kwargs
@@ -121,6 +129,7 @@ def test_each_configuration_is_replayed_then_released_before_the_next_capture(tm
     monkeypatch.setattr(runner_module, "linkers_for_target", lambda target, reld: (linker,))
     monkeypatch.setattr(runner_module, "benchmark_environment", lambda: {})
     monkeypatch.setattr(runner_module, "capture_final_link", fake_capture)
+    monkeypatch.setattr(runner_module, "capture_executable_oracle", fake_oracle)
     monkeypatch.setattr(runner_module, "prune_capture_artifacts", fake_prune)
     monkeypatch.setattr(runner_module, "benchmark_startup", fake_startup)
     monkeypatch.setattr(runner_module, "benchmark_replay", fake_replay)
@@ -140,6 +149,8 @@ def test_each_configuration_is_replayed_then_released_before_the_next_capture(tm
 
     assert events == [
         "capture:no-LTO",
+        "oracle:linkbench-no-lto",
+        "prune:linkbench-no-lto",
         "startup",
         "replay:wild",
         "replay:wild",
@@ -147,12 +158,16 @@ def test_each_configuration_is_replayed_then_released_before_the_next_capture(tm
         "replay:wild",
         "release:linkbench-no-lto",
         "capture:ThinLTO",
+        "oracle:linkbench-thin-lto",
+        "prune:linkbench-thin-lto",
         "replay:wild",
         "replay:wild",
         "replay:wild",
         "replay:wild",
         "release:linkbench-thin-lto",
         "capture:full-LTO",
+        "oracle:linkbench-full-lto",
+        "prune:linkbench-full-lto",
         "replay:wild",
         "replay:wild",
         "replay:wild",
@@ -178,6 +193,7 @@ def test_linker_trials_rotate_order_and_preserve_every_sample(tmp_path: Path, mo
     medians, samples, sizes, orders = benchmark_linkers_round_robin(
         captured,
         linkers,
+        oracle=ExecutableOracle("OK reference\n", ""),
         output_dir=tmp_path / "out",
         cwd=tmp_path,
         environment={},
@@ -225,6 +241,7 @@ def test_four_diagnostic_contenders_each_occupy_every_round_position(tmp_path: P
     _, _, _, orders = benchmark_linkers_round_robin(
         captured,
         linkers,
+        oracle=ExecutableOracle("OK reference\n", ""),
         output_dir=tmp_path / "out",
         cwd=tmp_path,
         environment={},
@@ -260,6 +277,11 @@ def test_linux_output_mode_report_retains_metadata_samples_sizes_and_phases(tmp_
     monkeypatch.setattr(runner_module, "benchmark_environment", lambda: {})
     monkeypatch.setattr(runner_module, "_linux_filesystem_type", lambda path, environment: "ext4")
     monkeypatch.setattr(runner_module, "capture_final_link", fake_capture)
+    monkeypatch.setattr(
+        runner_module,
+        "capture_executable_oracle",
+        lambda *args, **kwargs: ExecutableOracle("OK reference\n", ""),
+    )
     monkeypatch.setattr(runner_module, "prune_capture_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner_module, "release_capture_artifacts", lambda **kwargs: None)
     monkeypatch.setattr(runner_module, "benchmark_startup", lambda *args, **kwargs: 0.01)
@@ -348,6 +370,14 @@ def test_release_capture_artifacts_rejects_outside_directory(tmp_path: Path):
 def test_default_workload_replaces_startup_dominated_sqlite_bridge():
     assert DEFAULT_MANIFEST.as_posix().endswith("ci/e2e/link-workload/Cargo.toml")
     assert BENCHMARK_PACKAGE == "linkbench-app"
+
+
+def test_workload_is_deterministic_for_exact_executable_oracles():
+    audit = DEFAULT_MANIFEST.parent / "crates" / "app" / "src" / "audit.rs"
+    source = audit.read_text(encoding="utf-8")
+
+    assert "Uuid::from_u128" in source
+    assert "Uuid::new_v4" not in source
 
 
 def test_compiled_policy_is_target_calibrated_for_significant_final_links():
@@ -468,8 +498,11 @@ def test_every_warmup_and_trial_executable_is_verified_outside_timing(tmp_path: 
         output.write_bytes(b"executable")
         return runner_module.subprocess.CompletedProcess([], 0, "", "")
 
-    def fake_validate(output, *, cwd, environment):
+    oracle = ExecutableOracle("OK reference\n", "")
+
+    def fake_validate(output, *, oracle: ExecutableOracle, cwd, environment):
         del cwd, environment
+        assert oracle == ExecutableOracle("OK reference\n", "")
         assert output.is_file()
         validations.append(output)
 
@@ -479,6 +512,7 @@ def test_every_warmup_and_trial_executable_is_verified_outside_timing(tmp_path: 
     benchmark_replay(
         captured,
         Linker("test", tmp_path / "ld.test"),
+        oracle=oracle,
         output_dir=output_dir,
         cwd=tmp_path,
         environment={},
@@ -495,6 +529,24 @@ def test_every_warmup_and_trial_executable_is_verified_outside_timing(tmp_path: 
         "app-test-trial-2",
     ]
     assert all(not path.exists() for path in validations)
+
+
+def test_executable_oracle_requires_exact_reference_behavior(tmp_path: Path, monkeypatch):
+    output = tmp_path / "linked-output"
+    output.write_bytes(b"executable")
+    oracle = ExecutableOracle("OK trusted-fingerprint\n", "")
+    responses = iter(
+        [
+            runner_module.subprocess.CompletedProcess([], 0, oracle.stdout, oracle.stderr),
+            runner_module.subprocess.CompletedProcess([], 0, "OK but-wrong\n", ""),
+        ]
+    )
+
+    monkeypatch.setattr(runner_module, "_run_executable", lambda *args, **kwargs: next(responses))
+
+    _validate_executable(output, oracle=oracle, cwd=tmp_path, environment={})
+    with pytest.raises(BenchmarkError, match="differed from Cargo's reference"):
+        _validate_executable(output, oracle=oracle, cwd=tmp_path, environment={})
 
 
 def test_locked_windows_output_is_quarantined_without_delete_retries(tmp_path: Path, monkeypatch):
@@ -535,8 +587,8 @@ def test_quarantine_cleanup_runs_after_all_timed_links(tmp_path: Path, monkeypat
         events.append(f"link:{output.name}")
         return runner_module.subprocess.CompletedProcess([], 0, "", "")
 
-    def fake_validate(output, *, cwd, environment):
-        del cwd, environment
+    def fake_validate(output, *, oracle, cwd, environment):
+        del oracle, cwd, environment
         events.append(f"validate:{output.name}")
 
     def fake_discard(output):
@@ -554,6 +606,7 @@ def test_quarantine_cleanup_runs_after_all_timed_links(tmp_path: Path, monkeypat
     benchmark_replay(
         captured,
         Linker("reld", tmp_path / "reld-link.exe"),
+        oracle=ExecutableOracle("OK reference\n", ""),
         output_dir=tmp_path / "replays",
         cwd=tmp_path,
         environment={},
