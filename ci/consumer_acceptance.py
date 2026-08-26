@@ -167,8 +167,10 @@ def rust_environment(
         linker_flavor_flag = f"-Clinker-flavor={host.rust_linker_flavor}"
         env[rustflags_key] = linker_flavor_flag
         # Cargo links host build scripts separately from the requested target. On a native host
-        # those scripts still use the selected reld binary, so give them the same direct linker
-        # flavor rather than letting Rust's default compiler-driver flavor reach the bridge.
+        # those scripts still use the selected reld binary, so force the same direct linker
+        # flavor at Cargo's highest-precedence environment layer rather than letting its default
+        # compiler-driver flavor reach the bridge.
+        env["CARGO_ENCODED_RUSTFLAGS"] = linker_flavor_flag
         env["RUSTFLAGS"] = linker_flavor_flag
     env["RELD_LOG_ENGINE"] = "1"
     env["RELD_INVOCATION_LOG"] = str(invocation_log)

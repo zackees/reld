@@ -43,6 +43,7 @@ def test_rust_environment_selects_exact_linker_and_audit_log(tmp_path: Path) -> 
     assert env["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"] == str(linker)
     assert env["CARGO_TARGET_DIR"] == str(target_dir)
     assert env["RELD_INVOCATION_LOG"] == str(invocation_log)
+    assert "CARGO_ENCODED_RUSTFLAGS" not in env
 
 
 def test_linux_rust_environment_uses_the_stable_direct_lld_linker_flavor(tmp_path: Path) -> None:
@@ -50,6 +51,7 @@ def test_linux_rust_environment_uses_the_stable_direct_lld_linker_flavor(tmp_pat
     env = rust_environment(HOSTS["linux"], tmp_path / "reld", target_dir, tmp_path / "log.jsonl")
 
     assert env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"] == "-Clinker-flavor=ld.lld"
+    assert env["CARGO_ENCODED_RUSTFLAGS"] == "-Clinker-flavor=ld.lld"
 
 
 def test_macos_rust_environment_applies_direct_flavor_to_host_build_scripts(tmp_path: Path) -> None:
@@ -58,6 +60,7 @@ def test_macos_rust_environment_applies_direct_flavor_to_host_build_scripts(tmp_
     )
 
     assert env["CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS"] == "-Clinker-flavor=ld64.lld"
+    assert env["CARGO_ENCODED_RUSTFLAGS"] == "-Clinker-flavor=ld64.lld"
     assert env["RUSTFLAGS"] == "-Clinker-flavor=ld64.lld"
 
 
