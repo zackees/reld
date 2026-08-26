@@ -65,6 +65,12 @@ class Linker:
     driver_arguments: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ExecutableOracle:
+    stdout: str
+    stderr: str
+
+
 _QUOTED_ARGUMENT = re.compile(r'"(?:\\.|[^"\\])*"')
 _LINK_DRIVER_NAMES = {
     "cc",
@@ -456,10 +462,10 @@ def _run_link(command: list[str], *, cwd: Path, environment: dict[str, str]) -> 
     )
 
 
-def _validate_executable(output: Path, *, cwd: Path, environment: dict[str, str]) -> None:
+def _run_executable(output: Path, *, cwd: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
     if not output.is_file() or output.stat().st_size == 0:
         raise BenchmarkError(f"linked output is missing or empty: {output}")
-    completed = subprocess.run(
+    return subprocess.run(
         [output],
         cwd=cwd,
         env=environment,
@@ -469,8 +475,32 @@ def _validate_executable(output: Path, *, cwd: Path, environment: dict[str, str]
         errors="replace",
         check=False,
     )
-    if completed.returncode or "OK" not in completed.stdout:
-        raise BenchmarkError(f"linked output failed its OK oracle ({completed.returncode}):\n{completed.stdout}{completed.stderr}")
+
+
+def capture_executable_oracle(output: Path, *, cwd: Path, environment: dict[str, str]) -> ExecutableOracle:
+    """Capture exact behavior from Cargo's target-native reference executable."""
+    completed = _run_executable(output, cwd=cwd, environment=environment)
+    if completed.returncode or not completed.stdout.startswith("OK "):
+        raise BenchmarkError(f"captured reference failed its OK oracle ({completed.returncode}):\n{completed.stdout}{completed.stderr}")
+    return ExecutableOracle(stdout=completed.stdout, stderr=completed.stderr)
+
+
+def _validate_executable(
+    output: Path,
+    *,
+    oracle: ExecutableOracle,
+    cwd: Path,
+    environment: dict[str, str],
+) -> None:
+    completed = _run_executable(output, cwd=cwd, environment=environment)
+    if completed.returncode:
+        raise BenchmarkError(f"linked output failed its executable oracle ({completed.returncode}):\n{completed.stdout}{completed.stderr}")
+    if completed.stdout != oracle.stdout or completed.stderr != oracle.stderr:
+        raise BenchmarkError(
+            "linked output differed from Cargo's reference executable:\n"
+            f"expected stdout: {oracle.stdout!r}\nactual stdout: {completed.stdout!r}\n"
+            f"expected stderr: {oracle.stderr!r}\nactual stderr: {completed.stderr!r}"
+        )
 
 
 def _discard_verified_output(output: Path) -> Path | None:
@@ -518,6 +548,7 @@ def benchmark_replay(
     captured: LinkCommand,
     linker: Linker,
     *,
+    oracle: ExecutableOracle,
     output_dir: Path,
     cwd: Path,
     environment: dict[str, str],
@@ -564,7 +595,7 @@ def benchmark_replay(
             completed = _run_link(command, cwd=cwd, environment=environment)
             if completed.returncode:
                 raise BenchmarkError(f"{linker.label} warmup link failed:\n{completed.stdout}{completed.stderr}")
-            _validate_executable(output, cwd=cwd, environment=environment)
+            _validate_executable(output, oracle=oracle, cwd=cwd, environment=environment)
             if quarantine := _discard_verified_output(output):
                 quarantines.append(quarantine)
 
@@ -579,7 +610,7 @@ def benchmark_replay(
             samples.append(elapsed)
             # The oracle runs after the timer stops, once for every produced executable. A bad
             # early trial therefore cannot enter the median and then be hidden by an overwrite.
-            _validate_executable(output, cwd=cwd, environment=environment)
+            _validate_executable(output, oracle=oracle, cwd=cwd, environment=environment)
             if output_size_sink is not None:
                 output_size_sink.append(output.stat().st_size)
             if quarantine := _discard_verified_output(output):
@@ -605,6 +636,7 @@ def benchmark_linkers_round_robin(
     captured: LinkCommand,
     linkers: tuple[Linker, ...],
     *,
+    oracle: ExecutableOracle,
     output_dir: Path,
     cwd: Path,
     environment: dict[str, str],
@@ -629,6 +661,7 @@ def benchmark_linkers_round_robin(
             benchmark_replay(
                 captured,
                 linker,
+                oracle=oracle,
                 output_dir=output_dir / linker.label.replace("/", "-"),
                 cwd=cwd,
                 environment=environment,
@@ -705,6 +738,7 @@ def capture_reld_phase_trace(
     captured: LinkCommand,
     linker: Linker,
     *,
+    oracle: ExecutableOracle,
     output_dir: Path,
     cwd: Path,
     environment: dict[str, str],
@@ -735,7 +769,7 @@ def capture_reld_phase_trace(
     completed = _run_link(command, cwd=cwd, environment=environment)
     if completed.returncode:
         raise BenchmarkError(f"reld phase trace failed:\n{completed.stdout}{completed.stderr}")
-    _validate_executable(output, cwd=cwd, environment=environment)
+    _validate_executable(output, oracle=oracle, cwd=cwd, environment=environment)
     output_size = output.stat().st_size
     combined_output = completed.stdout + completed.stderr
     phases = _parse_phase_timings(combined_output, require_creation=require_creation)
@@ -800,6 +834,17 @@ def run_benchmark(
             # without manufacturing a plugin request.
             linker="clang" if use_driver_shim else None,
         )
+        oracle = capture_executable_oracle(
+            captured.output,
+            cwd=manifest.parent,
+            environment=environment,
+        )
+        print(
+            f"captured executable oracle for {configuration.label}: "
+            f"stdout={oracle.stdout.strip()!r}, stderr_bytes={len(oracle.stderr.encode('utf-8'))}",
+            file=log,
+            flush=True,
+        )
         prune_capture_artifacts(
             captured,
             profile_dir=target_dir / configuration.profile,
@@ -821,6 +866,7 @@ def run_benchmark(
             medians, _samples, _sizes, _orders = benchmark_linkers_round_robin(
                 captured,
                 linkers,
+                oracle=oracle,
                 output_dir=workdir / configuration.profile / "published",
                 cwd=manifest.parent,
                 environment=environment,
@@ -841,6 +887,7 @@ def run_benchmark(
                 _, mode_samples, mode_sizes, mode_orders = benchmark_linkers_round_robin(
                     captured,
                     modes,
+                    oracle=oracle,
                     output_dir=workdir / configuration.profile / "output-modes",
                     cwd=manifest.parent,
                     environment=environment,
@@ -862,6 +909,7 @@ def run_benchmark(
                     phases, phase_output_size, phase_trace = capture_reld_phase_trace(
                         captured,
                         mode,
+                        oracle=oracle,
                         output_dir=workdir / configuration.profile / "phase-traces" / mode.label,
                         cwd=manifest.parent,
                         environment=environment,

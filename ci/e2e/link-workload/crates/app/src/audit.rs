@@ -41,13 +41,15 @@ fn artifacts(copies: usize) -> Result<Vec<Artifact>> {
         .context("valid fixture timestamp")?;
     let mut artifacts = Vec::with_capacity(rows.len() * copies);
     for copy in 0..copies {
-        for row in &rows {
+        for (row_index, row) in rows.iter().enumerate() {
             let path = format!("copy-{copy}/{}", &row[0]);
             let mut labels = IndexMap::new();
             labels.insert("copy".to_owned(), copy.to_string());
             labels.insert("source".to_owned(), "benchmark-fixture".to_owned());
             artifacts.push(Artifact {
-                id: Uuid::new_v4(),
+                // Stable IDs make Cargo's reference executable a byte-for-byte behavioral oracle
+                // for every linker replay on this target.
+                id: Uuid::from_u128(((copy as u128) << 64) | (row_index as u128 + 1)),
                 path,
                 kind: row[1].to_owned(),
                 bytes: row[2].as_bytes().repeat(64 + copy),
