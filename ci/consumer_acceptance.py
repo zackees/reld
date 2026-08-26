@@ -38,7 +38,7 @@ class Host:
     name: str
     target: str
     executable_suffix: str
-    rust_linker_flavor: str | None
+    rust_uses_compiler_wrapper: bool
     expected_engine: str
     expected_route_kind: str
     expected_route: str
@@ -49,7 +49,7 @@ HOSTS = {
         name="linux",
         target="x86_64-unknown-linux-gnu",
         executable_suffix="",
-        rust_linker_flavor="ld.lld",
+        rust_uses_compiler_wrapper=True,
         expected_engine="reld",
         expected_route_kind="native",
         expected_route="reld: engine=reld (native,",
@@ -58,7 +58,7 @@ HOSTS = {
         name="windows",
         target="x86_64-pc-windows-msvc",
         executable_suffix=".exe",
-        rust_linker_flavor=None,
+        rust_uses_compiler_wrapper=False,
         expected_engine="lld-link",
         expected_route_kind="bridge",
         expected_route="reld: engine=lld-link (bridge,",
@@ -67,7 +67,7 @@ HOSTS = {
         name="macos",
         target="aarch64-apple-darwin",
         executable_suffix="",
-        rust_linker_flavor="ld64.lld",
+        rust_uses_compiler_wrapper=True,
         expected_engine="ld64.lld",
         expected_route_kind="bridge",
         expected_route="reld: engine=ld64.lld (bridge,",
@@ -159,19 +159,23 @@ def rust_environment(
     env.pop("RUSTFLAGS", None)
     env["CARGO_TARGET_DIR"] = str(target_dir)
     key = "CARGO_TARGET_" + host.target.upper().replace("-", "_") + "_LINKER"
-    env[key] = str(linker)
     rustflags_key = "CARGO_TARGET_" + host.target.upper().replace("-", "_") + "_RUSTFLAGS"
-    if host.rust_linker_flavor is None:
+    if not host.rust_uses_compiler_wrapper:
+        env[key] = str(linker)
         env.pop(rustflags_key, None)
     else:
-        linker_flavor_flag = f"-Clinker-flavor={host.rust_linker_flavor}"
-        env[rustflags_key] = linker_flavor_flag
+        # Rust's direct linker flavors bypass the compiler driver, but a Rust consumer also needs
+        # the driver to add the host CRT and SDK inputs. Keep that driver and select the exact
+        # reld binary through clang's stable `-fuse-ld=` route; clang then hands reld raw linker
+        # argv rather than compiler-driver flags such as `-m64` or `-Wl,...`.
+        env[key] = "clang"
+        fuse_ld_flag = f"-Clink-arg=-fuse-ld={linker}"
+        env[rustflags_key] = fuse_ld_flag
         # Cargo links host build scripts separately from the requested target. On a native host
-        # those scripts still use the selected reld binary, so force the same direct linker
-        # flavor at Cargo's highest-precedence environment layer rather than letting its default
-        # compiler-driver flavor reach the bridge.
-        env["CARGO_ENCODED_RUSTFLAGS"] = linker_flavor_flag
-        env["RUSTFLAGS"] = linker_flavor_flag
+        # those scripts need the same compiler-wrapper route, so apply it at Cargo's
+        # highest-precedence environment layer.
+        env["CARGO_ENCODED_RUSTFLAGS"] = fuse_ld_flag
+        env["RUSTFLAGS"] = fuse_ld_flag
     env["RELD_LOG_ENGINE"] = "1"
     env["RELD_INVOCATION_LOG"] = str(invocation_log)
     return env

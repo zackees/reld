@@ -46,22 +46,26 @@ def test_rust_environment_selects_exact_linker_and_audit_log(tmp_path: Path) -> 
     assert "CARGO_ENCODED_RUSTFLAGS" not in env
 
 
-def test_linux_rust_environment_uses_the_stable_direct_lld_linker_flavor(tmp_path: Path) -> None:
+def test_linux_rust_environment_uses_clang_to_select_the_exact_linker(tmp_path: Path) -> None:
     target_dir = tmp_path / "target"
-    env = rust_environment(HOSTS["linux"], tmp_path / "reld", target_dir, tmp_path / "log.jsonl")
+    linker = tmp_path / "reld"
+    env = rust_environment(HOSTS["linux"], linker, target_dir, tmp_path / "log.jsonl")
 
-    assert env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"] == "-Clinker-flavor=ld.lld"
-    assert env["CARGO_ENCODED_RUSTFLAGS"] == "-Clinker-flavor=ld.lld"
+    assert env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"] == "clang"
+    assert env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"] == f"-Clink-arg=-fuse-ld={linker}"
+    assert env["CARGO_ENCODED_RUSTFLAGS"] == f"-Clink-arg=-fuse-ld={linker}"
 
 
 def test_macos_rust_environment_applies_direct_flavor_to_host_build_scripts(tmp_path: Path) -> None:
+    linker = tmp_path / "reld"
     env = rust_environment(
-        HOSTS["macos"], tmp_path / "reld", tmp_path / "target", tmp_path / "log.jsonl"
+        HOSTS["macos"], linker, tmp_path / "target", tmp_path / "log.jsonl"
     )
 
-    assert env["CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS"] == "-Clinker-flavor=ld64.lld"
-    assert env["CARGO_ENCODED_RUSTFLAGS"] == "-Clinker-flavor=ld64.lld"
-    assert env["RUSTFLAGS"] == "-Clinker-flavor=ld64.lld"
+    assert env["CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"] == "clang"
+    assert env["CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS"] == f"-Clink-arg=-fuse-ld={linker}"
+    assert env["CARGO_ENCODED_RUSTFLAGS"] == f"-Clink-arg=-fuse-ld={linker}"
+    assert env["RUSTFLAGS"] == f"-Clink-arg=-fuse-ld={linker}"
 
 
 def test_tool_lookup_preserves_proxy_executable_name() -> None:
