@@ -2985,6 +2985,29 @@ mod debug_relocation_shard_tests {
     use super::*;
 
     #[test]
+    fn caches_each_debug_symbol_target_once_per_shard() {
+        let mut cache = DebugRelocationTargetCache::new(8);
+        let mut resolutions = 0;
+
+        let first = cache
+            .get_or_try_insert_with(object::SymbolIndex(3), || {
+                resolutions += 1;
+                Ok::<_, crate::error::Error>(41_u64)
+            })
+            .unwrap();
+        let second = cache
+            .get_or_try_insert_with(object::SymbolIndex(3), || {
+                resolutions += 1;
+                Ok::<_, crate::error::Error>(99_u64)
+            })
+            .unwrap();
+
+        assert_eq!(first, 41);
+        assert_eq!(second, 41);
+        assert_eq!(resolutions, 1, "a repeated relocation target must resolve once");
+    }
+
+    #[test]
     fn splits_sorted_non_overlapping_relocations_into_disjoint_output_ranges() {
         let offsets = [0, 4, 8, 12, 16, 20, 24, 28];
         let ranges =
