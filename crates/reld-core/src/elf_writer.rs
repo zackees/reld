@@ -1736,6 +1736,8 @@ enum PreparedObjectSection<'out> {
 
 const MONOLITHIC_OBJECT_SECTION_THRESHOLD: usize = 4096;
 const PARALLEL_DEBUG_RELOCATION_MIN: usize = 64 * 1024;
+// Byte and bit-mask relocations modify at most eight bytes. A paired ULEB128
+// relocation can modify all ten bytes required to encode a u64.
 const MAX_DEBUG_RELOCATION_WRITE_SIZE: u64 = u64::BITS.div_ceil(7) as u64;
 
 impl PreparedObjectSection<'_> {
@@ -2747,6 +2749,44 @@ struct DebugRelocationShardRange {
     output: Range<usize>,
 }
 
+struct DebugRelocationShardSummary {
+    relocations: Range<usize>,
+    first_offset: u64,
+    last_offset: u64,
+    max_write_end: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DebugSymbolResolution {
+    symbol_index: object::SymbolIndex,
+    section_index: Option<object::SectionIndex>,
+    resolution: Option<Resolution<Elf>>,
+}
+
+#[derive(Default)]
+struct DebugSymbolCache {
+    previous: Option<DebugSymbolResolution>,
+}
+
+impl DebugSymbolCache {
+    #[inline(always)]
+    fn get_or_insert_with(
+        &mut self,
+        symbol_index: object::SymbolIndex,
+        resolve: impl FnOnce() -> Result<DebugSymbolResolution>,
+    ) -> Result<DebugSymbolResolution> {
+        if let Some(previous) = self.previous
+            && previous.symbol_index == symbol_index
+        {
+            return Ok(previous);
+        }
+
+        let resolved = resolve()?;
+        self.previous = Some(resolved);
+        Ok(resolved)
+    }
+}
+
 fn debug_relocation_write_size<A: Arch<Platform = Elf>, R: Relocation<Platform = Elf>>(
     relocation: &R,
 ) -> Result<usize> {
@@ -2756,10 +2796,13 @@ fn debug_relocation_write_size<A: Arch<Platform = Elf>, R: Relocation<Platform =
     }
     Ok(match info.size {
         RelocationSize::ByteSize(size) => size,
-        RelocationSize::BitMasking(mask) => mask.instruction.write_windows_size(),
+        // Some bit-masking relocations span two instructions. Use the full u64 window here even
+        // though their current write helper reports the size of one instruction.
+        RelocationSize::BitMasking(_) => size_of::<u64>(),
     })
 }
 
+#[cfg(test)]
 fn debug_relocation_shard_ranges(
     relocation_count: usize,
     output_len: usize,
@@ -2832,6 +2875,109 @@ fn debug_relocation_shard_ranges(
     Ok(Some(ranges))
 }
 
+fn debug_relocation_shard_ranges_parallel(
+    relocation_count: usize,
+    output_len: usize,
+    shard_count: usize,
+    offset_at: impl Fn(usize) -> u64 + Sync,
+    write_size_at: impl Fn(usize) -> Result<usize> + Sync,
+) -> Result<Option<Vec<DebugRelocationShardRange>>> {
+    let shard_count = shard_count.min(relocation_count);
+    if shard_count < 2 {
+        return Ok(None);
+    }
+
+    let summaries = (0..shard_count)
+        .into_par_iter()
+        .map(
+            |shard_index| -> Result<Option<DebugRelocationShardSummary>> {
+                let start = relocation_count * shard_index / shard_count;
+                let end = relocation_count * (shard_index + 1) / shard_count;
+                if start == end {
+                    return Ok(None);
+                }
+
+                let first_offset = offset_at(start);
+                let mut previous_offset = first_offset;
+                for index in start..end {
+                    let offset = offset_at(index);
+                    if index > start && previous_offset > offset {
+                        return Ok(None);
+                    }
+                    if offset > output_len as u64 {
+                        return Ok(None);
+                    }
+                    previous_offset = offset;
+                }
+
+                // With sorted offsets, relocations more than the maximum write size behind the
+                // final offset cannot extend beyond it. Decode relocation sizes only for this
+                // small tail instead of repeating that work for every relocation. Invalid types
+                // outside the tail are still diagnosed when their shard applies the relocations.
+                let last_offset = previous_offset;
+                let mut max_write_end = last_offset;
+                for index in (start..end).rev() {
+                    let offset = offset_at(index);
+                    if offset.saturating_add(MAX_DEBUG_RELOCATION_WRITE_SIZE) <= last_offset {
+                        break;
+                    }
+                    let write_size = write_size_at(index)? as u64;
+                    if write_size > MAX_DEBUG_RELOCATION_WRITE_SIZE {
+                        return Ok(None);
+                    }
+                    let write_end = offset
+                        .checked_add(write_size)
+                        .context("Debug relocation write range overflow")?;
+                    if write_end > output_len as u64 {
+                        return Ok(None);
+                    }
+                    max_write_end = max_write_end.max(write_end);
+                }
+
+                Ok(Some(DebugRelocationShardSummary {
+                    relocations: start..end,
+                    first_offset,
+                    last_offset,
+                    max_write_end,
+                }))
+            },
+        )
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let Some(summaries) = summaries.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+
+    for pair in summaries.windows(2) {
+        if pair[0].last_offset > pair[1].first_offset
+            || pair[0].max_write_end > pair[1].first_offset
+        {
+            return Ok(None);
+        }
+    }
+
+    let mut ranges = Vec::with_capacity(summaries.len());
+    for (index, summary) in summaries.iter().enumerate() {
+        let output_start = if index == 0 {
+            0
+        } else {
+            summary.first_offset as usize
+        };
+        let output_end = summaries
+            .get(index + 1)
+            .map_or(output_len, |next| next.first_offset as usize);
+        if output_start > output_end || output_end > output_len {
+            return Ok(None);
+        }
+        ranges.push(DebugRelocationShardRange {
+            relocations: summary.relocations.clone(),
+            output: output_start..output_end,
+        });
+    }
+    Ok(Some(ranges))
+}
+
 fn apply_debug_rela_relocations<'data, A: Arch<Platform = Elf>>(
     object: &ObjectLayout<'data, Elf>,
     out: &mut [u8],
@@ -2851,7 +2997,7 @@ fn apply_debug_rela_relocations<'data, A: Arch<Platform = Elf>>(
 
     let shard_count =
         rayon::current_num_threads().min(relocations.len().div_ceil(PARALLEL_DEBUG_RELOCATION_MIN));
-    let Some(ranges) = debug_relocation_shard_ranges(
+    let Some(ranges) = debug_relocation_shard_ranges_parallel(
         relocations.len(),
         out.len(),
         shard_count,
@@ -2936,6 +3082,7 @@ fn apply_debug_relocations_impl<
         previous,
         ..Default::default()
     };
+    let mut symbol_cache = DebugSymbolCache::default();
 
     for rel in relocations {
         relocation_count += 1;
@@ -2952,6 +3099,7 @@ fn apply_debug_relocations_impl<
             tombstone_value,
             out,
             &relocation_cache,
+            &mut symbol_cache,
         )
         .with_context(|| {
             format!(
@@ -2985,6 +3133,39 @@ mod debug_relocation_shard_tests {
     use super::*;
 
     #[test]
+    fn caches_only_consecutive_debug_symbol_resolutions() {
+        let resolve_count = std::cell::Cell::new(0);
+        let mut cache = DebugSymbolCache::default();
+        let resolve = |symbol_index: object::SymbolIndex| {
+            resolve_count.set(resolve_count.get() + 1);
+            Ok(DebugSymbolResolution {
+                symbol_index,
+                section_index: Some(object::SectionIndex(symbol_index.0 + 1)),
+                resolution: None,
+            })
+        };
+
+        let first = cache
+            .get_or_insert_with(object::SymbolIndex(7), || resolve(object::SymbolIndex(7)))
+            .unwrap();
+        let repeated = cache
+            .get_or_insert_with(object::SymbolIndex(7), || resolve(object::SymbolIndex(7)))
+            .unwrap();
+        let different = cache
+            .get_or_insert_with(object::SymbolIndex(8), || resolve(object::SymbolIndex(8)))
+            .unwrap();
+        let returned = cache
+            .get_or_insert_with(object::SymbolIndex(7), || resolve(object::SymbolIndex(7)))
+            .unwrap();
+
+        assert_eq!(first.symbol_index, repeated.symbol_index);
+        assert_eq!(first.section_index, repeated.section_index);
+        assert_ne!(first.symbol_index, different.symbol_index);
+        assert_eq!(first.symbol_index, returned.symbol_index);
+        assert_eq!(resolve_count.get(), 3);
+    }
+
+    #[test]
     fn splits_sorted_non_overlapping_relocations_into_disjoint_output_ranges() {
         let offsets = [0, 4, 8, 12, 16, 20, 24, 28];
         let ranges =
@@ -3013,6 +3194,112 @@ mod debug_relocation_shard_tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parallel_preflight_matches_serial_ranges() {
+        let offsets = [0, 4, 8, 12, 16, 20, 24, 28];
+        let serial =
+            debug_relocation_shard_ranges(offsets.len(), 32, 4, |index| offsets[index], |_| Ok(4))
+                .unwrap();
+        let parallel = debug_relocation_shard_ranges_parallel(
+            offsets.len(),
+            32,
+            4,
+            |index| offsets[index],
+            |_| Ok(4),
+        )
+        .unwrap();
+
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn parallel_preflight_rejects_unsafe_ranges() {
+        for offsets in [[0, 8, 4, 12], [0, 4, 12, 8]] {
+            assert!(
+                debug_relocation_shard_ranges_parallel(
+                    offsets.len(),
+                    16,
+                    2,
+                    |index| offsets[index],
+                    |_| Ok(4),
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+
+        let crossing_boundary = [0, 4, 8, 12];
+        assert!(
+            debug_relocation_shard_ranges_parallel(
+                crossing_boundary.len(),
+                16,
+                2,
+                |index| crossing_boundary[index],
+                |index| Ok(if index == 1 { 8 } else { 4 }),
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        for offsets in [[0, 4, 12, 20], [0, 4, 8, 14]] {
+            assert!(
+                debug_relocation_shard_ranges_parallel(
+                    offsets.len(),
+                    16,
+                    2,
+                    |index| offsets[index],
+                    |_| Ok(4),
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_preflight_propagates_tail_write_size_errors_in_input_order() {
+        let offsets = [0, 4, 8, 12];
+        let error = debug_relocation_shard_ranges_parallel(
+            offsets.len(),
+            16,
+            2,
+            |index| offsets[index],
+            |index| {
+                if index == 1 || index == 3 {
+                    return Err(crate::error::Error::with_message(format!(
+                        "relocation {index} failed"
+                    )));
+                }
+                Ok(4)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "relocation 1 failed");
+    }
+
+    #[test]
+    fn parallel_preflight_only_decodes_tail_relocation_sizes() {
+        let offsets = (0..32).map(|index| index * 4).collect::<Vec<_>>();
+        let size_queries = std::sync::atomic::AtomicUsize::new(0);
+
+        let ranges = debug_relocation_shard_ranges_parallel(
+            offsets.len(),
+            128,
+            4,
+            |index| offsets[index],
+            |_| {
+                size_queries.fetch_add(1, Relaxed);
+                Ok(4)
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(size_queries.load(Relaxed), 12);
     }
 
     #[test]
@@ -4149,39 +4436,53 @@ fn apply_debug_relocation<'data, A: Arch<Platform = Elf>, R: Relocation<Platform
     section_tombstone_value: u64,
     out: &mut [u8],
     relocation_cache: &RelocationCache<R>,
+    symbol_cache: &mut DebugSymbolCache,
 ) -> Result<()> {
     let symbol_index = rel.symbol().context("Unsupported absolute relocation")?;
-    let sym = object_layout.object.symbol(symbol_index)?;
-    let section_index = object_layout.object.symbol_section(sym, symbol_index)?;
+
+    // Rust debug sections commonly contain long runs of relocations against the same symbol.
+    // Keep the last lookup local to each parallel shard so those runs avoid repeating symbol-table,
+    // section, and merged-resolution work while retaining constant memory usage.
+    let symbol = symbol_cache.get_or_insert_with(symbol_index, || {
+        let sym = object_layout.object.symbol(symbol_index)?;
+        let section_index = object_layout.object.symbol_section(sym, symbol_index)?;
+        let resolution = layout
+            .merged_symbol_resolution(object_layout.symbol_id_range.input_to_id(symbol_index))
+            .or_else(|| {
+                section_index.and_then(|section_index| {
+                    let section_address =
+                        object_layout.section_resolutions[section_index.0].address()?;
+                    // Include the symbol's offset within the section (adjusted for any relaxation
+                    // deltas). This is necessary on architectures like RISC-V and LoongArch64 where
+                    // debug info references local symbols (e.g. .LFB0, .LFE0) whose value is their
+                    // offset within the section, rather than section symbols where the offset is
+                    // encoded in the relocation addend.
+                    let output_offset = opt_input_to_output(
+                        object_layout.section_relax_deltas.get(section_index.0),
+                        crate::platform::Symbol::value(sym),
+                    );
+
+                    Some(Resolution {
+                        raw_value: section_address + output_offset,
+                        dynamic_symbol_index: None,
+                        flags: ValueFlags::empty(),
+                        format_specific: Default::default(),
+                    })
+                })
+            });
+        Ok(DebugSymbolResolution {
+            symbol_index,
+            section_index,
+            resolution,
+        })
+    })?;
+    let section_index = symbol.section_index;
 
     let addend = rel.addend();
     let r_type = rel.raw_type();
     let rel_info = A::relocation_from_raw(r_type)?;
 
-    let resolution = layout
-        .merged_symbol_resolution(object_layout.symbol_id_range.input_to_id(symbol_index))
-        .or_else(|| {
-            section_index.and_then(|section_index| {
-                let section_address =
-                    object_layout.section_resolutions[section_index.0].address()?;
-                // Include the symbol's offset within the section (adjusted for any relaxation
-                // deltas). This is necessary on architectures like RISC-V and LoongArch64 where
-                // debug info references local symbols (e.g. .LFB0, .LFE0) whose value is their
-                // offset within the section, rather than section symbols where the offset is
-                // encoded in the relocation addend.
-                let output_offset = opt_input_to_output(
-                    object_layout.section_relax_deltas.get(section_index.0),
-                    crate::platform::Symbol::value(sym),
-                );
-
-                Some(Resolution {
-                    raw_value: section_address + output_offset,
-                    dynamic_symbol_index: None,
-                    flags: ValueFlags::empty(),
-                    format_specific: Default::default(),
-                })
-            })
-        });
+    let resolution = symbol.resolution;
 
     let value = if let Some(resolution) = resolution {
         match rel_info.kind {
