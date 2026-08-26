@@ -3,7 +3,7 @@
 # docker build --progress=plain -t reld-dev-alpine . -f docker/alpine.Dockerfile
 # docker run -it reld-dev-alpine
 
-FROM rust:1.94-alpine AS chef
+FROM rust:1.95.0-alpine AS chef
 RUN wget -qO- https://github.com/LukeMathWalker/cargo-chef/releases/download/v0.1.70/cargo-chef-x86_64-unknown-linux-musl.tar.gz | tar -xzf- && \
     mv cargo-chef /usr/local/bin
 RUN rustup toolchain install nightly && \

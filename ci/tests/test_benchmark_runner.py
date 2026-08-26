@@ -393,6 +393,20 @@ def test_compiled_policy_is_target_calibrated_for_significant_final_links():
     assert "256 * 1024 * 1024" in source
 
 
+def test_benchmark_platform_routes_are_exhaustive():
+    source = (Path(__file__).parents[2] / "crates" / "reld-testkit" / "src" / "bin" / "reld-bench.rs").read_text(
+        encoding="utf-8"
+    )
+
+    # Rust 1.95's cfg_select! emits a compile error when no arm matches. Keep the
+    # three supported host routes explicit rather than treating every other target as Linux.
+    assert source.count("cfg_select! {") >= 2
+    assert source.count('target_os = "windows"') >= 2
+    assert source.count('target_os = "macos"') >= 2
+    assert source.count('target_os = "linux"') >= 2
+    assert "_ =>" not in source
+
+
 def test_startup_probe_is_target_correct(tmp_path: Path):
     linker = Linker("reference", tmp_path / "linker")
 

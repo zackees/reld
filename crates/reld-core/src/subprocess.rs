@@ -8,7 +8,7 @@ use libc::pid_t;
 use std::ffi::c_int;
 use std::ffi::c_void;
 
-/// Runs the linker, in a subprocess if possible, prints any errors, then exits.
+/// Runs the linker in a subprocess if possible.
 ///
 /// This is done by forking a sub-process which runs the linker and waits for communication back
 /// from the sub-process (via a pipe) when the main link task is done (the output file has been
@@ -20,15 +20,21 @@ use std::ffi::c_void;
 /// # Safety
 /// Must not be called once threads have been spawned. Calling this function from main is generally
 /// the best way to ensure this.
-pub unsafe fn run_in_subprocess(args: Args) -> ! {
-    let exit_code = match subprocess_result(args) {
-        Ok(code) => code,
-        Err(error) => crate::error::report_error_and_exit(&error),
-    };
-    std::process::exit(exit_code);
+pub unsafe fn run_in_subprocess(args: Args) -> Result {
+    match subprocess_result(args)? {
+        SubprocessResult::Parent(0) => Ok(()),
+        SubprocessResult::Parent(exit_code) | SubprocessResult::Child(exit_code) => {
+            std::process::exit(exit_code);
+        }
+    }
 }
 
-fn subprocess_result(mut args: Args) -> Result<i32> {
+enum SubprocessResult {
+    Parent(i32),
+    Child(i32),
+}
+
+fn subprocess_result(mut args: Args) -> Result<SubprocessResult> {
     let mut fds: [c_int; 2] = [0; 2];
     // create the pipe used to communicate between the parent and child processes - exit on failure
     make_pipe(&mut fds).context("make_pipe")?;
@@ -49,18 +55,18 @@ fn subprocess_result(mut args: Args) -> Result<i32> {
                 inform_parent_done(&fds);
                 Ok(())
             })?;
-            Ok(0)
+            Ok(SubprocessResult::Child(0))
         }
         -1 => {
             // Fork failure in the parent - Fallback to running linker in this process
 
             crate::run(args)?;
-            Ok(0)
+            Ok(SubprocessResult::Parent(0))
         }
         pid => {
             // Fork success in the parent - wait for the child to "signal" us it's done
             let exit_status = wait_for_child_done(&fds, pid);
-            Ok(exit_status)
+            Ok(SubprocessResult::Parent(exit_status))
         }
     }
 }

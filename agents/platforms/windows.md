@@ -5,12 +5,16 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 ## Current architecture and references
 
+- Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
+  `stable`.
 - Windows links currently use reld's `lld-link` bridge; native PE/COFF code generation is future
   work.
 - The byte-identity reference for bridge-only changes is the same pinned `lld-link` backend invoked
   directly with the same effective arguments, inputs, environment, and deterministic options.
 - Pin the LLVM/Rust toolchain that supplies `lld-link`. `link.exe` is a compatibility reference,
   not a byte-identity reference, because it has different PE/COFF and PDB policies.
+- `x86_64-pc-windows-gnu` is compile-checked from Linux but is not yet a consumer-acceptance
+  route or advertised runtime platform; its GNU-dialect acceptance work remains tracked by #90.
 
 ## Required evidence
 
@@ -31,14 +35,25 @@ Every executable must run on a native Windows runner with exact exit status, std
 Test DLL loading or imported functionality when the change touches imports, exports, delay loading,
 TLS, or runtime metadata. Cross-compilation alone is not acceptance evidence.
 
+## Consumer acceptance
+
+The three-platform consumer job builds `reld-link.exe` through `setup-soldr`, then links the pinned
+Rust and C/C++ consumers through the release executable. Set `RELD_INVOCATION_LOG` for every build
+and require a successful JSONL record naming each expected final `.exe` and the `lld-link` bridge.
+This is the proof that `reld-link.exe` was actually hit; `PATH`, compiler configuration, or verbose
+command text alone is insufficient. Then run `xsv count`, the full pinned PCRE2 CTest suite, and the
+C++ name-mangling CTest natively.
+
 ## Where Windows policy lives
 
 - Bridge and routing implementation: `crates/reld/src/` and `crates/reld-core/src/`
 - Windows CI orchestration: `ci/windows_ci.py`
+- Consumer acceptance driver: `ci/consumer_acceptance.py`
 - Cross-platform mode validation: `ci/linker_modes.py`
 - Benchmark replay and execution oracle: `ci/benchmark_runner.py`
 - Platform workflows: `.github/workflows/ci.yml`, `.github/workflows/linker-modes.yml`, and
-  `.github/workflows/benchmark-stats.yml`
+  `.github/workflows/benchmark-stats.yml`; consumer acceptance runs in
+  `.github/workflows/linker-artifacts.yml`
 
 When native PE/COFF code generation lands, update this guide in the same change to name its pinned
 behavioral baseline and native structural/differential test suite.

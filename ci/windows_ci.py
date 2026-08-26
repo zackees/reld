@@ -233,8 +233,11 @@ def self_host() -> None:
     _run(_cargo("build", "-p", "reld", "--bin", "reld"), env=env)
     reld = _require_file(workspace / "target" / "debug" / "reld.exe", "reld.exe")
     output = _run([str(reld), "--version"])
-    if "Reld" not in output:
-        raise WindowsCiError("self-linked reld --version output missing 'Reld' marker")
+    # On COFF, the generic executable is a linker-driver front door: --version
+    # deliberately reaches the pinned lld-link bridge. Executing it successfully
+    # and observing that backend marker proves the self-linked PE executable works.
+    if "LLD" not in output:
+        raise WindowsCiError("self-linked reld --version output missing LLD bridge marker")
 
 
 COMMANDS = {

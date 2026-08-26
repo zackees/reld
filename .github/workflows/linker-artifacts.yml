@@ -13,6 +13,7 @@ jobs:
   build:
     name: Build / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -21,31 +22,50 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: reld-link-linux-x86_64
-            executable: reld-link
+            binary: reld
+            executable: reld
           - name: macos
             runner: macos-14
             target: aarch64-apple-darwin
             artifact: reld-link-macos-arm64
-            executable: reld-link
+            binary: reld
+            executable: reld
           - name: windows
             runner: windows-2022
             target: x86_64-pc-windows-msvc
             artifact: reld-link-windows-x86_64
+            binary: reld-link
             executable: reld-link.exe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
 
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
       - name: Setup Soldr target lifecycle
         id: setup
-        uses: zackees/setup-soldr@main
+        uses: zackees/setup-soldr@61dbee94deb0b7240a9a006a74ed04989a920303 # main
         with:
           version: 0.9.10
           cross-targets: ${{ matrix.target }}
           cache: false
           prebuild-deps: none
           linker: fast
+
+      - name: Configure MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          toolset: "14.44"
+
+      - name: Install Windows LLVM
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
+        with:
+          version: 18.1.8
 
       - name: Assert target contract
         shell: bash
@@ -54,7 +74,7 @@ jobs:
           CAPABILITIES: ${{ steps.setup.outputs.target-capabilities-json }}
         run: |
           set -euo pipefail
-          python -c 'import json, os; p=json.loads(os.environ["CAPABILITIES"]); assert p["canonicalTarget"] == os.environ["TARGET"]; assert "build" in p["supportedOperations"]'
+          uv run --no-project python -c 'import json, os; p=json.loads(os.environ["CAPABILITIES"]); assert p["canonicalTarget"] == os.environ["TARGET"]; assert "build" in p["supportedOperations"]'
 
       - name: Normalize MSVC compiler drivers
         if: runner.os == 'Windows'
@@ -63,7 +83,9 @@ jobs:
           set -euo pipefail
           echo 'CC_x86_64_pc_windows_msvc=' >> "$GITHUB_ENV"
           echo 'CXX_x86_64_pc_windows_msvc=' >> "$GITHUB_ENV"
-          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=link.exe' >> "$GITHUB_ENV"
+          msvc_link="${VCToolsInstallDir}bin/Hostx64/x64/link.exe"
+          test -x "$msvc_link"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvc_link" >> "$GITHUB_ENV"
           echo 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=' >> "$GITHUB_ENV"
 
       - name: Clear cross-target linker overrides for native host build
@@ -89,10 +111,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          soldr cargo build --locked --release --package reld --bin reld-link
+          soldr cargo build --locked --release --target "${{ matrix.target }}" --package reld --bin "${{ matrix.binary }}"
           mkdir -p package
-          built="$(find target -type f \( -name 'reld-link' -o -name 'reld-link.exe' \) -print -quit)"
-          test -n "$built"
+          built="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          test -f "$built"
           cp "$built" "package/${{ matrix.executable }}"
 
       - name: Smoke build artifact
@@ -100,9 +122,29 @@ jobs:
         run: |
           set -euo pipefail
           test -s "package/${{ matrix.executable }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "package/${{ matrix.executable }}"
+          fi
           "package/${{ matrix.executable }}" --version
 
-      - uses: actions/upload-artifact@v4
+      - name: Link and run pinned Rust, C, and C++ consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-project python -m ci.consumer_acceptance \
+            --platform "${{ matrix.name }}" \
+            --linker "package/${{ matrix.executable }}" \
+            --work-dir "${RUNNER_TEMP}/reld-consumer-acceptance"
+
+      - name: Upload linker invocation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: consumer-invocations-${{ matrix.name }}
+          path: ${{ runner.temp }}/reld-consumer-acceptance/*-invocations.jsonl
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: package/${{ matrix.executable }}
@@ -119,17 +161,17 @@ jobs:
           - name: linux
             runner: ubuntu-24.04
             artifact: reld-link-linux-x86_64
-            executable: reld-link
+            executable: reld
           - name: macos
             runner: macos-14
             artifact: reld-link-macos-arm64
-            executable: reld-link
+            executable: reld
           - name: windows
             runner: windows-2022
             artifact: reld-link-windows-x86_64
             executable: reld-link.exe
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ matrix.artifact }}
           path: package
