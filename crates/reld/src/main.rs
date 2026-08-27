@@ -1,3 +1,4 @@
+#[cfg(any(feature = "mimalloc-pprof-profile", feature = "mimalloc-pprof-dhat"))]
 #[global_allocator]
 static MIMALLOC: mimalloc_pprof::MiMalloc = mimalloc_pprof::MiMalloc;
 

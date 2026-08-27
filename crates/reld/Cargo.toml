@@ -40,9 +40,9 @@ path = "tests/acceptance_policy_tests.rs"
 [dependencies]
 reld-core = { path = "../reld-core", version = "0.0.0", default-features = false }
 
-# Exact crates.io dependency approved in #97. Default features are disabled so
-# authoritative timing builds compile sampled pprof hooks out.
-mimalloc-pprof.workspace = true
+# Exact crates.io dependency approved in #97. Production builds use the system
+# allocator; this dependency is compiled only for explicit diagnostic modes.
+mimalloc-pprof = { workspace = true, optional = true }
 
 [dev-dependencies]
 ar.workspace = true
@@ -79,11 +79,11 @@ default = ["fork", "plugins", "zstd"]
 
 # Compile pprof hooks in; collection remains opt-in through mimalloc's API or
 # documented environment controls.
-mimalloc-pprof-profile = ["mimalloc-pprof/pprof"]
+mimalloc-pprof-profile = ["dep:mimalloc-pprof", "mimalloc-pprof/pprof"]
 
-# Exact DHAT profiling is provided internally by mimalloc-pprof, so enabling it
-# never replaces the process global allocator.
-mimalloc-pprof-dhat = []
+# Exact DHAT profiling is provided internally by the same mimalloc-pprof
+# allocator, avoiding a second global allocator.
+mimalloc-pprof-dhat = ["dep:mimalloc-pprof"]
 
 fork = ["reld-core/fork"]
 

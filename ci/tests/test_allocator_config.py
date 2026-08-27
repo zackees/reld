@@ -13,14 +13,23 @@ def test_allocator_uses_exact_registry_release_without_vendor_state() -> None:
     assert "mimalloc-pprof" not in (REPO_ROOT / ".gitmodules").read_text(encoding="utf-8")
 
 
-def test_reld_has_one_allocator_and_internal_dhat_modes() -> None:
+def test_reld_defaults_to_system_allocator_and_keeps_one_diagnostic_allocator() -> None:
     manifest = tomllib.loads((REPO_ROOT / "crates" / "reld" / "Cargo.toml").read_text(encoding="utf-8"))
     assert "dhat" not in manifest["dependencies"]
-    assert manifest["features"]["mimalloc-pprof-profile"] == ["mimalloc-pprof/pprof"]
-    assert manifest["features"]["mimalloc-pprof-dhat"] == []
+    assert manifest["dependencies"]["mimalloc-pprof"] == {"workspace": True, "optional": True}
+    assert manifest["features"]["mimalloc-pprof-profile"] == [
+        "dep:mimalloc-pprof",
+        "mimalloc-pprof/pprof",
+    ]
+    assert manifest["features"]["mimalloc-pprof-dhat"] == ["dep:mimalloc-pprof"]
+    assert not set(manifest["features"]["default"]) & {
+        "mimalloc-pprof-profile",
+        "mimalloc-pprof-dhat",
+    }
 
     source = (REPO_ROOT / "crates" / "reld" / "src" / "main.rs").read_text(encoding="utf-8")
     assert source.count("#[global_allocator]") == 1
+    assert '#[cfg(any(feature = "mimalloc-pprof-profile", feature = "mimalloc-pprof-dhat"))]' in source
     assert "mimalloc_pprof::MiMalloc" in source
     assert "dhat::Alloc" not in source
     assert "mimalloc_pprof::dhat::start()" in source
