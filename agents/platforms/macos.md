@@ -7,6 +7,8 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 - Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
   `stable`.
+- Shared CI runs `python3 ci/check_dependencies.py` before platform builds; an approved dependency
+  change must update its baseline in the same reviewed change.
 - macOS links currently use reld's `ld64.lld` bridge; native Mach-O code generation is future work.
 - The byte-identity reference for bridge-only changes is the same pinned `ld64.lld` backend invoked
   directly with the same effective arguments, inputs, environment, and deterministic options.
