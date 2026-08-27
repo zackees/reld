@@ -1,0 +1,81 @@
+name: Allocator benchmark evidence
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/allocator-benchmark.yml"
+      - "ci/allocator_benchmark.py"
+      - "ci/allocator_benchmark.sh"
+      - "ci/allocator_profile_runner.py"
+      - "ci/allocator_profiles.sh"
+      - "ci/allocator_source_cleanup.py"
+      - "ci/benchmark_runner.py"
+      - "ci/tests/test_allocator_benchmark.py"
+      - "ci/tests/test_benchmark_runner.py"
+      - "docker/bosn.Dockerfile"
+
+permissions:
+  contents: read
+
+jobs:
+  allocator-linux:
+    runs-on: ubuntu-24.04
+    container:
+      image: rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install native benchmark tools
+        run: |
+          apt-get update
+          apt-get install --yes clang=1:14.0-55.7~deb12u1 time=1.9-0.2
+          test "$(clang --version | head -1)" = "Debian clang version 14.0.6"
+
+      - name: Generate and verify exact candidate archive
+        run: |
+          mkdir -p allocator-evidence
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git archive --format=tar --output=/tmp/reld-e0868677.tar e08686773514edf0b30a88e5950a6071d3caf373
+          git archive --format=tar --output=/tmp/reld-e2d6be5a.tar e2d6be5ae31350862c562d24da01e2147cd5c125
+          test "$(git rev-parse 'e08686773514edf0b30a88e5950a6071d3caf373^{tree}')" = 7162acc8005911d79aa85397a20a6744d27a09b8
+          test "$(git rev-parse 'e2d6be5ae31350862c562d24da01e2147cd5c125^{tree}')" = 24bb072b12b3e2e49dfe8e729195f51bc5f8e93d
+          sha256sum /tmp/reld-e0868677.tar /tmp/reld-e2d6be5a.tar | tee allocator-evidence/source-archives.sha256
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+
+      - name: Run correctness-gated allocator benchmark
+        run: bash ci/allocator_benchmark.sh
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+          RELD_ALLOCATOR_BENCHMARK_OUTPUT: allocator-evidence/timing.json
+          RELD_ALLOCATOR_SOURCE_ARCHIVE: /tmp/reld-e0868677.tar
+          RELD_ALLOCATOR_BASELINE_ARCHIVE: /tmp/reld-e2d6be5a.tar
+          RELD_PINNED_CARGO_BIN: /usr/local/cargo/bin
+          RELD_PINNED_RUSTUP_HOME: /usr/local/rustup
+
+      - name: Collect diagnostic allocator profiles
+        run: bash ci/allocator_profiles.sh
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+          RELD_ALLOCATOR_PROFILE_OUTPUT: allocator-evidence/profiles.json
+          RELD_ALLOCATOR_SOURCE_ARCHIVE: /tmp/reld-e0868677.tar
+          RELD_PINNED_CARGO_BIN: /usr/local/cargo/bin
+          RELD_PINNED_RUSTUP_HOME: /usr/local/rustup
+
+      - name: Upload raw evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: allocator-evidence-${{ github.sha }}
+          path: |
+            allocator-evidence/
+            target/allocator-benchmark/replay/capture.log
+            target/allocator-benchmark/candidate-feature-tree.txt
+            target/allocator-profiles/evidence/
+          if-no-files-found: warn
+          retention-days: 30

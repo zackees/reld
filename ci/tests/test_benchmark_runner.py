@@ -90,6 +90,24 @@ def test_linux_capture_uses_clang_without_gccs_synthetic_lto_plugin():
     assert "plugin" not in " ".join(command)
 
 
+def test_capture_timeout_is_reported_as_benchmark_failure(tmp_path: Path, monkeypatch):
+    def time_out(*args, **kwargs):
+        del args, kwargs
+        raise runner_module.subprocess.TimeoutExpired(["cargo"], timeout=12)
+
+    monkeypatch.setattr(runner_module.subprocess, "run", time_out)
+    with pytest.raises(BenchmarkError, match="no-LTO compilation/capture exceeded 12s"):
+        runner_module.capture_final_link(
+            CONFIGURATIONS[0],
+            cargo="cargo",
+            manifest=tmp_path / "Cargo.toml",
+            target_dir=tmp_path / "target",
+            environment={},
+            log=StringIO(),
+            timeout_seconds=12,
+        )
+
+
 def test_each_configuration_is_replayed_then_released_before_the_next_capture(tmp_path: Path, monkeypatch):
     events: list[str] = []
     linker = Linker("wild", tmp_path / "wild")
@@ -394,9 +412,7 @@ def test_compiled_policy_is_target_calibrated_for_significant_final_links():
 
 
 def test_benchmark_platform_routes_are_exhaustive():
-    source = (Path(__file__).parents[2] / "crates" / "reld-testkit" / "src" / "bin" / "reld-bench.rs").read_text(
-        encoding="utf-8"
-    )
+    source = (Path(__file__).parents[2] / "crates" / "reld-testkit" / "src" / "bin" / "reld-bench.rs").read_text(encoding="utf-8")
 
     # Rust 1.95's cfg_select! emits a compile error when no arm matches. Keep the
     # three supported host routes explicit rather than treating every other target as Linux.
@@ -600,11 +616,7 @@ def test_windows_round_robin_does_not_reuse_locked_trial_output(tmp_path: Path, 
     def fake_run(command, *, cwd, environment):
         del cwd, environment
         response_file = Path(command[1][1:])
-        output_line = next(
-            line.strip('"')
-            for line in response_file.read_text(encoding="utf-8").splitlines()
-            if line.strip('"').upper().startswith("/OUT:")
-        )
+        output_line = next(line.strip('"') for line in response_file.read_text(encoding="utf-8").splitlines() if line.strip('"').upper().startswith("/OUT:"))
         output = Path(output_line[5:])
         if output.exists():
             return runner_module.subprocess.CompletedProcess(

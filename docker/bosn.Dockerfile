@@ -12,6 +12,7 @@ RUN apt-get update \
         lld \
         mold \
         python3 \
+        time \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /reld
