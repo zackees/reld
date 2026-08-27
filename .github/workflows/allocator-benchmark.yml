@@ -39,6 +39,7 @@ jobs:
       - name: Generate and verify exact candidate archive
         run: |
           mkdir -p allocator-evidence
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git archive --format=tar --output=/tmp/reld-e0868677.tar e08686773514edf0b30a88e5950a6071d3caf373
           git archive --format=tar --output=/tmp/reld-e2d6be5a.tar e2d6be5ae31350862c562d24da01e2147cd5c125
           test "$(git rev-parse 'e08686773514edf0b30a88e5950a6071d3caf373^{tree}')" = 7162acc8005911d79aa85397a20a6744d27a09b8
