@@ -2,6 +2,19 @@ name: Allocator benchmark evidence
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/allocator-benchmark.yml"
+      - "ci/allocator_benchmark.py"
+      - "ci/allocator_benchmark.sh"
+      - "ci/allocator_profile_runner.py"
+      - "ci/allocator_profiles.sh"
+      - "ci/allocator_source_cleanup.py"
+      - "ci/benchmark_runner.py"
+      - "ci/tests/test_allocator_benchmark.py"
+      - "ci/tests/test_benchmark_runner.py"
+      - "docker/bosn.Dockerfile"
 
 permissions:
   contents: read
