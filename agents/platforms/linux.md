@@ -7,12 +7,23 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 - Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
   `stable`.
+- Shared CI runs `python3 ci/check_dependencies.py` before platform builds; an approved dependency
+  change must update its baseline in the same reviewed change.
 - Fast non-LTO links use `reld`'s native ELF engine inherited from `wild`.
 - LTO and other unsupported native capabilities route to the bundled `ld.lld` bridge.
 - For inherited native behavior, the artifact reference is the exact pinned `wild` fork commit from
   `DESIGN.md`, or a pinned pre-change `reld` revision when validating a later optimization.
 - `bfd`, `lld`, and `mold` are useful compatibility or performance comparators, but they are not
   byte-identity references because each linker has its own ELF layout policy.
+- The Linux `reld` executable always uses the exact crates.io `mimalloc-pprof`
+  allocator pinned in the workspace manifest and lockfile. Its default configuration
+  compiles sampled-profiler hooks out (`MI_PPROF=0`) and leaves internal exact DHAT
+  inactive. Use `--features mimalloc-pprof-profile` only for sampled profiling and
+  `--features mimalloc-pprof-dhat` only for an exact diagnostic run. Neither profile
+  mode replaces the process allocator. The system allocator reference is the pinned
+  pre-change baseline, not a supported reld feature.
+  See [`../../docs/MIMALLOC-PPROF.md`](../../docs/MIMALLOC-PPROF.md) for
+  provenance and updates.
 
 ## Required evidence
 
@@ -36,6 +47,20 @@ for the policy delta.
 Every produced executable must also run natively with exact exit status, stdout, and stderr. Keep
 the randomized `reld-difftest` execution comparison as a supplemental oracle; it does not replace
 artifact comparison.
+
+For allocator changes, build and replay the same captured ELF link in the default,
+sampled-profiling, and exact-DHAT configurations. First establish two-run self-determinism for each
+configuration, then compare the default artifact with the pinned pre-change system-allocator
+baseline as raw bytes; if a difference appears, preserve it and apply the §3.1 structural and
+native-execution requirements before accepting it. Profiling is diagnostic only and must not be
+used for a performance claim without the same evidence. Authoritative timing requires the default
+hook-free build plus proof that sampled pprof and exact DHAT are runtime-off. Profile-collection
+runs are diagnostic only and must never be timing evidence.
+Set `RELD_SYSTEM_BASELINE` to the pinned pre-change executable and run
+`bash ci/allocator_equivalence.sh` inside the Bosn Linux stack for the focused two-run raw-byte
+identity and native-execution proof across the pinned system baseline, default, sampled-pprof, and
+exact-DHAT builds. The script clears all supported profiler activation/dump environment controls
+before invoking every linker.
 
 ## Consumer acceptance
 

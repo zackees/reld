@@ -1,13 +1,50 @@
-#[cfg(feature = "mimalloc")]
 #[global_allocator]
-static MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static MIMALLOC: mimalloc_pprof::MiMalloc = mimalloc_pprof::MiMalloc;
 
-#[cfg(feature = "dhat")]
-#[global_allocator]
-static ALLOC: dhat::Alloc = dhat::Alloc;
+#[cfg(feature = "mimalloc-pprof-dhat")]
+struct DhatGuard;
+
+#[cfg(feature = "mimalloc-pprof-dhat")]
+impl DhatGuard {
+    fn start() -> Self {
+        if !mimalloc_pprof::dhat::is_enabled() {
+            assert!(
+                mimalloc_pprof::dhat::start(),
+                "failed to start mimalloc DHAT profiling"
+            );
+        }
+        Self
+    }
+}
+
+#[cfg(feature = "mimalloc-pprof-dhat")]
+impl Drop for DhatGuard {
+    fn drop(&mut self) {
+        mimalloc_pprof::dhat::stop();
+        let output = std::env::var_os("RELD_DHAT_OUTPUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("dhat-heap.json"));
+        if let Err(error) = mimalloc_pprof::dhat::dump_file(&output) {
+            eprintln!(
+                "reld: failed to write DHAT profile {}: {error}",
+                output.display()
+            );
+        }
+    }
+}
 
 fn main() {
-    if let Err(error) = run() {
+    #[cfg(feature = "mimalloc-pprof-dhat")]
+    let dhat = DhatGuard::start();
+
+    let result = run();
+
+    // `report_error_and_exit` terminates the process without running destructors.
+    // Finish the exact profile first so failed links remain diagnosable.
+    #[cfg(feature = "mimalloc-pprof-dhat")]
+    drop(dhat);
+
+    if let Err(error) = result {
         reld_core::error::report_error_and_exit(&error)
     }
 }
@@ -16,9 +53,6 @@ fn main() {
 const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 
 fn run() -> reld_core::error::Result {
-    #[cfg(feature = "dhat")]
-    let _profiler = dhat::Profiler::new_heap();
-
     reld_core::init_timing()?;
 
     let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();

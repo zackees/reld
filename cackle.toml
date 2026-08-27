@@ -171,6 +171,10 @@ allow_unsafe = true
 allow_unsafe = true
 from.build.allow_apis = ["fs", "process"]
 
+[pkg.mimalloc-pprof]
+allow_unsafe = true
+build.allow_apis = ["fs", "process"]
+
 [pkg.anstyle]
 allow_unsafe = true
 
