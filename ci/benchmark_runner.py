@@ -385,6 +385,7 @@ def capture_final_link(
     environment: dict[str, str],
     log: TextIO,
     linker: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> LinkCommand:
     command = cargo_capture_command(
         cargo=cargo,
@@ -394,16 +395,20 @@ def capture_final_link(
         linker=linker,
     )
     print(f"capturing {configuration.label}: {' '.join(command)}", file=log, flush=True)
-    completed = subprocess.run(
-        command,
-        cwd=manifest.parent,
-        env=environment,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=manifest.parent,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise BenchmarkError(f"{configuration.label} compilation/capture exceeded {timeout_seconds:.0f}s") from error
     if completed.returncode:
         raise BenchmarkError(f"{configuration.label} compilation/capture failed:\n{completed.stderr}")
     try:
@@ -462,7 +467,7 @@ def _run_link(command: list[str], *, cwd: Path, environment: dict[str, str]) -> 
     )
 
 
-def _run_executable(output: Path, *, cwd: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_executable(output: Path, *, cwd: Path, environment: dict[str, str], timeout_seconds: float | None = None) -> subprocess.CompletedProcess[str]:
     if not output.is_file() or output.stat().st_size == 0:
         raise BenchmarkError(f"linked output is missing or empty: {output}")
     return subprocess.run(
@@ -474,12 +479,22 @@ def _run_executable(output: Path, *, cwd: Path, environment: dict[str, str]) -> 
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=timeout_seconds,
     )
 
 
-def capture_executable_oracle(output: Path, *, cwd: Path, environment: dict[str, str]) -> ExecutableOracle:
+def capture_executable_oracle(
+    output: Path,
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float | None = None,
+) -> ExecutableOracle:
     """Capture exact behavior from Cargo's target-native reference executable."""
-    completed = _run_executable(output, cwd=cwd, environment=environment)
+    try:
+        completed = _run_executable(output, cwd=cwd, environment=environment, timeout_seconds=timeout_seconds)
+    except subprocess.TimeoutExpired as error:
+        raise BenchmarkError(f"captured reference exceeded {timeout_seconds:.0f}s: {output}") from error
     if completed.returncode or not completed.stdout.startswith("OK "):
         raise BenchmarkError(f"captured reference failed its OK oracle ({completed.returncode}):\n{completed.stdout}{completed.stderr}")
     return ExecutableOracle(stdout=completed.stdout, stderr=completed.stderr)
@@ -843,8 +858,7 @@ def run_benchmark(
             environment=environment,
         )
         print(
-            f"captured executable oracle for {configuration.label}: "
-            f"stdout={oracle.stdout.strip()!r}, stderr_bytes={len(oracle.stderr.encode('utf-8'))}",
+            f"captured executable oracle for {configuration.label}: stdout={oracle.stdout.strip()!r}, stderr_bytes={len(oracle.stderr.encode('utf-8'))}",
             file=log,
             flush=True,
         )

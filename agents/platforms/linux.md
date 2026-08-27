@@ -62,6 +62,18 @@ identity and native-execution proof across the pinned system baseline, default, 
 exact-DHAT builds. The script clears all supported profiler activation/dump environment controls
 before invoking every linker.
 
+The authoritative allocator decision uses `bash ci/allocator_benchmark.sh` at revision `e0868677`.
+It verifies and archives the exact allocator-change Git tree at `e0868677` and the exact pinned
+pre-change system-allocator tree at `e2d6be5a` (no worktree). The intervening linker-relevant diff
+is allocator selection in the manifests and `main`; linker implementation source is unchanged.
+It builds both release binaries with the pinned lockfiles/toolchain, rejects profiler
+environment contamination and sampled-pprof symbols, and then benchmarks the three frozen replay
+profiles. Each mode first links twice for raw identity and exact native-output validation. Timing
+uses two excluded warmups and at least ten rotating/interleaved samples per cell, recording wall
+and CPU time, peak RSS, dispersion, bootstrap confidence intervals, raw samples, order, binary and
+artifact hashes, plus machine/toolchain provenance. The resulting JSON is evidence for #93; pprof
+and DHAT collection must be performed separately and must never be added to its timing cells.
+
 ## Consumer acceptance
 
 The three-platform consumer job builds the host-named `reld` ELF driver through `setup-soldr`, then
