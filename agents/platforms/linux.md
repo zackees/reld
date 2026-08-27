@@ -15,13 +15,13 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
   `DESIGN.md`, or a pinned pre-change `reld` revision when validating a later optimization.
 - `bfd`, `lld`, and `mold` are useful compatibility or performance comparators, but they are not
   byte-identity references because each linker has its own ELF layout policy.
-- The Linux `reld` executable always uses the exact crates.io `mimalloc-pprof`
-  allocator pinned in the workspace manifest and lockfile. Its default configuration
-  compiles sampled-profiler hooks out (`MI_PPROF=0`) and leaves internal exact DHAT
-  inactive. Use `--features mimalloc-pprof-profile` only for sampled profiling and
-  `--features mimalloc-pprof-dhat` only for an exact diagnostic run. Neither profile
-  mode replaces the process allocator. The system allocator reference is the pinned
-  pre-change baseline, not a supported reld feature.
+- The default Linux `reld` executable uses Rust's system allocator. The exact crates.io
+  `mimalloc-pprof` release pinned in the workspace manifest and lockfile is optional and
+  compiled only by explicit diagnostic features. Use `--features mimalloc-pprof-profile`
+  for sampled profiling or `--features mimalloc-pprof-dhat` for an exact diagnostic run.
+  Both modes select the same mimalloc global allocator; internal DHAT never installs a
+  second allocator. The default was restored after the #93 evidence found no demonstrated
+  wall-time improvement and an inconclusive CPU non-regression interval.
   See [`../../docs/MIMALLOC-PPROF.md`](../../docs/MIMALLOC-PPROF.md) for
   provenance and updates.
 

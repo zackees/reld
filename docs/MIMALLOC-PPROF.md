@@ -7,19 +7,21 @@ in #97 under the dependency policy tracked by #88.
 
 ## Configurations
 
-- Default Linux build: `mimalloc-pprof` is the sole global allocator and sampled
-  profiler hooks are compiled out (`MI_PPROF=0`). Internal exact DHAT is inactive.
+- Default Linux build: Rust's system allocator. The optional `mimalloc-pprof`
+  dependency and its profiling hooks are not compiled into this configuration.
 - Sampled diagnostic build: `--features mimalloc-pprof-profile` compiles pprof hooks
-  in; collection remains explicitly runtime-controlled.
+  in and selects mimalloc as the sole global allocator; collection remains explicitly
+  runtime-controlled.
 - Exact diagnostic build: `--features mimalloc-pprof-dhat` uses mimalloc-pprof's
   internal DHAT collector and writes `dhat-heap.json` (override with
-  `RELD_DHAT_OUTPUT`). It does not replace the global allocator.
-- There is no supported system-allocator configuration. The system allocator is
-  retained only as the pinned pre-change baseline for artifact comparison.
+  `RELD_DHAT_OUTPUT`). It uses that same mimalloc global allocator and never installs
+  a second allocator.
 
-Authoritative timing uses only the default hook-free build and must prove sampled
-pprof and exact DHAT are runtime-off. Sampled and exact profile-collection runs are
-diagnostic evidence, never timing evidence.
+The #93 allocator benchmark measured 0.000% aggregate wall improvement with a paired
+bootstrap 95% confidence interval of -1.610% to +0.385%. Its CPU interval was also
+inconclusive, so the #97 decision gate returned `keep_allocator=false` and restored
+the system allocator as the production default. Sampled and exact profile-collection
+runs remain diagnostic evidence, never production timing evidence.
 
 ## Updating
 
