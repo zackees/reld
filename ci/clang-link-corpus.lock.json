@@ -2,7 +2,7 @@
   "archive": {
     "bytes": 73413916,
     "sha256": "beb1f73eaab4257572ff60d04f08391b605990e4377c5d137fbf254db8ad5440",
-    "url": null
+    "url": "https://github.com/zackees/reld/releases/download/clang-link-corpus-llvmorg-22.1.8-v1/reld-clang-link-corpus-llvmorg-22.1.8-x86_64-linux-gnu.tar.zst"
   },
   "builder": {
     "build_argv": [
@@ -56,10 +56,10 @@
       "packages_full_sha256": "92cd621156f4cdaabe2cb93746efabb3919b1b6d6d4d82f3c770ef14954d773e",
       "post_strip_manifest_asset": "reld-clang-link-corpus-llvmorg-22.1.8-x86_64-linux-gnu.post-strip-manifest.json",
       "post_strip_manifest_sha256": "b9d3c2ccaad7fce5e3bfb87b0b03bfd5ee9cc13ddadb881391de06f9fbd04386",
-      "post_strip_manifest_url": "pending",
+      "post_strip_manifest_url": "https://github.com/zackees/reld/releases/download/clang-link-corpus-llvmorg-22.1.8-v1/reld-clang-link-corpus-llvmorg-22.1.8-x86_64-linux-gnu.post-strip-manifest.json",
       "pre_strip_manifest_asset": "reld-clang-link-corpus-llvmorg-22.1.8-x86_64-linux-gnu.pre-strip-manifest.json",
       "pre_strip_manifest_sha256": "d3e152030d709c41d313b00c463e46218c246f7a60a8e9587e6694e20e9039ae",
-      "pre_strip_manifest_url": "pending",
+      "pre_strip_manifest_url": "https://github.com/zackees/reld/releases/download/clang-link-corpus-llvmorg-22.1.8-v1/reld-clang-link-corpus-llvmorg-22.1.8-x86_64-linux-gnu.pre-strip-manifest.json",
       "python": "Python 3.11.2",
       "source_tree": "1e4fdb95266974a0cbca9ec4c6f740488322f238",
       "strip": "GNU strip (GNU Binutils for Debian) 2.40",
