@@ -308,6 +308,22 @@ fn test_merge_with_custom_sections() {
     assert_eq!(m1.num_parts(), output_sections.num_parts() + 2);
 }
 
+/// Custom output sections are discovered from input files and may be extremely numerous. Their
+/// presence must not grow the eagerly allocated prefix of a new part map.
+#[test]
+fn test_custom_sections_do_not_expand_dense_prefix() {
+    use crate::elf::Elf64;
+
+    let output_sections = OutputSections::<Elf64>::for_testing();
+    let part_map = output_sections.new_part_map::<u32>();
+
+    assert_eq!(
+        part_map.parts.len(),
+        crate::part_id::built_in_part_ids::<Elf64>().count(),
+        "custom sections must be stored lazily rather than extending the dense prefix"
+    );
+}
+
 /// output_order_map and `OutputSections::sections_and_segments_events` used to each independently
 /// define the output order. This test made sure that they were consistent. Now the former uses the
 /// latter, so this test is less important. It's kept for the time being anyway.
