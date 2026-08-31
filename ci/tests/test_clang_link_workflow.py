@@ -27,6 +27,8 @@ def test_clang_replay_pins_baseline_toolchain_and_lock() -> None:
     assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in text
     assert "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in text
     assert "python-version: \"3.12.11\"" in text
+    assert "zstd=1.5.4+dfsg2-5" in text
+    assert "SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt" in text
     assert "CORPUS_LOCK: ci/clang-link-corpus.lock.json" in text
     assert "validate-lock --lock \"$CORPUS_LOCK\"" in text
 

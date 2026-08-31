@@ -25,6 +25,7 @@ jobs:
       REPLAY_WORKDIR: target/clang-link-replay
       RUSTUP_TOOLCHAIN: 1.95.0
       CARGO_INCREMENTAL: "0"
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -34,6 +35,16 @@ jobs:
         with:
           version: "0.12.3"
           python-version: "3.12.11"
+
+      - name: Install pinned archive decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            zstd=1.5.4+dfsg2-5
+          rm -rf /var/lib/apt/lists/*
+          zstd --version
 
       - name: Validate immutable corpus lock
         run: >-
