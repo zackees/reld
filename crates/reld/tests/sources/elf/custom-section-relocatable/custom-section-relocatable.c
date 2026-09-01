@@ -1,6 +1,7 @@
 //#SkipArch: ppc64le
 //#Object:runtime.c
-//#Object:custom-section-relocatable-parts.c
+//#Relocatable:custom-section-relocatable-parts.c
+//#ExpectRunOutputEmpty:true
 //#ExpectSym:custom_alpha section=".reld.custom.alpha"
 //#ExpectSym:custom_beta section=".reld.custom.beta"
 //#ExpectSym:custom_section_sum section=".text"
