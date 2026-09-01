@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tarfile
+import time
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -78,6 +81,7 @@ def _renderer_report(tmp_path: Path) -> dict[str, object]:
         identity={"reld_identity": {"sha256": "a" * 64}, "comparators": {}},
         plan=competition.round_plan(samples=10, warmups=2, seed=103),
         provenance={"corpus_lock": {"sha256": "b" * 64}},
+        workload={"id": "llvmorg-22.1.8-clang-final-link"},
     )
 
 
@@ -185,7 +189,7 @@ def test_sample_validation_requires_whole_tree_metrics_and_identity_hash() -> No
     sample = {
         "contender": "candidate",
         "round": 0,
-        "position": 0,
+        "position": competition.CONTENDER_ORDER.index("candidate"),
         "order": list(competition.CONTENDER_ORDER),
         "wall_seconds": 0.1,
         "peak_rss_kib": 1.0,
@@ -201,6 +205,13 @@ def test_sample_validation_requires_whole_tree_metrics_and_identity_hash() -> No
     sample["metric_backend"] = {"wall_seconds": competition.WALL_CLOCK_BACKEND, "peak_rss_kib": "gnu-time-parent"}
     with pytest.raises(competition.CompetitionError, match="whole-tree"):
         competition.validate_sample(sample)
+    sample["metric_backend"] = {
+        "wall_seconds": competition.WALL_CLOCK_BACKEND,
+        "peak_rss_kib": competition.RSS_BACKEND,
+    }
+    sample["position"] = 0
+    with pytest.raises(competition.CompetitionError, match="position"):
+        competition.validate_sample(sample)
 
 
 def test_report_uses_the_renderer_canonical_contender_summary_and_comparison_schema(tmp_path: Path) -> None:
@@ -208,9 +219,10 @@ def test_report_uses_the_renderer_canonical_contender_summary_and_comparison_sch
 
     assert report["contender_order"] == list(competition.CONTENDER_ORDER)
     assert list(report["contenders"]) == list(competition.CONTENDER_ORDER)
-    assert set(report) >= {"contender_order", "contenders", "comparisons", "raw_samples", "identity", "provenance", "metric_scope"}
+    assert set(report) >= {"contender_order", "contenders", "comparisons", "raw_samples", "workload", "identity", "provenance", "metric_scope"}
+    assert report["workload"]["id"] == "llvmorg-22.1.8-clang-final-link"
     for label, contender in report["contenders"].items():
-        assert contender["label"] == label
+        assert contender["label"] == competition.CONTENDER_LABELS[label]
         assert set(contender) == {"label", "path", "sha256", "summaries"}
         for metric in ("wall_seconds", "peak_rss_kib"):
             summary = contender["summaries"][metric]
@@ -239,12 +251,101 @@ def test_write_evidence_creates_atomic_renderer_sidecars_with_jsonl_parity(tmp_p
     assert not list(report_path.parent.glob(".*.tmp"))
 
 
-def test_cgroup_launcher_joins_before_exec_without_a_popen_fork_hook() -> None:
-    command = ["/checked/linker", "--arg"]
-    launcher = competition.cgroup_launcher_command(Path("/sys/fs/cgroup/trial"), command)
+def test_cgroup_launcher_blocks_target_until_ready_measurement_release(tmp_path: Path) -> None:
+    cgroup = tmp_path / "trial"
+    cgroup.mkdir()
+    (cgroup / "cgroup.procs").touch()
+    marker = tmp_path / "target-started"
+    command = [
+        competition.sys.executable,
+        "-c",
+        "from pathlib import Path; import sys, time; Path(sys.argv[1]).write_text(str(time.perf_counter()))",
+        str(marker),
+    ]
+    launcher = competition.CgroupLauncher.start(cgroup, command, cwd=tmp_path, environment=dict(os.environ))
+    try:
+        assert (cgroup / "cgroup.procs").read_text().strip() == str(launcher.process.pid)
+        assert not marker.exists()
+        time.sleep(0.02)
+        assert not marker.exists()
+        measurement_started = time.perf_counter()
+        launcher.release()
+        stdout, stderr = launcher.process.communicate(timeout=3)
+    finally:
+        launcher.terminate()
+    assert launcher.process.returncode == 0
+    assert stdout == b""
+    assert stderr == b""
+    assert float(marker.read_text()) >= measurement_started
 
-    assert launcher[:3] == [competition.sys.executable, "-c", competition._CGROUP_LAUNCHER]
-    assert launcher[3] == "/sys/fs/cgroup/trial/cgroup.procs"
-    assert launcher[4:] == command
-    assert "open(sys.argv[1]" in competition._CGROUP_LAUNCHER
-    assert "os.execvpe" in competition._CGROUP_LAUNCHER
+
+def test_rss_self_test_rejects_missing_descendant_or_out_of_range_peak() -> None:
+    parent_pid, child_pid = "10", "11"
+    competition._validate_rss_probe(
+        parent_pid=parent_pid,
+        child_pid=child_pid,
+        observed_pids={parent_pid, child_pid},
+        peak_rss_kib=competition.RSS_SELF_TEST_LOWER_KIB,
+    )
+    with pytest.raises(competition.CompetitionError, match="both parent and child"):
+        competition._validate_rss_probe(
+            parent_pid=parent_pid,
+            child_pid=child_pid,
+            observed_pids={parent_pid},
+            peak_rss_kib=competition.RSS_SELF_TEST_LOWER_KIB,
+        )
+    with pytest.raises(competition.CompetitionError, match="allocation range"):
+        competition._validate_rss_probe(
+            parent_pid=parent_pid,
+            child_pid=child_pid,
+            observed_pids={parent_pid, child_pid},
+            peak_rss_kib=competition.RSS_SELF_TEST_UPPER_KIB + 1,
+        )
+
+
+def test_workload_from_checked_corpus_lock_is_explicit_for_renderer() -> None:
+    workload = competition.workload_from_corpus_lock(
+        {
+            "platform": "x86_64-unknown-linux-gnu",
+            "source": {
+                "tag": "llvmorg-22.1.8",
+                "repository": "https://github.com/llvm/llvm-project.git",
+                "peeled_commit": "a" * 40,
+            },
+            "archive": {"url": "https://example.invalid/corpus.tar.zst", "sha256": "b" * 64, "bytes": 42},
+        }
+    )
+    assert workload == {
+        "id": "llvmorg-22.1.8-clang-final-link",
+        "source_tag": "llvmorg-22.1.8",
+        "source_repository": "https://github.com/llvm/llvm-project.git",
+        "source_peeled_commit": "a" * 40,
+        "platform": "x86_64-unknown-linux-gnu",
+        "archive": {"url": "https://example.invalid/corpus.tar.zst", "sha256": "b" * 64, "bytes": 42},
+    }
+
+
+def test_replay_runs_rss_self_test_before_expensive_corpus_acquisition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(competition.sys, "platform", "linux")
+    monkeypatch.setattr(competition, "load_lock", lambda path: {})
+    monkeypatch.setattr(competition, "load_comparator_lock", lambda path: {})
+    calls: list[str] = []
+
+    def fail_closed(cgroup_root: Path, workdir: Path) -> dict[str, int]:
+        calls.append("self-test")
+        raise competition.CompetitionError("intentional self-test stop")
+
+    monkeypatch.setattr(competition, "validate_rss_measurement", fail_closed)
+    monkeypatch.setattr(competition, "acquire_archive", lambda **kwargs: pytest.fail("must not acquire corpus first"))
+    with pytest.raises(competition.CompetitionError, match="intentional self-test stop"):
+        competition.run_replay(
+            Namespace(
+                samples=10,
+                warmups=2,
+                corpus_lock=tmp_path / "corpus.lock",
+                comparator_lock=tmp_path / "comparators.lock",
+                workdir=tmp_path / "workdir",
+                cgroup_root=tmp_path / "cgroup",
+            )
+        )
+    assert calls == ["self-test"]

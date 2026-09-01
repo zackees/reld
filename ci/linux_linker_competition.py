@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import select
 import shutil
 import statistics
 import subprocess
@@ -40,17 +41,57 @@ from ci.clang_link_replay import (
 LOCK_SCHEMA_VERSION = 1
 EXTERNAL_CONTENDERS = ("bfd", "lld", "mold", "wild")
 CONTENDER_ORDER = (*EXTERNAL_CONTENDERS, "baseline", "candidate")
+CONTENDER_LABELS = {
+    "bfd": "GNU bfd",
+    "lld": "LLD",
+    "mold": "mold",
+    "wild": "Wild",
+    "baseline": "reld baseline",
+    "candidate": "reld candidate",
+}
 MIN_SAMPLES = 10
 MIN_WARMUPS = 2
 RSS_BACKEND = "cgroup-v2-proc-vmrss-sum"
 WALL_CLOCK_BACKEND = "time.perf_counter"
 BOOTSTRAP_ITERATIONS = 20_000
+LAUNCHER_READY_TIMEOUT_SECONDS = 30
+RSS_SELF_TEST_ALLOCATION_BYTES = 16 * 1024 * 1024
+RSS_SELF_TEST_SLEEP_SECONDS = 1.0
+RSS_SELF_TEST_LOWER_KIB = RSS_SELF_TEST_ALLOCATION_BYTES * 2 * 3 // (4 * 1024)
+RSS_SELF_TEST_UPPER_KIB = RSS_SELF_TEST_ALLOCATION_BYTES * 2 // 1024 + 96 * 1024
 _CGROUP_LAUNCHER = (
     "import os\n"
     "import sys\n"
     "with open(sys.argv[1], 'w', encoding='ascii') as cgroup_procs:\n"
     "    cgroup_procs.write(f'{os.getpid()}\\n')\n"
-    "os.execvpe(sys.argv[2], sys.argv[2:], os.environ)\n"
+    "os.write(int(sys.argv[2]), b'R')\n"
+    "os.close(int(sys.argv[2]))\n"
+    "if os.read(int(sys.argv[3]), 1) != b'G':\n"
+    "    raise SystemExit(125)\n"
+    "os.close(int(sys.argv[3]))\n"
+    "os.execvpe(sys.argv[4], sys.argv[4:], os.environ)\n"
+)
+_RSS_SELF_TEST_CHILD = (
+    "import sys\n"
+    "allocation = bytearray(int(sys.argv[1]))\n"
+    "for index in range(0, len(allocation), 4096):\n"
+    "    allocation[index] = 1\n"
+    "import time\n"
+    "time.sleep(float(sys.argv[2]))\n"
+)
+_RSS_SELF_TEST_PARENT = (
+    "from pathlib import Path\n"
+    "import os\n"
+    "import subprocess\n"
+    "import sys\n"
+    "import time\n"
+    "allocation = bytearray(int(sys.argv[1]))\n"
+    "for index in range(0, len(allocation), 4096):\n"
+    "    allocation[index] = 1\n"
+    "child = subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[1], sys.argv[2]])\n"
+    "Path(sys.argv[4]).write_text(f'{os.getpid()} {child.pid}\\n', encoding='ascii')\n"
+    "time.sleep(float(sys.argv[2]))\n"
+    "raise SystemExit(child.wait())\n"
 )
 
 
@@ -295,8 +336,11 @@ def validate_sample(sample: object) -> dict[str, Any]:
         raise CompetitionError("sample contender is invalid")
     if not isinstance(sample.get("round"), int) or not isinstance(sample.get("position"), int):
         raise CompetitionError("sample round and position are required integers")
-    if tuple(sample.get("order", ())) != CONTENDER_ORDER and set(sample.get("order", ())) != set(CONTENDER_ORDER):
-        raise CompetitionError("sample order must contain every fixed contender")
+    order = sample.get("order")
+    if not isinstance(order, list) or len(order) != len(CONTENDER_ORDER) or set(order) != set(CONTENDER_ORDER):
+        raise CompetitionError("sample order must be an exact fixed-contender permutation")
+    if sample["position"] < 0 or sample["position"] >= len(CONTENDER_ORDER) or order[sample["position"]] != sample["contender"]:
+        raise CompetitionError("sample position must select its contender from order")
     for field in ("wall_seconds", "peak_rss_kib", "cgroup_memory_peak_bytes", "cgroup_cpu_usec"):
         if not isinstance(sample.get(field), (int, float)) or sample[field] <= 0:
             raise CompetitionError(f"sample {field} must be positive")
@@ -325,11 +369,79 @@ def _read_vmrss_kib(pid: str) -> int:
     return 0
 
 
-def cgroup_launcher_command(cgroup: Path, command: list[str]) -> list[str]:
+def cgroup_launcher_command(cgroup: Path, ready_fd: int, go_fd: int, command: list[str]) -> list[str]:
     """Use a fresh stdlib process to attach itself before execing the measured linker."""
     if not command:
         raise CompetitionError("cannot launch an empty linker command")
-    return [sys.executable, "-c", _CGROUP_LAUNCHER, str(cgroup / "cgroup.procs"), *command]
+    return [sys.executable, "-c", _CGROUP_LAUNCHER, str(cgroup / "cgroup.procs"), str(ready_fd), str(go_fd), *command]
+
+
+def _close_fd(descriptor: int | None) -> None:
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+@dataclass
+class CgroupLauncher:
+    """A cgroup-attached process held before exec until measurement begins."""
+
+    process: subprocess.Popen[bytes]
+    go_fd: int | None
+
+    @classmethod
+    def start(cls, cgroup: Path, command: list[str], *, cwd: Path, environment: dict[str, str]) -> CgroupLauncher:
+        ready_read, ready_write = os.pipe()
+        go_read, go_write = os.pipe()
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            process = subprocess.Popen(
+                cgroup_launcher_command(cgroup, ready_write, go_read, command),
+                cwd=cwd,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(ready_write, go_read),
+            )
+        except OSError as error:
+            raise CompetitionError(f"unable to launch cgroup handshake process: {error}") from error
+        finally:
+            _close_fd(ready_write)
+            _close_fd(go_read)
+        try:
+            readable, _, _ = select.select([ready_read], [], [], LAUNCHER_READY_TIMEOUT_SECONDS)
+            ready = os.read(ready_read, 1) if readable else b""
+            if ready != b"R":
+                raise CompetitionError("cgroup launcher failed to become ready before the measurement timeout")
+        except BaseException:
+            _close_fd(go_write)
+            if process.poll() is None:
+                process.terminate()
+            process.communicate()
+            raise
+        finally:
+            _close_fd(ready_read)
+        return cls(process, go_write)
+
+    def release(self) -> None:
+        if self.go_fd is None:
+            raise CompetitionError("cgroup launcher was released more than once")
+        go_fd, self.go_fd = self.go_fd, None
+        try:
+            os.write(go_fd, b"G")
+        except OSError as error:
+            raise CompetitionError(f"unable to release ready cgroup launcher: {error}") from error
+        finally:
+            _close_fd(go_fd)
+
+    def terminate(self) -> None:
+        _close_fd(self.go_fd)
+        self.go_fd = None
+        if self.process.poll() is None:
+            self.process.terminate()
+        self.process.communicate()
 
 
 @dataclass
@@ -366,37 +478,104 @@ class TrialCgroup:
         def sample() -> None:
             nonlocal peak_rss, seen_pid
             while not stop.is_set():
-                pids = (self.path / "cgroup.procs").read_text(encoding="utf-8").split()
+                pids, summed_rss_kib = _summed_vmrss_kib(self.path)
                 if pids:
                     seen_pid = True
-                    peak_rss = max(peak_rss, sum(_read_vmrss_kib(pid) for pid in pids))
+                    peak_rss = max(peak_rss, summed_rss_kib)
                 time.sleep(0.002)
 
         cpu_before = _read_cpu_usec(self.path)
         monitor = threading.Thread(target=sample, daemon=True)
-        started = time.perf_counter()
+        launcher = CgroupLauncher.start(self.path, command, cwd=cwd, environment=environment)
         try:
-            process = subprocess.Popen(
-                cgroup_launcher_command(self.path, command),
-                cwd=cwd,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except OSError as error:
-            raise CompetitionError(f"unable to launch link command: {error}") from error
-        monitor.start()
-        stdout, stderr = process.communicate()
-        elapsed = time.perf_counter() - started
-        stop.set()
-        monitor.join()
+            monitor.start()
+            # The launcher is cgroup-attached and blocked at this point; do not charge Python
+            # startup or cgroup setup to the direct linker wall-clock transaction.
+            started = time.perf_counter()
+            launcher.release()
+            stdout, stderr = launcher.process.communicate()
+            elapsed = time.perf_counter() - started
+        except BaseException:
+            launcher.terminate()
+            raise
+        finally:
+            stop.set()
+            monitor.join()
         # One final sample catches a short process that ended before the monitor's first tick.
-        pids = (self.path / "cgroup.procs").read_text(encoding="utf-8").split()
-        peak_rss = max(peak_rss, sum(_read_vmrss_kib(pid) for pid in pids))
+        _pids, summed_rss_kib = _summed_vmrss_kib(self.path)
+        peak_rss = max(peak_rss, summed_rss_kib)
         if not seen_pid or peak_rss <= 0:
             raise CompetitionError("whole-tree RSS sampler observed no resident trial process")
-        completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        completed = subprocess.CompletedProcess(command, launcher.process.returncode, stdout, stderr)
         return completed, elapsed, float(peak_rss), int((self.path / "memory.peak").read_text(encoding="utf-8")), _read_cpu_usec(self.path) - cpu_before
+
+
+def _summed_vmrss_kib(cgroup: Path) -> tuple[set[str], int]:
+    pids = set((cgroup / "cgroup.procs").read_text(encoding="utf-8").split())
+    return pids, sum(_read_vmrss_kib(pid) for pid in pids)
+
+
+def _validate_rss_probe(*, parent_pid: str, child_pid: str, observed_pids: set[str], peak_rss_kib: int) -> None:
+    if not {parent_pid, child_pid}.issubset(observed_pids):
+        raise CompetitionError("RSS self-test did not observe both parent and child in the trial cgroup")
+    if not RSS_SELF_TEST_LOWER_KIB <= peak_rss_kib <= RSS_SELF_TEST_UPPER_KIB:
+        raise CompetitionError(
+            "RSS self-test summed VmRSS outside the validated allocation range "
+            f"[{RSS_SELF_TEST_LOWER_KIB}, {RSS_SELF_TEST_UPPER_KIB}] KiB: {peak_rss_kib} KiB"
+        )
+
+
+def validate_rss_measurement(cgroup_root: Path, workdir: Path) -> dict[str, int]:
+    """Fail closed unless the live cgroup sampler sees both known-allocation processes."""
+    pid_file = workdir / f"rss-self-test-{os.getpid()}-{time.time_ns()}.pids"
+    trial = TrialCgroup.create(cgroup_root, "rss-self-test")
+    launcher: CgroupLauncher | None = None
+    try:
+        command = [
+            sys.executable,
+            "-c",
+            _RSS_SELF_TEST_PARENT,
+            str(RSS_SELF_TEST_ALLOCATION_BYTES),
+            str(RSS_SELF_TEST_SLEEP_SECONDS),
+            _RSS_SELF_TEST_CHILD,
+            str(pid_file),
+        ]
+        launcher = CgroupLauncher.start(trial.path, command, cwd=workdir, environment=dict(os.environ))
+        launcher.release()
+        deadline = time.monotonic() + LAUNCHER_READY_TIMEOUT_SECONDS
+        while not pid_file.is_file() and launcher.process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.002)
+        if not pid_file.is_file():
+            stdout, stderr = launcher.process.communicate()
+            raise CompetitionError(f"RSS self-test did not publish parent/child PIDs: {stdout!r} {stderr!r}")
+        parent_pid, child_pid = pid_file.read_text(encoding="ascii").split()
+        observed_pids: set[str] = set()
+        peak_rss_kib = 0
+        while launcher.process.poll() is None:
+            pids, summed_rss_kib = _summed_vmrss_kib(trial.path)
+            observed_pids.update(pids)
+            peak_rss_kib = max(peak_rss_kib, summed_rss_kib)
+            time.sleep(0.002)
+        stdout, stderr = launcher.process.communicate()
+        if launcher.process.returncode != 0 or stdout or stderr:
+            raise CompetitionError(f"RSS self-test command failed: {stdout!r} {stderr!r}")
+        _validate_rss_probe(
+            parent_pid=parent_pid,
+            child_pid=child_pid,
+            observed_pids=observed_pids,
+            peak_rss_kib=peak_rss_kib,
+        )
+        return {
+            "allocation_bytes_per_process": RSS_SELF_TEST_ALLOCATION_BYTES,
+            "peak_rss_kib": peak_rss_kib,
+            "lower_bound_kib": RSS_SELF_TEST_LOWER_KIB,
+            "upper_bound_kib": RSS_SELF_TEST_UPPER_KIB,
+        }
+    finally:
+        if launcher is not None and launcher.process.poll() is None:
+            launcher.terminate()
+        pid_file.unlink(missing_ok=True)
+        trial.close()
 
 
 def _expand(value: str, corpus: Path, output: Path) -> str:
@@ -417,6 +596,21 @@ def _direct_command(lock: dict[str, Any], linker: Path, corpus: Path, output: Pa
     return [str(linker), *arguments], corpus / recipe.cwd, recipe.environment
 
 
+def workload_from_corpus_lock(lock: dict[str, Any]) -> dict[str, Any]:
+    """Expose checked corpus provenance directly instead of making a renderer infer it."""
+    source = lock["source"]
+    archive = lock["archive"]
+    tag = source["tag"]
+    return {
+        "id": f"{tag}-clang-final-link",
+        "source_tag": tag,
+        "source_repository": source["repository"],
+        "source_peeled_commit": source["peeled_commit"],
+        "platform": lock["platform"],
+        "archive": {"url": archive["url"], "sha256": archive["sha256"], "bytes": archive["bytes"]},
+    }
+
+
 def build_report(
     *,
     contenders: dict[str, Path],
@@ -424,6 +618,7 @@ def build_report(
     identity: dict[str, Any],
     plan: dict[str, Any],
     provenance: dict[str, Any],
+    workload: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the renderer-facing schema from validated, correctness-gated trial evidence."""
     if tuple(contenders) != CONTENDER_ORDER:
@@ -440,7 +635,7 @@ def build_report(
     for label in CONTENDER_ORDER:
         samples = samples_by_contender[label]
         contender_entries[label] = {
-            "label": label,
+            "label": CONTENDER_LABELS[label],
             "path": str(contenders[label]),
             "sha256": sha256_file(contenders[label]),
             "summaries": {
@@ -468,11 +663,12 @@ def build_report(
         "contenders": contender_entries,
         "comparisons": comparisons,
         "raw_samples": raw_samples,
+        "workload": workload,
         "identity": identity,
         "provenance": provenance,
         "metric_scope": {
             "wall_seconds": "direct linker transaction, default fork mode",
-            "peak_rss_kib": "maximum summed VmRSS of PIDs in unique cgroup-v2 trial",
+            "peak_rss_kib": "maximum summed VmRSS of PIDs in unique cgroup-v2 trial; validated by parent+child allocation preflight",
             "cgroup_memory_peak_bytes": "diagnostic; not labelled RSS",
             "cgroup_cpu_usec": "whole-tree cgroup-v2 CPU diagnostic",
         },
@@ -520,6 +716,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     comparator_lock = load_comparator_lock(args.comparator_lock)
     workdir = args.workdir.resolve()
     workdir.mkdir(parents=True, exist_ok=True)
+    rss_self_test = validate_rss_measurement(args.cgroup_root.resolve(), workdir)
     archive = acquire_archive(corpus_lock, archive_override=None, destination=workdir / "corpus.tar.zst")
     corpus = workdir / "corpus"
     extract_and_verify(corpus_lock, archive, corpus)
@@ -573,8 +770,10 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                 "removed_recipe_arguments": ["--no-fork"],
                 "metric_backends": {"wall_seconds": WALL_CLOCK_BACKEND, "peak_rss_kib": RSS_BACKEND},
                 "cgroup_root": str(args.cgroup_root.resolve()),
+                "rss_self_test": rss_self_test,
             },
         },
+        workload=workload_from_corpus_lock(corpus_lock),
     )
 
 
@@ -586,6 +785,9 @@ def main(argv: list[str] | None = None) -> int:
     provision = commands.add_parser("provision")
     provision.add_argument("--lock", type=Path, required=True)
     provision.add_argument("--output-dir", type=Path, required=True)
+    self_test = commands.add_parser("self-test")
+    self_test.add_argument("--cgroup-root", type=Path, required=True)
+    self_test.add_argument("--workdir", type=Path, required=True)
     replay = commands.add_parser("replay")
     replay.add_argument("--corpus-lock", type=Path, required=True)
     replay.add_argument("--comparator-lock", type=Path, required=True)
@@ -604,6 +806,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "provision":
             provision_comparators(load_comparator_lock(args.lock), args.output_dir)
+            return 0
+        if args.command == "self-test":
+            args.workdir.mkdir(parents=True, exist_ok=True)
+            print(json.dumps(validate_rss_measurement(args.cgroup_root.resolve(), args.workdir.resolve()), sort_keys=True))
             return 0
         report = run_replay(args)
         write_evidence(report, args.report)
