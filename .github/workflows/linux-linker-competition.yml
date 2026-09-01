@@ -163,7 +163,7 @@ jobs:
             --cgroup-root "$CGROUP_ROOT" \
             --workdir "$REPLAY_WORKDIR" \
             --report "$REPORT" \
-            --samples 10 --warmups 2
+            --samples 12 --warmups 2
 
       - name: Render paired wall-time and peak-RSS evidence
         shell: bash
@@ -199,6 +199,7 @@ jobs:
             competition-evidence/provenance.json
             competition-evidence/summary.md
             competition-evidence/render/*.html
+            competition-evidence/render/*.json
             competition-evidence/render/*.png
             competition-evidence/source-archives.sha256
             competition-evidence/reld-binaries.sha256

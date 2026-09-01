@@ -92,7 +92,8 @@ def test_competition_workflow_builds_non_git_relds_and_replays_exact_contract() 
     assert '--comparators-dir "$COMPARATORS_DIR"' in text
     assert '--workdir "$REPLAY_WORKDIR"' in text
     assert '--report "$REPORT"' in text
-    assert "--samples 10 --warmups 2" in text
+    assert "--samples 12 --warmups 2" in text
+    assert "--samples 10 --warmups 2" not in text
     assert "llvm-project" not in text
     assert "ninja" not in text
     assert "cmake" not in text
@@ -117,6 +118,7 @@ def test_competition_workflow_renders_and_uploads_same_run_evidence_without_hist
     assert "target/linux-linker-competition/identity-artifacts/" in text
     assert "target/linux-linker-competition/mismatch-artifacts/" not in text
     assert ".html" in text
+    assert "competition-evidence/render/*.json" in text
     assert ".png" in text
     assert "benchmark-stats" not in text
     assert "git push" not in text

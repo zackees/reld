@@ -128,7 +128,7 @@ python -m ci.linux_linker_competition replay \
   --comparator-lock ci/linux-linker-comparators.lock.json \
   --baseline <baseline-reld> --candidate <candidate-reld> \
   --comparators-dir <comparators-dir> --cgroup-root <delegated-cgroup-root> \
-  --workdir <workdir> --report <report.json> --samples 10 --warmups 2
+  --workdir <workdir> --report <report.json> --samples 12 --warmups 2
 ```
 
 The competition runner first enforces the four-run raw reld baseline/candidate identity gate and
@@ -136,6 +136,9 @@ the two-run self-determinism/native oracle gate for every external linker. It re
 product behavior, with wall time and peak *process-tree RSS* as independent co-primary metrics.
 `memory.peak` and CPU data are whole-tree diagnostics, never relabelled as RSS. Do not substitute
 parent-only `/usr/bin/time` or `getrusage` data: forked linkers make it materially wrong.
+Competitive replay uses exactly 12 measured rounds: two complete six-contender Williams blocks.
+The harness accepts only a sample count of at least 12 and divisible by six, preserving balanced
+pairwise ordering, contender position, and predecessor/successor carryover across the blocks.
 Wild is an external performance comparator only: the exact pre-change reld baseline is the
 artifact reference, and no Wild/reld artifact-equivalence claim is made because reld intentionally
 changed its build-ID/output-layout policy in PR #76.
