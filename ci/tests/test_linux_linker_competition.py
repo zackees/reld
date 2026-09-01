@@ -42,6 +42,45 @@ def _archive(path: Path, member: str, payload: bytes) -> bytes:
     return path.read_bytes()
 
 
+def _raw_sample(label: str, *, round_id: int, position: int) -> dict[str, object]:
+    return {
+        "contender": label,
+        "round": round_id,
+        "position": position,
+        "order": list(competition.CONTENDER_ORDER),
+        "wall_seconds": 1.0 + position / 10 + round_id / 100,
+        "peak_rss_kib": 100.0 + position + round_id,
+        "cgroup_memory_peak_bytes": 200 + position + round_id,
+        "cgroup_cpu_usec": 300 + position + round_id,
+        "metric_backend": {
+            "wall_seconds": competition.WALL_CLOCK_BACKEND,
+            "peak_rss_kib": competition.RSS_BACKEND,
+        },
+        "output_sha256": "a" * 64,
+    }
+
+
+def _renderer_report(tmp_path: Path) -> dict[str, object]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    contenders: dict[str, Path] = {}
+    for label in competition.CONTENDER_ORDER:
+        path = tmp_path / label
+        path.write_bytes(label.encode())
+        contenders[label] = path
+    raw_samples = [
+        _raw_sample(label, round_id=round_id, position=position)
+        for round_id in range(10)
+        for position, label in enumerate(competition.CONTENDER_ORDER)
+    ]
+    return competition.build_report(
+        contenders=contenders,
+        raw_samples=raw_samples,
+        identity={"reld_identity": {"sha256": "a" * 64}, "comparators": {}},
+        plan=competition.round_plan(samples=10, warmups=2, seed=103),
+        provenance={"corpus_lock": {"sha256": "b" * 64}},
+    )
+
+
 def test_comparator_lock_requires_all_fixed_contenders_and_immutable_fields() -> None:
     entries = {name: _entry() for name in competition.EXTERNAL_CONTENDERS}
     competition.validate_comparator_lock(_lock(entries))
@@ -152,10 +191,49 @@ def test_sample_validation_requires_whole_tree_metrics_and_identity_hash() -> No
         "peak_rss_kib": 1.0,
         "cgroup_memory_peak_bytes": 2,
         "cgroup_cpu_usec": 3,
-        "rss_backend": "cgroup-v2-proc-vmrss-sum",
+        "metric_backend": {
+            "wall_seconds": competition.WALL_CLOCK_BACKEND,
+            "peak_rss_kib": competition.RSS_BACKEND,
+        },
         "output_sha256": "a" * 64,
     }
     competition.validate_sample(sample)
-    sample["rss_backend"] = "gnu-time-parent"
+    sample["metric_backend"] = {"wall_seconds": competition.WALL_CLOCK_BACKEND, "peak_rss_kib": "gnu-time-parent"}
     with pytest.raises(competition.CompetitionError, match="whole-tree"):
         competition.validate_sample(sample)
+
+
+def test_report_uses_the_renderer_canonical_contender_summary_and_comparison_schema(tmp_path: Path) -> None:
+    report = _renderer_report(tmp_path)
+
+    assert report["contender_order"] == list(competition.CONTENDER_ORDER)
+    assert list(report["contenders"]) == list(competition.CONTENDER_ORDER)
+    assert set(report) >= {"contender_order", "contenders", "comparisons", "raw_samples", "identity", "provenance", "metric_scope"}
+    for label, contender in report["contenders"].items():
+        assert contender["label"] == label
+        assert set(contender) == {"label", "path", "sha256", "summaries"}
+        for metric in ("wall_seconds", "peak_rss_kib"):
+            summary = contender["summaries"][metric]
+            assert set(summary) == {"median", "median_absolute_deviation", "min", "max", "bootstrap_95_ci"}
+            lower, upper = summary["bootstrap_95_ci"]
+            assert lower <= summary["median"] <= upper
+            assert summary["min"] <= lower <= upper <= summary["max"]
+    assert [comparison["reference"] for comparison in report["comparisons"]] == [*competition.EXTERNAL_CONTENDERS, "baseline"]
+    for comparison in report["comparisons"]:
+        assert set(comparison) == {"reference", "candidate", "metrics"}
+        assert comparison["candidate"] == "candidate"
+        assert set(comparison["metrics"]) == {"wall_seconds", "peak_rss_kib"}
+    sample = report["raw_samples"][0]
+    assert set(sample) >= {"round", "position", "contender", "wall_seconds", "peak_rss_kib", "output_sha256", "metric_backend", "order", "cgroup_memory_peak_bytes", "cgroup_cpu_usec"}
+
+
+def test_write_evidence_creates_atomic_renderer_sidecars_with_jsonl_parity(tmp_path: Path) -> None:
+    report = _renderer_report(tmp_path / "binaries")
+    report_path = tmp_path / "evidence" / "report.json"
+    competition.write_evidence(report, report_path)
+
+    assert json.loads(report_path.read_text()) == report
+    raw_samples = [json.loads(line) for line in (report_path.parent / "raw-samples.jsonl").read_text().splitlines()]
+    assert raw_samples == report["raw_samples"]
+    assert json.loads((report_path.parent / "provenance.json").read_text()) == report["provenance"]
+    assert not list(report_path.parent.glob(".*.tmp"))

@@ -44,6 +44,7 @@ CONTENDER_ORDER = (*EXTERNAL_CONTENDERS, "baseline", "candidate")
 MIN_SAMPLES = 10
 MIN_WARMUPS = 2
 RSS_BACKEND = "cgroup-v2-proc-vmrss-sum"
+WALL_CLOCK_BACKEND = "time.perf_counter"
 BOOTSTRAP_ITERATIONS = 20_000
 
 
@@ -227,11 +228,32 @@ def round_plan(*, samples: int, warmups: int, seed: int) -> dict[str, Any]:
     return {"seed": seed, "warmups": [{"round": index, "order": _rotated(values, index)} for index in range(warmups)], "rounds": [{"round": index, "order": _rotated(values, warmups + index)} for index in range(samples)]}
 
 
-def _median_summary(values: list[float]) -> dict[str, float]:
+def _bootstrap_median_ci(values: list[float], *, seed: int) -> list[float]:
+    if not values:
+        raise CompetitionError("bootstrap requires non-empty samples")
+    rng = random.Random(seed)
+    medians = []
+    for _ in range(BOOTSTRAP_ITERATIONS):
+        medians.append(statistics.median(rng.choices(values, k=len(values))))
+    medians.sort()
+    return [medians[int(BOOTSTRAP_ITERATIONS * 0.025)], medians[min(BOOTSTRAP_ITERATIONS - 1, int(BOOTSTRAP_ITERATIONS * 0.975))]]
+
+
+def _median_summary(values: list[float], *, seed: int) -> dict[str, Any]:
     if not values:
         raise CompetitionError("cannot summarize empty measurements")
     median = statistics.median(values)
-    return {"median": median, "mad": statistics.median(abs(value - median) for value in values), "min": min(values), "max": max(values)}
+    return {
+        "median": median,
+        "median_absolute_deviation": statistics.median(abs(value - median) for value in values),
+        "min": min(values),
+        "max": max(values),
+        "bootstrap_95_ci": _bootstrap_median_ci(values, seed=seed),
+    }
+
+
+def _stable_seed(*parts: str) -> int:
+    return int.from_bytes(hashlib.sha256("\0".join(parts).encode("utf-8")).digest()[:8], "big")
 
 
 def _bootstrap_improvement(baseline: list[float], candidate: list[float], *, seed: int) -> list[float]:
@@ -271,7 +293,8 @@ def validate_sample(sample: object) -> dict[str, Any]:
     for field in ("wall_seconds", "peak_rss_kib", "cgroup_memory_peak_bytes", "cgroup_cpu_usec"):
         if not isinstance(sample.get(field), (int, float)) or sample[field] <= 0:
             raise CompetitionError(f"sample {field} must be positive")
-    if sample.get("rss_backend") != RSS_BACKEND:
+    backend = sample.get("metric_backend")
+    if not isinstance(backend, dict) or backend.get("wall_seconds") != WALL_CLOCK_BACKEND or backend.get("peak_rss_kib") != RSS_BACKEND:
         raise CompetitionError("sample must use validated whole-tree RSS backend")
     _require_sha256(sample.get("output_sha256"), "sample output_sha256")
     return sample
@@ -376,6 +399,100 @@ def _direct_command(lock: dict[str, Any], linker: Path, corpus: Path, output: Pa
     return [str(linker), *arguments], corpus / recipe.cwd, recipe.environment
 
 
+def build_report(
+    *,
+    contenders: dict[str, Path],
+    raw_samples: list[dict[str, Any]],
+    identity: dict[str, Any],
+    plan: dict[str, Any],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the renderer-facing schema from validated, correctness-gated trial evidence."""
+    if tuple(contenders) != CONTENDER_ORDER:
+        raise CompetitionError("contenders must use fixed competition order")
+    for sample in raw_samples:
+        validate_sample(sample)
+    samples_by_contender = {
+        label: [sample for sample in raw_samples if sample["contender"] == label]
+        for label in CONTENDER_ORDER
+    }
+    if any(not samples for samples in samples_by_contender.values()):
+        raise CompetitionError("every contender needs measured raw samples")
+    contender_entries: dict[str, dict[str, Any]] = {}
+    for label in CONTENDER_ORDER:
+        samples = samples_by_contender[label]
+        contender_entries[label] = {
+            "label": label,
+            "path": str(contenders[label]),
+            "sha256": sha256_file(contenders[label]),
+            "summaries": {
+                metric: _median_summary(
+                    [float(sample[metric]) for sample in samples],
+                    seed=_stable_seed("summary", label, metric),
+                )
+                for metric in ("wall_seconds", "peak_rss_kib")
+            },
+        }
+    candidate_samples = samples_by_contender["candidate"]
+    comparisons = [
+        {
+            "reference": label,
+            "candidate": "candidate",
+            "metrics": paired_comparison(
+                samples_by_contender[label], candidate_samples, seed=_stable_seed("comparison", label, "candidate")
+            ),
+        }
+        for label in (*EXTERNAL_CONTENDERS, "baseline")
+    ]
+    return {
+        "schema_version": 2,
+        "contender_order": list(CONTENDER_ORDER),
+        "contenders": contender_entries,
+        "comparisons": comparisons,
+        "raw_samples": raw_samples,
+        "identity": identity,
+        "provenance": provenance,
+        "metric_scope": {
+            "wall_seconds": "direct linker transaction, default fork mode",
+            "peak_rss_kib": "maximum summed VmRSS of PIDs in unique cgroup-v2 trial",
+            "cgroup_memory_peak_bytes": "diagnostic; not labelled RSS",
+            "cgroup_cpu_usec": "whole-tree cgroup-v2 CPU diagnostic",
+        },
+        "plan": plan,
+    }
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_evidence(report: dict[str, Any], report_path: Path) -> None:
+    """Write renderer report and uploaded evidence sidecars without partial JSON files."""
+    raw_samples = report.get("raw_samples")
+    provenance = report.get("provenance")
+    if not isinstance(raw_samples, list) or not isinstance(provenance, dict):
+        raise CompetitionError("report lacks raw_samples or provenance evidence")
+    _atomic_write(
+        report_path.with_name("raw-samples.jsonl"),
+        "".join(json.dumps(sample, sort_keys=True, separators=(",", ":")) + "\n" for sample in raw_samples),
+    )
+    _atomic_write(
+        report_path.with_name("provenance.json"),
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+    )
+    _atomic_write(report_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+
 def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     if sys.platform != "linux":
         raise CompetitionError("Linux competitive replay is Linux-only")
@@ -420,36 +537,27 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                     if actual_hash != expected_hashes[label] or not _native_oracle(output, corpus_lock, corpus, cwd, environment):
                         raise CompetitionError(f"{label} timed output failed identity/native oracle")
                     if phase == "sample":
-                        sample = {"contender": label, "round": row["round"], "position": position, "order": row["order"], "wall_seconds": wall, "peak_rss_kib": rss, "cgroup_memory_peak_bytes": memory_peak, "cgroup_cpu_usec": cpu, "rss_backend": RSS_BACKEND, "output_sha256": actual_hash}
+                        sample = {"contender": label, "round": row["round"], "position": position, "order": row["order"], "wall_seconds": wall, "peak_rss_kib": rss, "cgroup_memory_peak_bytes": memory_peak, "cgroup_cpu_usec": cpu, "metric_backend": {"wall_seconds": WALL_CLOCK_BACKEND, "peak_rss_kib": RSS_BACKEND}, "output_sha256": actual_hash}
                         validate_sample(sample)
                         samples.append(sample)
                 finally:
                     output.unlink(missing_ok=True)
                     trial.close()
-    summaries = {label: {metric: _median_summary([float(sample[metric]) for sample in samples if sample["contender"] == label]) for metric in ("wall_seconds", "peak_rss_kib")} for label in CONTENDER_ORDER}
-    candidate_samples = [sample for sample in samples if sample["contender"] == "candidate"]
-    comparisons = {label: paired_comparison([sample for sample in samples if sample["contender"] == label], candidate_samples, seed=103) for label in (*EXTERNAL_CONTENDERS, "baseline")}
-    return {
-        "schema_version": 1,
-        "contender_order": list(CONTENDER_ORDER),
-        "metric_scope": {
-            "wall_seconds": "direct linker transaction, default fork mode",
-            "peak_rss_kib": "maximum summed VmRSS of PIDs in unique cgroup-v2 trial",
-            "cgroup_memory_peak_bytes": "diagnostic; not labelled RSS",
-            "cgroup_cpu_usec": "whole-tree cgroup-v2 CPU diagnostic",
+    return build_report(
+        contenders=contenders,
+        raw_samples=samples,
+        identity=identity,
+        plan=plan,
+        provenance={
+            "corpus_lock": {"path": str(args.corpus_lock.resolve()), "sha256": sha256_file(args.corpus_lock)},
+            "comparator_lock": {"path": str(args.comparator_lock.resolve()), "sha256": sha256_file(args.comparator_lock)},
+            "execution": {
+                "removed_recipe_arguments": ["--no-fork"],
+                "metric_backends": {"wall_seconds": WALL_CLOCK_BACKEND, "peak_rss_kib": RSS_BACKEND},
+                "cgroup_root": str(args.cgroup_root.resolve()),
+            },
         },
-        "corpus_lock_sha256": sha256_file(args.corpus_lock),
-        "comparator_lock_sha256": sha256_file(args.comparator_lock),
-        "contenders": [
-            {"label": label, "path": str(contenders[label]), "sha256": sha256_file(contenders[label])}
-            for label in CONTENDER_ORDER
-        ],
-        "identity": identity,
-        "plan": plan,
-        "samples": samples,
-        "summaries": summaries,
-        "comparisons_candidate_vs": comparisons,
-    }
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -480,8 +588,7 @@ def main(argv: list[str] | None = None) -> int:
             provision_comparators(load_comparator_lock(args.lock), args.output_dir)
             return 0
         report = run_replay(args)
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        write_evidence(report, args.report)
         return 0
     except (CompetitionError, ReplayError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"linux linker competition failed: {error}\n")
