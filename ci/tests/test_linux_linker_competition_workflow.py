@@ -59,6 +59,10 @@ def test_competition_workflow_preflights_a_delegated_cgroup_v2_root() -> None:
     assert "+memory +cpu" in text
     assert "sudo chown" in text
     assert "--cgroup-root \"$CGROUP_ROOT\"" in text
+    self_test_at = text.index("ci.linux_linker_competition self-test")
+    lock_validation_at = text.index("ci.linux_linker_competition validate-lock")
+    assert self_test_at < lock_validation_at
+    assert "--workdir \"$REPLAY_WORKDIR\"" in text[self_test_at:lock_validation_at]
 
 
 def test_competition_workflow_builds_non_git_relds_and_replays_exact_contract() -> None:

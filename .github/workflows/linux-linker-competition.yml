@@ -89,6 +89,15 @@ jobs:
           test -w "$CGROUP_ROOT/cgroup.procs"
           test -w "$CGROUP_ROOT/cgroup.subtree_control"
 
+      - name: Self-test cgroup-v2 RSS collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPLAY_WORKDIR"
+          uv run --no-sync python -m ci.linux_linker_competition self-test \
+            --cgroup-root "$CGROUP_ROOT" \
+            --workdir "$REPLAY_WORKDIR"
+
       - name: Validate immutable corpus and comparator locks
         shell: bash
         run: |
