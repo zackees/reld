@@ -1,0 +1,227 @@
+name: Linux linker competition
+
+# Dedicated same-run Linux ELF evidence. This workflow neither publishes history nor redefines
+# the cross-platform trend chart: its report is the only source for competitive wall/RSS claims.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Full immutable 40-hex pre-change reld commit SHA
+        required: true
+        type: string
+
+concurrency:
+  group: linux-linker-competition-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  replay-linux:
+    # `pull_request.branches` filters the target branch, not the PR head. Keep evidence work
+    # restricted to explicit Linux performance branches while allowing a deliberate dispatch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.head_ref, 'perf/linux/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTUP_TOOLCHAIN: 1.95.0
+      CORPUS_LOCK: ci/clang-link-corpus.lock.json
+      COMPARATOR_LOCK: ci/linux-linker-comparators.lock.json
+      COMPARATORS_DIR: /tmp/reld-linker-comparators-${{ github.run_id }}-${{ github.run_attempt }}
+      CGROUP_ROOT: /sys/fs/cgroup/reld-linker-competition-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_DIR: competition-evidence
+      REPLAY_WORKDIR: target/linux-linker-competition
+      REPORT: competition-evidence/report.json
+      RENDER_DIR: competition-evidence/render
+      SUMMARY_OUTPUT: competition-evidence/summary.md
+      VENV_PYTHON: ${{ github.workspace }}/.venv/bin/python
+      REPLAY_PROVENANCE_ENV: GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS,RUNNER_ARCH,RUNNER_ENVIRONMENT,ImageOS,ImageVersion,BASELINE_SHA
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          python-version: "3.12.11"
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: 1.95.0
+
+      - name: Sync pinned Python tooling
+        shell: bash
+        run: uv sync --extra dev
+
+      - name: Resolve immutable baseline
+        shell: bash
+        env:
+          INPUT_BASELINE_SHA: ${{ inputs.baseline_sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            BASELINE_SHA="$PR_BASE_SHA"
+            test "$BASELINE_SHA" = "$PR_BASE_SHA"
+          else
+            BASELINE_SHA="$INPUT_BASELINE_SHA"
+          fi
+          [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git rev-parse --verify "$BASELINE_SHA^{commit}" >/dev/null
+          echo "BASELINE_SHA=$BASELINE_SHA" >> "$GITHUB_ENV"
+
+      - name: Preflight root-scoped cgroup-v2 hierarchy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -r /sys/fs/cgroup/cgroup.controllers
+          grep -qw memory /sys/fs/cgroup/cgroup.controllers
+          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          sudo sh -c 'printf "+memory +cpu\\n" > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo mkdir -p "$CGROUP_ROOT"
+          sudo sh -c "printf '+memory +cpu\\n' > '$CGROUP_ROOT/cgroup.subtree_control'"
+
+      - name: Self-test cgroup-v2 RSS collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPLAY_WORKDIR"
+          test -x "$VENV_PYTHON"
+          sudo --non-interactive "$VENV_PYTHON" -m ci.linux_linker_competition self-test \
+            --cgroup-root "$CGROUP_ROOT" \
+            --workdir "$REPLAY_WORKDIR"
+
+      - name: Validate immutable corpus and comparator locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m ci.clang_link_replay validate-lock --lock "$CORPUS_LOCK"
+          uv run --no-sync python -m ci.linux_linker_competition validate-lock --lock "$COMPARATOR_LOCK"
+
+      - name: Export baseline and candidate non-git source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reld-baseline" "$RUNNER_TEMP/reld-candidate" "$EVIDENCE_DIR"
+          rustc -Vv > "$EVIDENCE_DIR/rustc-version.txt"
+          cargo -V > "$EVIDENCE_DIR/cargo-version.txt"
+          git archive "$BASELINE_SHA" | tar -xf - -C "$RUNNER_TEMP/reld-baseline"
+          git archive HEAD | tar -xf - -C "$RUNNER_TEMP/reld-candidate"
+          test ! -e "$RUNNER_TEMP/reld-baseline/.git"
+          test ! -e "$RUNNER_TEMP/reld-candidate/.git"
+          git archive --format=tar --output="$EVIDENCE_DIR/baseline-source.tar" "$BASELINE_SHA"
+          git archive --format=tar --output="$EVIDENCE_DIR/candidate-source.tar" HEAD
+          sha256sum "$EVIDENCE_DIR/baseline-source.tar" "$EVIDENCE_DIR/candidate-source.tar" \
+            | tee "$EVIDENCE_DIR/source-archives.sha256"
+
+      - name: Build baseline and candidate with identical provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package reld --bin reld \
+            --manifest-path "$RUNNER_TEMP/reld-baseline/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/reld-baseline-target"
+          cargo build --locked --release --package reld --bin reld \
+            --manifest-path "$RUNNER_TEMP/reld-candidate/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/reld-candidate-target"
+          install -D "$RUNNER_TEMP/reld-baseline-target/release/reld" "$EVIDENCE_DIR/baseline-reld"
+          install -D "$RUNNER_TEMP/reld-candidate-target/release/reld" "$EVIDENCE_DIR/candidate-reld"
+          "$EVIDENCE_DIR/baseline-reld" --version > "$EVIDENCE_DIR/baseline-version.txt"
+          "$EVIDENCE_DIR/candidate-reld" --version > "$EVIDENCE_DIR/candidate-version.txt"
+          cmp "$EVIDENCE_DIR/baseline-version.txt" "$EVIDENCE_DIR/candidate-version.txt"
+          grep -F "non-git-build" "$EVIDENCE_DIR/baseline-version.txt"
+          sha256sum "$EVIDENCE_DIR/baseline-reld" "$EVIDENCE_DIR/candidate-reld" \
+            | tee "$EVIDENCE_DIR/reld-binaries.sha256"
+
+      - name: Provision pinned external comparators
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m ci.linux_linker_competition provision \
+            --lock "$COMPARATOR_LOCK" \
+            --output-dir "$COMPARATORS_DIR"
+
+      - name: Replay correctness-gated competitive links
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$VENV_PYTHON"
+          sudo --non-interactive --preserve-env="$REPLAY_PROVENANCE_ENV" \
+            "$VENV_PYTHON" -m ci.linux_linker_competition replay \
+            --corpus-lock "$CORPUS_LOCK" \
+            --comparator-lock "$COMPARATOR_LOCK" \
+            --baseline "$EVIDENCE_DIR/baseline-reld" \
+            --candidate "$EVIDENCE_DIR/candidate-reld" \
+            --comparators-dir "$COMPARATORS_DIR" \
+            --cgroup-root "$CGROUP_ROOT" \
+            --workdir "$REPLAY_WORKDIR" \
+            --report "$REPORT" \
+            --samples 12 --warmups 2
+
+      - name: Render paired wall-time and peak-RSS evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m ci.linux_linker_competition_render \
+            --report "$REPORT" \
+            --output-dir "$RENDER_DIR" \
+            --summary-output "$SUMMARY_OUTPUT"
+
+      - name: Publish generated job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$SUMMARY_OUTPUT" ]]; then
+            cat "$SUMMARY_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Linux linker competition did not produce a renderable report; inspect the evidence artifact." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report, raw samples, provenance, and paired graph
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-linker-competition-${{ github.sha }}
+          path: |
+            ci/clang-link-corpus.lock.json
+            ci/linux-linker-comparators.lock.json
+            competition-evidence/report.json
+            competition-evidence/raw-samples.jsonl
+            competition-evidence/provenance.json
+            competition-evidence/summary.md
+            competition-evidence/render/*.html
+            competition-evidence/render/*.json
+            competition-evidence/render/*.png
+            competition-evidence/source-archives.sha256
+            competition-evidence/reld-binaries.sha256
+            competition-evidence/baseline-version.txt
+            competition-evidence/candidate-version.txt
+            competition-evidence/rustc-version.txt
+            competition-evidence/cargo-version.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload retained mismatch artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-linker-competition-mismatch-${{ github.sha }}
+          path: target/linux-linker-competition/identity-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove delegated cgroup-v2 root
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rmdir "$CGROUP_ROOT"

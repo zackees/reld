@@ -51,6 +51,42 @@ fails the build, so coverage can never silently understate itself (see
 requires every published chart to name the source SHA and current generation time.*
 <!-- BENCHMARK:END -->
 
+## Linux linker competition: final-link time and peak RSS
+
+<p align="center">
+<a href="https://github.com/zackees/reld/releases/tag/linux-linker-competition-v1"><img alt="Linux ELF linker competition with wall link time in the first panel and peak process-tree RSS in the second panel" src="https://github.com/zackees/reld/releases/download/linux-linker-competition-v1/competition.png" width="100%"></a>
+</p>
+
+This is the competitive Linux measurement, separate from the cross-platform trend charts above.
+It links a frozen LLVM/Clang C++ corpus that was compiled in advance, so **compilation is excluded**
+and only the final linker invocation is timed. Bars are medians from 12 measured trials in two
+balanced six-linker Williams blocks after two warmups; whiskers are bootstrap 95% confidence
+intervals. Peak RSS is the maximum summed resident memory of the linker process tree, sampled in
+a fresh cgroup-v2 subtree for every trial.
+
+| Linker | Median link time | Median peak RSS |
+|---|---:|---:|
+| GNU bfd | 3.449 s | 894.984 MiB |
+| LLD | 0.402 s | 753.713 MiB |
+| mold | 0.275 s | 760.311 MiB |
+| Wild | 0.250 s | 529.805 MiB |
+| reld baseline | 0.241 s | 530.217 MiB |
+| **reld candidate** | **0.242 s** | **529.973 MiB** |
+
+On this workload, the paired 95% intervals show reld reducing link time and peak RSS versus GNU
+bfd (92.9–93.0% and 40.7–40.9%), LLD (39.4–41.4% and 29.6–29.8%), and mold (11.0–12.4% and
+30.1–30.5%). Against Wild, reld is 2.7–4.2% faster on wall time but statistically tied on RSS;
+against the exact pre-change reld baseline, both intervals cross zero. So this evidence supports
+clear two-metric wins over bfd, LLD, and mold, but **does not support claiming that reld is way
+better than Wild or that this candidate is a performance breakthrough over its baseline**.
+
+The [hosted run](https://github.com/zackees/reld/actions/runs/33465040361) passed output identity,
+external self-determinism, native execution, and live RSS-calibration gates. The permanent
+[evidence release](https://github.com/zackees/reld/releases/tag/linux-linker-competition-v1)
+includes the [structured report](https://github.com/zackees/reld/releases/download/linux-linker-competition-v1/report.json),
+[raw samples](https://github.com/zackees/reld/releases/download/linux-linker-competition-v1/raw-samples.jsonl),
+provenance, locks, and the sealed rendering manifest.
+
 ## What it is
 
 `reld` is a source fork of `wild` at commit
@@ -116,15 +152,16 @@ request, including plugin options found in response files. See [DESIGN.md](DESIG
 routing design and [`agents/docs/polylinker.md`](agents/docs/polylinker.md) for the contributor-
 facing summary.
 
-## The four claims
+## The four goals
 
 1. **Runs and targets everywhere** — Windows, Linux, macOS. Not "Linux plus ports." The
    polylinker framing extends this claim toward "and supports every requested link
    configuration," via routing — see above for the capability set shipped today.
 2. **Incremental** — a one-object change reflows the image instead of rebuilding it.
    Target: **warm relink in low single-digit milliseconds**, largely independent of binary size.
-3. **Faster than `wild` in every category** — cold link, warm full link, warm incremental,
-   peak RSS, *and* single-threaded. All five, or the claim fails. See
+3. **Goal: faster than `wild` in every category** — cold link, warm full link, warm incremental,
+   peak RSS, *and* single-threaded. All five, or the goal is not met. The current final-link
+   evidence above shows a wall-time win but an RSS tie, so this remains unfulfilled. See
    [DESIGN.md §2.3](DESIGN.md) for why single-threaded is on that list.
 4. **Benchmarks are auto-generated and published by CI** — same harness pattern as
    [`zccache`](https://github.com/zackees/zccache), on pinned competitor versions, with
