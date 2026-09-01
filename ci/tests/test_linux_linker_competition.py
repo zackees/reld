@@ -237,3 +237,14 @@ def test_write_evidence_creates_atomic_renderer_sidecars_with_jsonl_parity(tmp_p
     assert raw_samples == report["raw_samples"]
     assert json.loads((report_path.parent / "provenance.json").read_text()) == report["provenance"]
     assert not list(report_path.parent.glob(".*.tmp"))
+
+
+def test_cgroup_launcher_joins_before_exec_without_a_popen_fork_hook() -> None:
+    command = ["/checked/linker", "--arg"]
+    launcher = competition.cgroup_launcher_command(Path("/sys/fs/cgroup/trial"), command)
+
+    assert launcher[:3] == [competition.sys.executable, "-c", competition._CGROUP_LAUNCHER]
+    assert launcher[3] == "/sys/fs/cgroup/trial/cgroup.procs"
+    assert launcher[4:] == command
+    assert "open(sys.argv[1]" in competition._CGROUP_LAUNCHER
+    assert "os.execvpe" in competition._CGROUP_LAUNCHER

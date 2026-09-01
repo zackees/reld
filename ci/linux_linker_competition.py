@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import random
 import shutil
@@ -21,9 +20,10 @@ import tarfile
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ci.benchmark_assets import sha256_file
 from ci.clang_link_replay import (
@@ -37,7 +37,6 @@ from ci.clang_link_replay import (
     native_oracle,
 )
 
-
 LOCK_SCHEMA_VERSION = 1
 EXTERNAL_CONTENDERS = ("bfd", "lld", "mold", "wild")
 CONTENDER_ORDER = (*EXTERNAL_CONTENDERS, "baseline", "candidate")
@@ -46,6 +45,13 @@ MIN_WARMUPS = 2
 RSS_BACKEND = "cgroup-v2-proc-vmrss-sum"
 WALL_CLOCK_BACKEND = "time.perf_counter"
 BOOTSTRAP_ITERATIONS = 20_000
+_CGROUP_LAUNCHER = (
+    "import os\n"
+    "import sys\n"
+    "with open(sys.argv[1], 'w', encoding='ascii') as cgroup_procs:\n"
+    "    cgroup_procs.write(f'{os.getpid()}\\n')\n"
+    "os.execvpe(sys.argv[2], sys.argv[2:], os.environ)\n"
+)
 
 
 class CompetitionError(RuntimeError):
@@ -119,7 +125,8 @@ def _safe_extract(archive_path: Path, destination: Path) -> None:
                 target = (root / member.name).resolve()
                 if root != target and root not in target.parents:
                     raise CompetitionError(f"unsafe comparator archive member: {member.name}")
-            archive.extractall(destination, filter="data")  # noqa: S202: validated paths + data filter
+            # Member paths above and the tarfile data filter make extraction intentionally safe.
+            archive.extractall(destination, filter="data")
     except (tarfile.TarError, OSError) as error:
         raise CompetitionError(f"unable to extract comparator archive {archive_path}: {error}") from error
 
@@ -318,12 +325,19 @@ def _read_vmrss_kib(pid: str) -> int:
     return 0
 
 
+def cgroup_launcher_command(cgroup: Path, command: list[str]) -> list[str]:
+    """Use a fresh stdlib process to attach itself before execing the measured linker."""
+    if not command:
+        raise CompetitionError("cannot launch an empty linker command")
+    return [sys.executable, "-c", _CGROUP_LAUNCHER, str(cgroup / "cgroup.procs"), *command]
+
+
 @dataclass
 class TrialCgroup:
     path: Path
 
     @classmethod
-    def create(cls, root: Path, label: str) -> "TrialCgroup":
+    def create(cls, root: Path, label: str) -> TrialCgroup:
         if not root.is_dir() or not (root / "cgroup.controllers").is_file():
             raise CompetitionError("cgroup root is not a delegated cgroup-v2 directory")
         controllers = (root / "cgroup.controllers").read_text(encoding="utf-8").split()
@@ -360,11 +374,15 @@ class TrialCgroup:
 
         cpu_before = _read_cpu_usec(self.path)
         monitor = threading.Thread(target=sample, daemon=True)
-        def join_cgroup() -> None:
-            (self.path / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
         started = time.perf_counter()
         try:
-            process = subprocess.Popen(command, cwd=cwd, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=join_cgroup)
+            process = subprocess.Popen(
+                cgroup_launcher_command(self.path, command),
+                cwd=cwd,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         except OSError as error:
             raise CompetitionError(f"unable to launch link command: {error}") from error
         monitor.start()
