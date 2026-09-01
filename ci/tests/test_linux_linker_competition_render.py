@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from ci.linux_linker_competition_render import (
+    ARTIFACT_COMPARISON_DISCLAIMER,
     CONTENDER_LABELS,
     CONTENDER_ORDER,
     CompetitionRenderError,
@@ -40,6 +41,22 @@ def _workload() -> dict[str, object]:
             "url": "https://example.invalid/releases/llvmorg-22.1.8-corpus.tar.zst",
             "sha256": "b" * 64,
             "bytes": 73_413_916,
+        },
+    }
+
+
+def _artifact_comparison_policy() -> dict[str, object]:
+    return {
+        "artifact_reference": "baseline",
+        "baseline": {
+            "artifact_reference": True,
+            "role": "exact pre-change reld artifact reference",
+        },
+        "wild": {
+            "role": "external performance comparator only",
+            "artifact_reference": False,
+            "artifact_equivalence_claim": False,
+            "disclaimer": ARTIFACT_COMPARISON_DISCLAIMER,
         },
     }
 
@@ -86,6 +103,7 @@ def _report() -> dict[str, object]:
     return {
         "schema_version": 2,
         "workload": _workload(),
+        "artifact_comparison_policy": _artifact_comparison_policy(),
         "contender_order": list(CONTENDER_ORDER),
         "contenders": contenders,
         "comparisons": [
@@ -118,6 +136,7 @@ def _realistic_issue_103_report() -> dict[str, object]:
                 "corpus_lock_sha256": "b" * 64,
                 "baseline_source_sha": "c" * 40,
                 "candidate_source_sha": "d" * 40,
+                "artifact_comparison_policy": _artifact_comparison_policy(),
             },
             "identity": {"status": "passed", "first_differing_offset": None},
         }
@@ -169,6 +188,7 @@ def test_report_contract_is_fixed_and_accepts_complete_evidence():
         (lambda report: report["contenders"]["lld"]["summaries"].pop("peak_rss_kib"), "peak_rss_kib"),
         (lambda report: report.__setitem__("combined_score", 1.0), "combined score"),
         (lambda report: report["workload"].pop("archive"), "workload is missing"),
+        (lambda report: report["artifact_comparison_policy"]["wild"].__setitem__("artifact_equivalence_claim", True), "no-equivalence disclaimer"),
         (lambda report: report["contenders"]["mold"]["summaries"]["wall_seconds"].__setitem__("bootstrap_95_ci", [0.1]), "bootstrap_95_ci"),
         (lambda report: report["raw_samples"][0].__setitem__("metric_backend", "gnu-time-parent"), "metric_backend"),
         (lambda report: report["raw_samples"].pop(), "raw_samples"),
@@ -203,6 +223,8 @@ def test_render_surfaces_have_aligned_wall_and_rss_values(tmp_path: Path):
     assert "Wall link time (s)" in summary
     assert "Peak RSS (MiB)" in summary
     assert "No scalar combined score" in summary
+    assert ARTIFACT_COMPARISON_DISCLAIMER in html
+    assert ARTIFACT_COMPARISON_DISCLAIMER in summary
     assert json.loads(paths.json.read_text(encoding="utf-8"))["contender_order"] == list(CONTENDER_ORDER)
 
 
@@ -227,6 +249,9 @@ def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path:
     }
     assert copied["raw_samples"][0]["cgroup_memory_peak_bytes"] == 1_024 * 1_024
     assert copied["contenders"]["candidate"]["diagnostics"]["cpu_usage_usec"] == 1_000
+    assert copied["artifact_comparison_policy"] == report["provenance"]["artifact_comparison_policy"]
+    assert ARTIFACT_COMPARISON_DISCLAIMER in html
+    assert ARTIFACT_COMPARISON_DISCLAIMER in markdown
 
     # HTML, Markdown, and PNG metadata all use the same fixed order and absolute values/CIs.
     for contender in CONTENDER_ORDER:
@@ -301,6 +326,9 @@ def test_measurement_build_report_renders_without_schema_translation(tmp_path: P
         "wall_seconds": competition.WALL_CLOCK_BACKEND,
         "peak_rss_kib": competition.RSS_BACKEND,
     }
+    assert copied["artifact_comparison_policy"] == competition.artifact_comparison_policy()
+    assert ARTIFACT_COMPARISON_DISCLAIMER in html
+    assert ARTIFACT_COMPARISON_DISCLAIMER in markdown
     for contender in CONTENDER_ORDER:
         wall = report["contenders"][contender]["summaries"]["wall_seconds"]
         rss = report["contenders"][contender]["summaries"]["peak_rss_kib"]

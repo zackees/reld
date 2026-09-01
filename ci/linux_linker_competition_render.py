@@ -27,6 +27,11 @@ CONTENDER_LABELS = {
     "baseline": "reld baseline",
     "candidate": "reld candidate",
 }
+ARTIFACT_COMPARISON_DISCLAIMER = (
+    "Wild is an external performance comparator only. Exact pre-change reld baseline is the "
+    "artifact reference; no Wild/reld equivalence claim is made because reld intentionally "
+    "changed build-ID/output-layout policy in PR #76."
+)
 METRICS = ("wall_seconds", "peak_rss_kib")
 FORBIDDEN_SCORE_KEYS = frozenset({"combined_score", "performance_score", "weighted_score", "score"})
 COLORS = {
@@ -140,6 +145,37 @@ def _validate_workload(value: object) -> None:
         raise CompetitionRenderError("workload.archive.bytes must be a positive integer")
 
 
+def _validate_artifact_comparison_policy(value: object) -> None:
+    """Keep the artifact-equivalence reference distinct from performance comparators."""
+    policy = _mapping(value, "artifact_comparison_policy")
+    _require_exact_keys(policy, {"artifact_reference", "baseline", "wild"}, "artifact_comparison_policy")
+    if policy["artifact_reference"] != "baseline":
+        raise CompetitionRenderError("artifact_comparison_policy.artifact_reference must be baseline")
+    baseline = _mapping(policy["baseline"], "artifact_comparison_policy.baseline")
+    _require_exact_keys(baseline, {"artifact_reference", "role"}, "artifact_comparison_policy.baseline")
+    if baseline["artifact_reference"] is not True or baseline["role"] != "exact pre-change reld artifact reference":
+        raise CompetitionRenderError("artifact_comparison_policy.baseline must name the exact pre-change reld reference")
+    wild = _mapping(policy["wild"], "artifact_comparison_policy.wild")
+    _require_exact_keys(
+        wild,
+        {"role", "artifact_reference", "artifact_equivalence_claim", "disclaimer"},
+        "artifact_comparison_policy.wild",
+    )
+    if (
+        wild["role"] != "external performance comparator only"
+        or wild["artifact_reference"] is not False
+        or wild["artifact_equivalence_claim"] is not False
+        or wild["disclaimer"] != ARTIFACT_COMPARISON_DISCLAIMER
+    ):
+        raise CompetitionRenderError("artifact_comparison_policy.wild must retain the no-equivalence disclaimer")
+
+
+def _artifact_disclaimer(report: dict[str, Any]) -> str:
+    policy = _mapping(report["artifact_comparison_policy"], "artifact_comparison_policy")
+    wild = _mapping(policy["wild"], "artifact_comparison_policy.wild")
+    return str(wild["disclaimer"])
+
+
 def _validate_metric_backend(value: object, field: str) -> None:
     backend = _mapping(value, field)
     _require_exact_keys(backend, set(METRICS), field)
@@ -156,6 +192,7 @@ def validate_report(report: object) -> None:
     if report.get("schema_version") != SCHEMA_VERSION:
         raise CompetitionRenderError(f"schema_version must be {SCHEMA_VERSION}")
     _validate_workload(report.get("workload"))
+    _validate_artifact_comparison_policy(report.get("artifact_comparison_policy"))
 
     order = _list(report.get("contender_order"), "contender_order")
     if tuple(order) != CONTENDER_ORDER:
@@ -395,6 +432,7 @@ table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #30363d;padd
 </style></head><body>
 <h1>Linux ELF competitive linker evidence</h1>
 <p>Workload: <code>{html.escape(_workload_label(report))}</code>. Wall link time and peak process-tree RSS use independent zero-based scales. No scalar combined score is produced.</p>
+<aside><strong>Artifact comparison policy:</strong> {html.escape(_artifact_disclaimer(report))}</aside>
 <figure aria-label=\"Competitive linker measurements\"><img src=\"competition.png\" alt=\"Aligned panels for wall link time in seconds and peak process-tree RSS in MiB, in the same fixed contender order.\"><figcaption>Bars show medians; whiskers and labels show per-contender 95% confidence intervals.</figcaption></figure>
 <h2>Accessible data table</h2>
 <table><thead><tr><th>Linker</th><th>Wall link time (seconds)</th><th>Wall 95% CI</th><th>Peak process-tree RSS (MiB)</th><th>RSS 95% CI</th></tr></thead>
@@ -420,6 +458,10 @@ def render_summary(report: dict[str, Any]) -> str:
         "### Linux ELF competitive linker evidence",
         "",
         f"Workload: `{_workload_label(report)}`. Wall time and peak RSS are co-primary; No scalar combined score.",
+        "",
+        "#### Artifact comparison policy",
+        "",
+        _artifact_disclaimer(report),
         "",
         "| Linker | Wall link time (s) | Wall 95% CI | Peak RSS (MiB) | RSS 95% CI |",
         "|:--|--:|:--|--:|:--|",
