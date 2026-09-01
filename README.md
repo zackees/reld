@@ -54,37 +54,40 @@ requires every published chart to name the source SHA and current generation tim
 ## Linux linker competition: final-link time and peak RSS
 
 <p align="center">
-<a href="https://github.com/zackees/reld/releases/tag/linux-linker-competition-v1"><img alt="Linux ELF linker competition with wall link time in the first panel and peak process-tree RSS in the second panel" src="https://github.com/zackees/reld/releases/download/linux-linker-competition-v1/competition.png" width="100%"></a>
+<a href="https://github.com/zackees/reld/releases/tag/linux-linker-competition-v2"><img alt="Grouped dual-axis Linux ELF linker competition: each linker has a solid wall-time bar first on the left seconds axis and a hatched peak-RSS bar second on the right MiB axis" src="https://github.com/zackees/reld/releases/download/linux-linker-competition-v2/competition.png" width="100%"></a>
 </p>
 
 This is the competitive Linux measurement, separate from the cross-platform trend charts above.
 It links a frozen LLVM/Clang C++ corpus that was compiled in advance, so **compilation is excluded**
 and only the final linker invocation is timed. Bars are medians from 12 measured trials in two
 balanced six-linker Williams blocks after two warmups; whiskers are bootstrap 95% confidence
-intervals. Peak RSS is the maximum summed resident memory of the linker process tree, sampled in
-a fresh cgroup-v2 subtree for every trial.
+intervals. Within each linker group, the solid wall-time bar comes first and uses the zero-based
+left seconds axis; the adjacent hatched peak-RSS bar comes second and uses the independent
+zero-based right MiB axis. Peak RSS is the maximum summed resident memory of the linker process
+tree, sampled in a fresh cgroup-v2 subtree for every trial. The metrics are not normalized or
+combined into one score.
 
 | Linker | Median link time | Median peak RSS |
 |---|---:|---:|
-| GNU bfd | 3.449 s | 894.984 MiB |
-| LLD | 0.402 s | 753.713 MiB |
-| mold | 0.275 s | 760.311 MiB |
-| Wild | 0.250 s | 529.805 MiB |
-| reld baseline | 0.241 s | 530.217 MiB |
-| **reld candidate** | **0.242 s** | **529.973 MiB** |
+| GNU bfd | 3.643 s | 894.660 MiB |
+| LLD | 0.417 s | 753.797 MiB |
+| mold | 0.295 s | 760.838 MiB |
+| Wild | 0.262 s | 529.902 MiB |
+| reld baseline | 0.247 s | 530.152 MiB |
+| **reld candidate** | **0.250 s** | **530.344 MiB** |
 
 On this workload, the paired 95% intervals show reld reducing link time and peak RSS versus GNU
-bfd (92.9–93.0% and 40.7–40.9%), LLD (39.4–41.4% and 29.6–29.8%), and mold (11.0–12.4% and
-30.1–30.5%). Against Wild, reld is 2.7–4.2% faster on wall time but statistically tied on RSS;
+bfd (93.0–93.2% and 40.6–40.8%), LLD (38.7–42.1% and 29.5–29.8%), and mold (13.3–16.8% and
+30.1–30.5%). Against Wild, reld is 2.2–5.6% faster on wall time but statistically tied on RSS;
 against the exact pre-change reld baseline, both intervals cross zero. So this evidence supports
 clear two-metric wins over bfd, LLD, and mold, but **does not support claiming that reld is way
 better than Wild or that this candidate is a performance breakthrough over its baseline**.
 
-The [hosted run](https://github.com/zackees/reld/actions/runs/33465040361) passed output identity,
+The [hosted run](https://github.com/zackees/reld/actions/runs/33496554602) passed output identity,
 external self-determinism, native execution, and live RSS-calibration gates. The permanent
-[evidence release](https://github.com/zackees/reld/releases/tag/linux-linker-competition-v1)
-includes the [structured report](https://github.com/zackees/reld/releases/download/linux-linker-competition-v1/report.json),
-[raw samples](https://github.com/zackees/reld/releases/download/linux-linker-competition-v1/raw-samples.jsonl),
+[evidence release](https://github.com/zackees/reld/releases/tag/linux-linker-competition-v2)
+includes the [structured report](https://github.com/zackees/reld/releases/download/linux-linker-competition-v2/report.json),
+[raw samples](https://github.com/zackees/reld/releases/download/linux-linker-competition-v2/raw-samples.jsonl),
 provenance, locks, and the sealed rendering manifest.
 
 ## What it is
