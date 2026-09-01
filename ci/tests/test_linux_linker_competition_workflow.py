@@ -93,6 +93,8 @@ def test_competition_workflow_renders_and_uploads_same_run_evidence_without_hist
     assert "if: always()" in text
     assert "if: failure()" in text
     assert "raw-samples.jsonl" in text
+    assert "target/linux-linker-competition/identity-artifacts/" in text
+    assert "target/linux-linker-competition/mismatch-artifacts/" not in text
     assert ".html" in text
     assert ".png" in text
     assert "benchmark-stats" not in text

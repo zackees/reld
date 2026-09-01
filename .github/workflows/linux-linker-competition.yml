@@ -197,7 +197,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-linker-competition-mismatch-${{ github.sha }}
-          path: target/linux-linker-competition/mismatch-artifacts/
+          path: target/linux-linker-competition/identity-artifacts/
           if-no-files-found: warn
           retention-days: 14
 
