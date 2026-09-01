@@ -63,7 +63,15 @@ RUNNER_ENV_ALLOWLIST = (
     "RUNNER_OS",
 )
 RECIPE_ENV_ALLOWLIST = frozenset({"LANG", "LC_ALL", "LC_MESSAGES", "LC_NUMERIC", "PATH", "SOURCE_DATE_EPOCH", "TZ"})
-MIN_SAMPLES = 10
+WILLIAMS_ROWS = (
+    (0, 1, 5, 2, 4, 3),
+    (1, 2, 0, 3, 5, 4),
+    (2, 3, 1, 4, 0, 5),
+    (3, 4, 2, 5, 1, 0),
+    (4, 5, 3, 0, 2, 1),
+    (5, 0, 4, 1, 3, 2),
+)
+MIN_SAMPLES = 12
 MIN_WARMUPS = 2
 RSS_BACKEND = "cgroup-v2-proc-vmrss-sum"
 WALL_CLOCK_BACKEND = "time.perf_counter"
@@ -287,19 +295,28 @@ def identity_gate(
     return {"reld_identity": {"sha256": hashes["baseline"][0], "artifacts": [str(path) for label in ("baseline", "candidate") for path in artifacts[label]]}, "comparators": external}
 
 
-def _rotated(values: tuple[str, ...], offset: int) -> list[str]:
-    return list(values[offset % len(values) :] + values[: offset % len(values)])
-
-
 def round_plan(*, samples: int, warmups: int, seed: int) -> dict[str, Any]:
     if warmups < MIN_WARMUPS:
         raise CompetitionError(f"at least two warmups are required (got {warmups})")
-    if samples < MIN_SAMPLES:
-        raise CompetitionError(f"at least ten measured rounds are required (got {samples})")
-    shuffled = list(CONTENDER_ORDER)
-    random.Random(seed).shuffle(shuffled)
-    values = tuple(shuffled)
-    return {"seed": seed, "warmups": [{"round": index, "order": _rotated(values, index)} for index in range(warmups)], "rounds": [{"round": index, "order": _rotated(values, warmups + index)} for index in range(samples)]}
+    if samples < MIN_SAMPLES or samples % len(CONTENDER_ORDER):
+        raise CompetitionError("measured rounds must be at least 12 and divisible by 6 for the Williams design")
+    rng = random.Random(seed)
+    warmup_labels = list(CONTENDER_ORDER)
+    rng.shuffle(warmup_labels)
+    rounds: list[dict[str, Any]] = []
+    for block in range(samples // len(CONTENDER_ORDER)):
+        labels = list(CONTENDER_ORDER)
+        rng.shuffle(labels)
+        rows = list(WILLIAMS_ROWS)
+        rng.shuffle(rows)
+        for row in rows:
+            rounds.append({"round": len(rounds), "block": block, "order": [labels[index] for index in row]})
+    return {
+        "seed": seed,
+        "design": {"name": "seeded-even-n-williams", "contenders": len(CONTENDER_ORDER), "blocks": samples // len(CONTENDER_ORDER)},
+        "warmups": [{"round": index, "order": warmup_labels[index % len(warmup_labels) :] + warmup_labels[: index % len(warmup_labels)]} for index in range(warmups)],
+        "rounds": rounds,
+    }
 
 
 def _bootstrap_median_ci(values: list[float], *, seed: int) -> list[float]:
@@ -476,6 +493,40 @@ class CgroupLauncher:
         self.process.communicate()
 
 
+def _launcher_has_execed_target(launcher_pid: int, python_executable: Path, *, readlink: Callable[[str], str] = os.readlink) -> bool:
+    try:
+        executable = Path(readlink(f"/proc/{launcher_pid}/exe")).resolve()
+    except OSError:
+        return False
+    return executable != python_executable.resolve()
+
+
+@dataclass
+class TargetRssSampler:
+    """Exclude launcher startup RSS until its target exec is observed in procfs."""
+
+    cgroup: Path
+    launcher_pid: int
+    python_executable: Path
+    readlink: Callable[[str], str] = os.readlink
+    tree_sampler: Callable[[Path], tuple[set[str], int]] | None = None
+    target_exec_observed: bool = False
+    target_pids: set[str] | None = None
+    peak_rss_kib: int = 0
+
+    def observe(self) -> None:
+        if not self.target_exec_observed:
+            self.target_exec_observed = _launcher_has_execed_target(self.launcher_pid, self.python_executable, readlink=self.readlink)
+            if not self.target_exec_observed:
+                return
+        sampler = self.tree_sampler or _summed_vmrss_kib
+        pids, summed_rss_kib = sampler(self.cgroup)
+        if self.target_pids is None:
+            self.target_pids = set()
+        self.target_pids.update(pids)
+        self.peak_rss_kib = max(self.peak_rss_kib, summed_rss_kib)
+
+
 @dataclass
 class TrialCgroup:
     path: Path
@@ -503,22 +554,17 @@ class TrialCgroup:
         self.path.rmdir()
 
     def run(self, command: list[str], *, cwd: Path, environment: dict[str, str]) -> tuple[subprocess.CompletedProcess[bytes], float, float, int, int]:
-        peak_rss = 0
-        seen_pid = False
         stop = threading.Event()
 
         def sample() -> None:
-            nonlocal peak_rss, seen_pid
             while not stop.is_set():
-                pids, summed_rss_kib = _summed_vmrss_kib(self.path)
-                if pids:
-                    seen_pid = True
-                    peak_rss = max(peak_rss, summed_rss_kib)
+                sampler.observe()
                 time.sleep(0.002)
 
         cpu_before = _read_cpu_usec(self.path)
         monitor = threading.Thread(target=sample, daemon=True)
         launcher = CgroupLauncher.start(self.path, command, cwd=cwd, environment=environment)
+        sampler = TargetRssSampler(self.path, launcher.process.pid, Path(sys.executable))
         try:
             monitor.start()
             # The launcher is cgroup-attached and blocked at this point; do not charge Python
@@ -534,12 +580,13 @@ class TrialCgroup:
             stop.set()
             monitor.join()
         # One final sample catches a short process that ended before the monitor's first tick.
-        _pids, summed_rss_kib = _summed_vmrss_kib(self.path)
-        peak_rss = max(peak_rss, summed_rss_kib)
-        if not seen_pid or peak_rss <= 0:
-            raise CompetitionError("whole-tree RSS sampler observed no resident trial process")
+        sampler.observe()
+        if not sampler.target_exec_observed:
+            raise CompetitionError("whole-tree RSS sampler did not observe target exec before trial exit")
+        if not sampler.target_pids or sampler.peak_rss_kib <= 0:
+            raise CompetitionError("whole-tree RSS sampler observed no resident target/descendant process")
         completed = subprocess.CompletedProcess(command, launcher.process.returncode, stdout, stderr)
-        return completed, elapsed, float(peak_rss), int((self.path / "memory.peak").read_text(encoding="utf-8")), _read_cpu_usec(self.path) - cpu_before
+        return completed, elapsed, float(sampler.peak_rss_kib), int((self.path / "memory.peak").read_text(encoding="utf-8")), _read_cpu_usec(self.path) - cpu_before
 
 
 def _summed_vmrss_kib(cgroup: Path) -> tuple[set[str], int]:
@@ -843,7 +890,7 @@ def build_report(
         "provenance": {**provenance, "artifact_comparison_policy": policy},
         "metric_scope": {
             "wall_seconds": "direct linker transaction, default fork mode",
-            "peak_rss_kib": "maximum summed VmRSS of PIDs in unique cgroup-v2 trial; validated by parent+child allocation preflight",
+            "peak_rss_kib": "maximum summed VmRSS of target/descendant PIDs after observed launcher exec in a unique cgroup-v2 trial; validated by parent+child allocation preflight",
             "cgroup_memory_peak_bytes": "diagnostic; not labelled RSS",
             "cgroup_cpu_usec": "whole-tree cgroup-v2 CPU diagnostic",
         },
@@ -885,7 +932,7 @@ def write_evidence(report: dict[str, Any], report_path: Path) -> None:
 def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     if sys.platform != "linux":
         raise CompetitionError("Linux competitive replay is Linux-only")
-    if args.samples < MIN_SAMPLES or args.warmups < MIN_WARMUPS:
+    if args.samples < MIN_SAMPLES or args.samples % len(CONTENDER_ORDER) or args.warmups < MIN_WARMUPS:
         round_plan(samples=args.samples, warmups=args.warmups, seed=103)
     corpus_lock = load_lock(args.corpus_lock)
     comparator_lock = load_comparator_lock(args.comparator_lock)

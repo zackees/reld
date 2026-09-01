@@ -9,6 +9,7 @@ import os
 import tarfile
 import time
 from argparse import Namespace
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -84,14 +85,14 @@ def _renderer_report(tmp_path: Path) -> dict[str, object]:
         contenders[label] = path
     raw_samples = [
         _raw_sample(label, round_id=round_id, position=position)
-        for round_id in range(10)
+        for round_id in range(12)
         for position, label in enumerate(competition.CONTENDER_ORDER)
     ]
     return competition.build_report(
         contenders=contenders,
         raw_samples=raw_samples,
         identity={"reld_identity": {"sha256": "a" * 64}, "comparators": {}},
-        plan=competition.round_plan(samples=10, warmups=2, seed=103),
+        plan=competition.round_plan(samples=12, warmups=2, seed=103),
         provenance={"corpus_lock": {"sha256": "b" * 64}},
         workload={"id": "llvmorg-22.1.8-clang-final-link"},
     )
@@ -207,17 +208,30 @@ def test_identity_gate_retains_first_offset_on_candidate_delta(tmp_path: Path) -
     assert json.loads((tmp_path / "identity-failure.json").read_text())["first_differing_offset"] == 1
 
 
-def test_seeded_round_plan_requires_two_warmups_ten_rounds_and_balances_positions() -> None:
+def test_seeded_williams_round_plan_requires_two_warmups_twelve_rounds_and_balances_order_effects() -> None:
     with pytest.raises(competition.CompetitionError, match="at least two warmups"):
-        competition.round_plan(samples=10, warmups=1, seed=103)
-    with pytest.raises(competition.CompetitionError, match="at least ten"):
-        competition.round_plan(samples=9, warmups=2, seed=103)
+        competition.round_plan(samples=12, warmups=1, seed=103)
+    with pytest.raises(competition.CompetitionError, match="at least 12 and divisible by 6"):
+        competition.round_plan(samples=10, warmups=2, seed=103)
+    with pytest.raises(competition.CompetitionError, match="at least 12 and divisible by 6"):
+        competition.round_plan(samples=13, warmups=2, seed=103)
     plan = competition.round_plan(samples=12, warmups=2, seed=103)
+    assert plan["design"] == {"name": "seeded-even-n-williams", "contenders": 6, "blocks": 2}
     assert len(plan["warmups"]) == 2
     assert len(plan["rounds"]) == 12
     for contender in competition.CONTENDER_ORDER:
         positions = [row["order"].index(contender) for row in plan["rounds"]]
-        assert max(positions.count(position) for position in set(positions)) - min(positions.count(position) for position in set(positions)) <= 1
+        assert [positions.count(position) for position in range(6)] == [2] * 6
+    earlier = {(left, right): 0 for index, left in enumerate(competition.CONTENDER_ORDER) for right in competition.CONTENDER_ORDER[index + 1 :]}
+    carryover = {(left, right): 0 for left in competition.CONTENDER_ORDER for right in competition.CONTENDER_ORDER if left != right}
+    for row in plan["rounds"]:
+        order = row["order"]
+        for left, right in earlier:
+            earlier[left, right] += order.index(left) < order.index(right)
+        for left, right in pairwise(order):
+            carryover[left, right] += 1
+    assert set(earlier.values()) == {6}
+    assert set(carryover.values()) == {2}
 
 
 def test_paired_bootstrap_is_deterministic_and_never_pools_mismatched_rounds() -> None:
@@ -353,6 +367,27 @@ def test_cgroup_launcher_reports_immediate_readiness_failure_output(tmp_path: Pa
     assert "measurement timeout" not in str(error.value)
 
 
+def test_target_rss_sampler_excludes_pre_exec_python_and_includes_post_exec_tree() -> None:
+    executable = iter(["/checked/python", "/checked/linker"])
+    sampled: list[Path] = []
+    sampler = competition.TargetRssSampler(
+        Path("/cgroup"),
+        42,
+        Path("/checked/python"),
+        readlink=lambda path: next(executable),
+        tree_sampler=lambda cgroup: (sampled.append(cgroup) or ({"42", "43"}, 1234)),
+    )
+    sampler.observe()
+    assert sampler.target_exec_observed is False
+    assert sampler.peak_rss_kib == 0
+    assert sampled == []
+    sampler.observe()
+    assert sampler.target_exec_observed is True
+    assert sampler.target_pids == {"42", "43"}
+    assert sampler.peak_rss_kib == 1234
+    assert sampled == [Path("/cgroup")]
+
+
 def test_rss_self_test_rejects_missing_descendant_or_out_of_range_peak() -> None:
     parent_pid, child_pid = "10", "11"
     competition._validate_rss_probe(
@@ -470,7 +505,7 @@ def test_replay_runs_rss_self_test_before_expensive_corpus_acquisition(monkeypat
     with pytest.raises(competition.CompetitionError, match="intentional self-test stop"):
         competition.run_replay(
             Namespace(
-                samples=10,
+                samples=12,
                 warmups=2,
                 corpus_lock=tmp_path / "corpus.lock",
                 comparator_lock=tmp_path / "comparators.lock",
