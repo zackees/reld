@@ -17,8 +17,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CONTENDER_ORDER = ("bfd", "lld", "mold", "wild", "baseline", "candidate")
+CONTENDER_LABELS = {
+    "bfd": "GNU bfd",
+    "lld": "LLD",
+    "mold": "mold",
+    "wild": "Wild",
+    "baseline": "reld baseline",
+    "candidate": "reld candidate",
+}
 METRICS = ("wall_seconds", "peak_rss_kib")
 FORBIDDEN_SCORE_KEYS = frozenset({"combined_score", "performance_score", "weighted_score", "score"})
 COLORS = {
@@ -102,16 +110,35 @@ def _validate_summary(summary: object, field: str) -> None:
         raise CompetitionRenderError(f"{field} has inconsistent summary bounds")
 
 
+def _workload_label(report: dict[str, Any]) -> str:
+    """Use optional workload metadata when available without making it canonical schema."""
+    workload = report.get("workload")
+    if isinstance(workload, dict) and isinstance(workload.get("id"), str) and workload["id"]:
+        return workload["id"]
+    return "Immutable Linux ELF final-link replay"
+
+
+def _validate_metric_backend(value: object, field: str) -> None:
+    backend = _mapping(value, field)
+    _require_exact_keys(backend, set(METRICS), field)
+    for metric in METRICS:
+        name = backend[metric]
+        if not isinstance(name, str) or not name:
+            raise CompetitionRenderError(f"{field}.{metric} must be a non-empty string")
+
+
 def validate_report(report: object) -> None:
     """Validate the schema required for an aligned two-metric evidence surface."""
     report = _mapping(report, "report")
     _reject_scores(report)
     if report.get("schema_version") != SCHEMA_VERSION:
         raise CompetitionRenderError(f"schema_version must be {SCHEMA_VERSION}")
-    workload = _mapping(report.get("workload"), "workload")
-    workload_id = workload.get("id")
-    if not isinstance(workload_id, str) or not workload_id:
-        raise CompetitionRenderError("workload.id must be a non-empty string")
+    workload = report.get("workload")
+    if workload is not None:
+        workload_detail = _mapping(workload, "workload")
+        workload_id = workload_detail.get("id")
+        if not isinstance(workload_id, str) or not workload_id:
+            raise CompetitionRenderError("workload.id must be a non-empty string when workload is supplied")
 
     order = _list(report.get("contender_order"), "contender_order")
     if tuple(order) != CONTENDER_ORDER:
@@ -122,8 +149,10 @@ def validate_report(report: object) -> None:
     for contender in CONTENDER_ORDER:
         detail = _mapping(contenders[contender], f"contenders.{contender}")
         label = detail.get("label")
-        if not isinstance(label, str) or not label:
-            raise CompetitionRenderError(f"contenders.{contender}.label must be a non-empty string")
+        if label != CONTENDER_LABELS[contender]:
+            raise CompetitionRenderError(
+                f"contenders.{contender}.label must be {CONTENDER_LABELS[contender]!r}"
+            )
         summaries = _mapping(detail.get("summaries"), f"contenders.{contender}.summaries")
         if set(summaries) != set(METRICS):
             raise CompetitionRenderError(f"contenders.{contender}.summaries must contain wall_seconds and peak_rss_kib")
@@ -174,8 +203,7 @@ def validate_report(report: object) -> None:
         digest = detail["output_sha256"]
         if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise CompetitionRenderError(f"raw_samples[{index}].output_sha256 must be a lowercase SHA-256 digest")
-        if not isinstance(detail["metric_backend"], str) or not detail["metric_backend"]:
-            raise CompetitionRenderError(f"raw_samples[{index}].metric_backend must be a non-empty string")
+        _validate_metric_backend(detail["metric_backend"], f"raw_samples[{index}].metric_backend")
         seen[contender] += 1
         rounds.setdefault(detail["round"], []).append((contender, detail["position"]))
     missing = [name for name, count in seen.items() if not count]
@@ -258,7 +286,7 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     draw.text((48 * scale, 30 * scale), "Linux ELF competitive linker evidence", font=title_font, fill=fg)
     draw.text(
         (48 * scale, 74 * scale),
-        f"Workload: {report['workload']['id']}  |  Independent zero-based scales; no combined score",
+        f"Workload: {_workload_label(report)}  |  Independent zero-based scales; no combined score",
         font=label_font,
         fill=muted,
     )
@@ -314,7 +342,7 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     draw.text((48 * scale, footer_y * scale), "Bars = median. Whiskers = per-contender bootstrap 95% CI. Metrics are intentionally not scalarized.", font=label_font, fill=muted)
     path.parent.mkdir(parents=True, exist_ok=True)
     metadata = PngImagePlugin.PngInfo()
-    metadata.add_text("workload", str(report["workload"]["id"]))
+    metadata.add_text("workload", _workload_label(report))
     metadata.add_text("contender_order", ",".join(CONTENDER_ORDER))
     metadata.add_text("metrics", "wall_seconds,peak_rss_kib")
     metadata.add_text("rendered_values", json.dumps(_rendered_values(report), sort_keys=True, separators=(",", ":")))
@@ -349,7 +377,7 @@ table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #30363d;padd
 .swatch{{display:inline-block;width:.8rem;height:.8rem;border-radius:50%;margin-right:.4rem}}figure{{margin:1.5rem 0}}img{{max-width:100%;height:auto}}
 </style></head><body>
 <h1>Linux ELF competitive linker evidence</h1>
-<p>Workload: <code>{html.escape(report['workload']['id'])}</code>. Wall link time and peak process-tree RSS use independent zero-based scales. No scalar combined score is produced.</p>
+<p>Workload: <code>{html.escape(_workload_label(report))}</code>. Wall link time and peak process-tree RSS use independent zero-based scales. No scalar combined score is produced.</p>
 <figure aria-label=\"Competitive linker measurements\"><img src=\"competition.png\" alt=\"Aligned panels for wall link time in seconds and peak process-tree RSS in MiB, in the same fixed contender order.\"><figcaption>Bars show medians; whiskers and labels show per-contender 95% confidence intervals.</figcaption></figure>
 <h2>Accessible data table</h2>
 <table><thead><tr><th>Linker</th><th>Wall link time (seconds)</th><th>Wall 95% CI</th><th>Peak process-tree RSS (MiB)</th><th>RSS 95% CI</th></tr></thead>
@@ -365,7 +393,7 @@ def _format_comparison(comparison: dict[str, Any], report: dict[str, Any]) -> st
     rss = comparison["metrics"]["peak_rss_kib"]["bootstrap_95_ci"]
     wall_text = f"wall: {wall[0]:+.1%} to {wall[1]:+.1%}"
     rss_text = f"RSS: {rss[0]:+.1%} to {rss[1]:+.1%}"
-    verdict = "aggregate better" if wall[0] > 0 and rss[0] > 0 else "no aggregate better claim"
+    verdict = "both metric intervals favor candidate" if wall[0] > 0 and rss[0] > 0 else "no two-metric superiority claim"
     return f"- {html.escape(candidate)} vs {html.escape(reference)} — {wall_text}; {rss_text}; **{verdict}**."
 
 
@@ -374,7 +402,7 @@ def render_summary(report: dict[str, Any]) -> str:
     lines = [
         "### Linux ELF competitive linker evidence",
         "",
-        f"Workload: `{report['workload']['id']}`. Wall time and peak RSS are co-primary; No scalar combined score.",
+        f"Workload: `{_workload_label(report)}`. Wall time and peak RSS are co-primary; No scalar combined score.",
         "",
         "| Linker | Wall link time (s) | Wall 95% CI | Peak RSS (MiB) | RSS 95% CI |",
         "|:--|--:|:--|--:|:--|",

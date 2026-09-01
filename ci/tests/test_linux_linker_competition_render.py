@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from ci.linux_linker_competition_render import (
+    CONTENDER_LABELS,
     CONTENDER_ORDER,
     CompetitionRenderError,
     main,
@@ -46,14 +47,8 @@ def _report() -> dict[str, object]:
                 "peak_rss_kib": _summary(rss),
             },
         }
-        for name, label, (wall, rss) in (
-            ("bfd", "GNU bfd", medians["bfd"]),
-            ("lld", "LLD", medians["lld"]),
-            ("mold", "mold", medians["mold"]),
-            ("wild", "Wild", medians["wild"]),
-            ("baseline", "reld baseline", medians["baseline"]),
-            ("candidate", "reld candidate", medians["candidate"]),
-        )
+        for name, (wall, rss) in medians.items()
+        for label in (CONTENDER_LABELS[name],)
     }
     samples = []
     for round_index in range(10):
@@ -67,12 +62,14 @@ def _report() -> dict[str, object]:
                     "wall_seconds": wall + round_index / 10_000,
                     "peak_rss_kib": rss + round_index,
                     "output_sha256": "a" * 64,
-                    "metric_backend": "cgroup-v2-process-tree-rss",
+                    "metric_backend": {
+                        "wall_seconds": "time.perf_counter",
+                        "peak_rss_kib": "cgroup-v2-proc-vmrss-sum",
+                    },
                 }
             )
     return {
-        "schema_version": 1,
-        "workload": {"id": "llvmorg-22.1.8-clang-final-link"},
+        "schema_version": 2,
         "contender_order": list(CONTENDER_ORDER),
         "contenders": contenders,
         "comparisons": [
@@ -96,7 +93,10 @@ def _realistic_issue_103_report() -> dict[str, object]:
         {
             "status": "passed",
             "target": "x86_64-unknown-linux-gnu",
-            "metric_backend": "cgroup-v2-process-tree-rss",
+            "metric_backend": {
+                "wall_seconds": "time.perf_counter",
+                "peak_rss_kib": "cgroup-v2-proc-vmrss-sum",
+            },
             "provenance": {
                 "runner": {"image": "ubuntu-24.04", "kernel": "6.8.0", "cpu_model": "example CPU"},
                 "corpus_lock_sha256": "b" * 64,
@@ -136,6 +136,14 @@ def test_report_contract_is_fixed_and_accepts_complete_evidence():
     validate_report(report)
 
     assert CONTENDER_ORDER == ("bfd", "lld", "mold", "wild", "baseline", "candidate")
+    assert CONTENDER_LABELS == {
+        "bfd": "GNU bfd",
+        "lld": "LLD",
+        "mold": "mold",
+        "wild": "Wild",
+        "baseline": "reld baseline",
+        "candidate": "reld candidate",
+    }
 
 
 @pytest.mark.parametrize(
@@ -145,6 +153,7 @@ def test_report_contract_is_fixed_and_accepts_complete_evidence():
         (lambda report: report["contenders"]["lld"]["summaries"].pop("peak_rss_kib"), "peak_rss_kib"),
         (lambda report: report.__setitem__("combined_score", 1.0), "combined score"),
         (lambda report: report["contenders"]["mold"]["summaries"]["wall_seconds"].__setitem__("bootstrap_95_ci", [0.1]), "bootstrap_95_ci"),
+        (lambda report: report["raw_samples"][0].__setitem__("metric_backend", "gnu-time-parent"), "metric_backend"),
         (lambda report: report["raw_samples"].pop(), "raw_samples"),
     ],
 )
@@ -195,7 +204,10 @@ def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path:
 
     # The verbatim copy retains raw samples and optional cgroup/provenance diagnostics.
     assert copied == report
-    assert copied["raw_samples"][0]["metric_backend"] == "cgroup-v2-process-tree-rss"
+    assert copied["raw_samples"][0]["metric_backend"] == {
+        "wall_seconds": "time.perf_counter",
+        "peak_rss_kib": "cgroup-v2-proc-vmrss-sum",
+    }
     assert copied["raw_samples"][0]["cgroup_memory_peak_bytes"] == 1_024 * 1_024
     assert copied["contenders"]["candidate"]["diagnostics"]["cpu_usage_usec"] == 1_000
 
@@ -216,15 +228,87 @@ def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path:
         assert png_values[contender]["peak_rss_kib"]["bootstrap_95_ci"] == rss["bootstrap_95_ci"]
 
 
+def test_measurement_build_report_renders_without_schema_translation(tmp_path: Path):
+    """Keep measurement's build_report and this strict consumer in one contract test.
+
+    The isolated renderer worktree deliberately does not own the measurement module, so this
+    test becomes active when both implementation streams are integrated.
+    """
+    competition = pytest.importorskip("ci.linux_linker_competition")
+    contenders = {}
+    for contender in competition.CONTENDER_ORDER:
+        executable = tmp_path / contender
+        executable.write_bytes(contender.encode("utf-8"))
+        contenders[contender] = executable
+    raw_samples = [
+        {
+            "contender": contender,
+            "round": round_index,
+            "position": position,
+            "order": list(competition.CONTENDER_ORDER),
+            "wall_seconds": 1.0 + position / 10 + round_index / 100,
+            "peak_rss_kib": 100.0 + position + round_index,
+            "cgroup_memory_peak_bytes": 200 + position + round_index,
+            "cgroup_cpu_usec": 300 + position + round_index,
+            "metric_backend": {
+                "wall_seconds": competition.WALL_CLOCK_BACKEND,
+                "peak_rss_kib": competition.RSS_BACKEND,
+            },
+            "output_sha256": "a" * 64,
+        }
+        for round_index in range(10)
+        for position, contender in enumerate(competition.CONTENDER_ORDER)
+    ]
+    report = competition.build_report(
+        contenders=contenders,
+        raw_samples=raw_samples,
+        identity={"reld_identity": {"sha256": "a" * 64}, "comparators": {}},
+        plan=competition.round_plan(samples=10, warmups=2, seed=103),
+        provenance={"corpus_lock": {"sha256": "b" * 64}},
+    )
+
+    validate_report(report)
+    paths = render_report(report, tmp_path / "rendered")
+    copied = json.loads(paths.json.read_text(encoding="utf-8"))
+    html = paths.html.read_text(encoding="utf-8")
+    markdown = paths.summary.read_text(encoding="utf-8")
+    with Image.open(paths.png) as image:
+        png_values = json.loads(image.text["rendered_values"])
+
+    assert report["schema_version"] == 2
+    assert report["contender_order"] == list(CONTENDER_ORDER)
+    assert {name: detail["label"] for name, detail in report["contenders"].items()} == CONTENDER_LABELS
+    assert copied == report
+    assert copied["raw_samples"][0]["metric_backend"] == {
+        "wall_seconds": competition.WALL_CLOCK_BACKEND,
+        "peak_rss_kib": competition.RSS_BACKEND,
+    }
+    for contender in CONTENDER_ORDER:
+        wall = report["contenders"][contender]["summaries"]["wall_seconds"]
+        rss = report["contenders"][contender]["summaries"]["peak_rss_kib"]
+        assert report["contenders"][contender]["label"] in html
+        assert report["contenders"][contender]["label"] in markdown
+        assert png_values[contender]["wall_seconds"]["median"] == wall["median"]
+        assert png_values[contender]["peak_rss_kib"]["median"] == rss["median"]
+
+
 def test_summary_rejects_wall_only_or_rss_only_claims():
     report = _report()
     report["comparisons"][0]["metrics"]["peak_rss_kib"]["bootstrap_95_ci"] = [-0.10, 0.10]
 
     summary = render_summary(report)
 
-    assert "no aggregate better claim" in summary
+    assert "no two-metric superiority claim" in summary
     assert "wall: +1.0% to +20.0%" in summary
     assert "RSS: -10.0% to +10.0%" in summary
+
+
+def test_summary_only_claims_two_metric_superiority_when_both_intervals_favor_candidate():
+    summary = render_summary(_report())
+
+    assert "both metric intervals favor candidate" in summary
+    assert "aggregate better" not in summary
+    assert "no aggregate better claim" not in summary
 
 
 def test_cli_writes_summary_to_explicit_path(tmp_path: Path):
