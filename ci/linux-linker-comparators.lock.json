@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "comparators": {
+    "bfd": {
+      "url": "https://github.com/zackees/reld/releases/download/linux-linker-comparators-v1/bfd-x86_64-linux.tar.gz",
+      "archive_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_path": "bin/ld.bfd",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "version_argv": ["--version"],
+      "version_stdout": "GNU ld (GNU Binutils for Debian) 2.40\n",
+      "version_stderr": "",
+      "recipe": {"remove_arguments": ["--no-fork"], "extra_arguments": []}
+    },
+    "lld": {
+      "url": "https://github.com/zackees/reld/releases/download/linux-linker-comparators-v1/lld-x86_64-linux.tar.gz",
+      "archive_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_path": "bin/ld.lld",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "version_argv": ["--version"],
+      "version_stdout": "Debian LLD 14.0.6 (compatible with GNU linkers)\n",
+      "version_stderr": "",
+      "recipe": {"remove_arguments": ["--no-fork"], "extra_arguments": []}
+    },
+    "mold": {
+      "url": "https://github.com/zackees/reld/releases/download/linux-linker-comparators-v1/mold-x86_64-linux.tar.gz",
+      "archive_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_path": "bin/mold",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "version_argv": ["--version"],
+      "version_stdout": "mold 2.41.0 (compatible with GNU ld)\n",
+      "version_stderr": "",
+      "recipe": {"remove_arguments": ["--no-fork"], "extra_arguments": []}
+    },
+    "wild": {
+      "url": "https://github.com/zackees/reld/releases/download/linux-linker-comparators-v1/wild-x86_64-linux.tar.gz",
+      "archive_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_path": "bin/wild",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "version_argv": ["--version"],
+      "version_stdout": "Wild 0.9.0\n",
+      "version_stderr": "",
+      "recipe": {"remove_arguments": ["--no-fork"], "extra_arguments": []}
+    }
+  }
+}
