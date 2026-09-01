@@ -9,10 +9,14 @@ Actions summary are then derived from that one in-memory report.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import math
+import os
 import shutil
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +58,11 @@ class RenderPaths:
     html: Path
     png: Path
     summary: Path
+    manifest: Path
+
+
+RENDERED_FILENAMES = ("competition-report.json", "competition.html", "competition.png", "summary.md")
+COMPLETION_MANIFEST = "complete.json"
 
 
 def _number(value: object, field: str, *, positive: bool = False) -> float:
@@ -480,21 +489,123 @@ def render_summary(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_completion_manifest(directory: Path) -> Path:
+    """Seal a fully rendered staging directory; this must be its final write."""
+    files = {}
+    for name in RENDERED_FILENAMES:
+        path = directory / name
+        _fsync_file(path)
+        files[name] = {"sha256": _sha256_file(path)}
+    manifest = directory / COMPLETION_MANIFEST
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "files": files}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _fsync_file(manifest)
+    return manifest
+
+
+def _publish_staging_directory(staging: Path, destination: Path) -> None:
+    """Publish a complete staging directory, restoring an existing publication on failure."""
+    if destination.exists() and not destination.is_dir():
+        raise CompetitionRenderError(f"output destination is not a directory: {destination}")
+    parent = destination.parent
+    _fsync_directory(staging)
+    if not destination.exists():
+        os.replace(staging, destination)
+        _fsync_directory(parent)
+        return
+
+    backup = parent / f".{destination.name}.previous-{os.getpid()}-{time_ns()}"
+    os.replace(destination, backup)
+    try:
+        os.replace(staging, destination)
+    except BaseException:
+        os.replace(backup, destination)
+        _fsync_directory(parent)
+        raise
+    _fsync_directory(parent)
+    try:
+        shutil.rmtree(backup)
+    except OSError:
+        # The new publication is already complete and durable. Keep the hidden previous set for
+        # operator recovery rather than making a successful publish look partial or failed.
+        pass
+    _fsync_directory(parent)
+
+
+def time_ns() -> int:
+    """Keep publication names testable without coupling renderer timing to report metrics."""
+    return time.time_ns()
+
+
+def _copy_summary_atomically(source: Path, destination: Path) -> None:
+    """Never expose a truncated explicit Actions summary destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}-{time_ns()}.tmp")
+    try:
+        with source.open("rb") as input_handle, temporary.open("xb") as output_handle:
+            shutil.copyfileobj(input_handle, output_handle)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def render_report(report: object, output_dir: Path) -> RenderPaths:
     validate_report(report)
     assert isinstance(report, dict)  # Narrowed by validate_report.
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_dir.resolve()
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
     paths = RenderPaths(
-        json=output_dir / "competition-report.json",
-        html=output_dir / "competition.html",
-        png=output_dir / "competition.png",
-        summary=output_dir / "summary.md",
+        json=staging / "competition-report.json",
+        html=staging / "competition.html",
+        png=staging / "competition.png",
+        summary=staging / "summary.md",
+        manifest=staging / COMPLETION_MANIFEST,
     )
-    paths.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    render_png(report, paths.png)
-    paths.html.write_text(render_html(report), encoding="utf-8")
-    paths.summary.write_text(render_summary(report), encoding="utf-8")
-    return paths
+    try:
+        paths.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        render_png(report, paths.png)
+        paths.html.write_text(render_html(report), encoding="utf-8")
+        paths.summary.write_text(render_summary(report), encoding="utf-8")
+        _write_completion_manifest(staging)
+        _publish_staging_directory(staging, output_dir)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return RenderPaths(
+        json=output_dir / paths.json.name,
+        html=output_dir / paths.html.name,
+        png=output_dir / paths.png.name,
+        summary=output_dir / paths.summary.name,
+        manifest=output_dir / paths.manifest.name,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -507,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         report = json.loads(args.report.read_text(encoding="utf-8"))
         paths = render_report(report, args.output_dir)
         args.summary_output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(paths.summary, args.summary_output)
+        _copy_summary_atomically(paths.summary, args.summary_output)
     except (CompetitionRenderError, OSError, json.JSONDecodeError) as error:
         parser.exit(1, f"linux linker competition render failed: {error}\n")
     print(f"rendered competitive evidence: {paths.png}, {paths.html}, {paths.summary}")

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from ci import linux_linker_competition_render as renderer
 from ci.linux_linker_competition_render import (
     ARTIFACT_COMPARISON_DISCLAIMER,
     CONTENDER_LABELS,
@@ -228,6 +230,60 @@ def test_render_surfaces_have_aligned_wall_and_rss_values(tmp_path: Path):
     assert json.loads(paths.json.read_text(encoding="utf-8"))["contender_order"] == list(CONTENDER_ORDER)
 
 
+def test_complete_manifest_seals_the_same_json_html_png_and_summary(tmp_path: Path):
+    paths = render_report(_report(), tmp_path / "published")
+    manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == 1
+    assert set(manifest["files"]) == {
+        "competition-report.json",
+        "competition.html",
+        "competition.png",
+        "summary.md",
+    }
+    for name, expected in manifest["files"].items():
+        actual = hashlib.sha256((paths.manifest.parent / name).read_bytes()).hexdigest()
+        assert expected == {"sha256": actual}
+    assert json.loads(paths.json.read_text(encoding="utf-8"))["raw_samples"] == _report()["raw_samples"]
+
+
+def test_render_failure_publishes_no_partial_destination_or_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    report_path = tmp_path / "report.json"
+    output_dir = tmp_path / "published"
+    summary_path = tmp_path / "job-summary.md"
+    report_path.write_text(json.dumps(_report()), encoding="utf-8")
+
+    def fail_png(*_args, **_kwargs):
+        raise OSError("injected PNG failure")
+
+    monkeypatch.setattr(renderer, "render_png", fail_png)
+    with pytest.raises(SystemExit) as error:
+        main(["--report", str(report_path), "--output-dir", str(output_dir), "--summary-output", str(summary_path)])
+
+    assert error.value.code == 1
+    assert not output_dir.exists()
+    assert not summary_path.exists()
+    assert not list(tmp_path.glob(".published.staging-*"))
+
+
+def test_render_failure_restores_existing_complete_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    output_dir = tmp_path / "published"
+    first = render_report(_report(), output_dir)
+    previous_manifest = first.manifest.read_bytes()
+    previous_summary = first.summary.read_bytes()
+
+    def fail_png(*_args, **_kwargs):
+        raise OSError("injected replacement failure")
+
+    monkeypatch.setattr(renderer, "render_png", fail_png)
+    with pytest.raises(OSError, match="replacement failure"):
+        render_report(_report(), output_dir)
+
+    assert (output_dir / "complete.json").read_bytes() == previous_manifest
+    assert (output_dir / "summary.md").read_bytes() == previous_summary
+    assert not list(tmp_path.glob(".published.staging-*"))
+
+
 def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path: Path):
     report = _realistic_issue_103_report()
 
@@ -298,14 +354,14 @@ def test_measurement_build_report_renders_without_schema_translation(tmp_path: P
             },
             "output_sha256": "a" * 64,
         }
-        for round_index in range(10)
+        for round_index in range(12)
         for position, contender in enumerate(competition.CONTENDER_ORDER)
     ]
     report = competition.build_report(
         contenders=contenders,
         raw_samples=raw_samples,
         identity={"reld_identity": {"sha256": "a" * 64}, "comparators": {}},
-        plan=competition.round_plan(samples=10, warmups=2, seed=103),
+        plan=competition.round_plan(samples=12, warmups=2, seed=103),
         provenance={"corpus_lock": {"sha256": "b" * 64}},
         workload=_workload(),
     )
