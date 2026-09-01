@@ -182,7 +182,7 @@ jobs:
             ci/clang-link-corpus.lock.json
             ci/linux-linker-comparators.lock.json
             competition-evidence/report.json
-            competition-evidence/samples.jsonl
+            competition-evidence/raw-samples.jsonl
             competition-evidence/provenance.json
             competition-evidence/summary.md
             competition-evidence/render/*.html

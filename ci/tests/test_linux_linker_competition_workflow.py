@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "linux-linker-competition.yml"
 
 
@@ -93,7 +92,7 @@ def test_competition_workflow_renders_and_uploads_same_run_evidence_without_hist
     assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in text
     assert "if: always()" in text
     assert "if: failure()" in text
-    assert "samples.jsonl" in text
+    assert "raw-samples.jsonl" in text
     assert ".html" in text
     assert ".png" in text
     assert "benchmark-stats" not in text
