@@ -217,7 +217,7 @@ def test_render_surfaces_have_aligned_wall_and_rss_values(tmp_path: Path):
     assert paths.summary.is_file()
     assert "Wall link time (seconds)" in html
     assert "Peak process-tree RSS (MiB)" in html
-    assert 'aria-label="Competitive linker measurements"' in html
+    assert 'aria-label="Grouped dual-axis competitive linker measurements"' in html
     assert "GNU bfd" in html
     assert "3.570 s" in html
     assert "983.000 MiB" in html
@@ -228,6 +228,51 @@ def test_render_surfaces_have_aligned_wall_and_rss_values(tmp_path: Path):
     assert ARTIFACT_COMPARISON_DISCLAIMER in html
     assert ARTIFACT_COMPARISON_DISCLAIMER in summary
     assert json.loads(paths.json.read_text(encoding="utf-8"))["contender_order"] == list(CONTENDER_ORDER)
+
+
+def test_png_and_html_contract_require_one_grouped_dual_axis_chart(tmp_path: Path):
+    """Issue #105 RED/GREEN contract: time is first and RSS is second in every group."""
+    paths = render_report(_report(), tmp_path)
+    html = paths.html.read_text(encoding="utf-8")
+
+    with Image.open(paths.png) as image:
+        assert image.text["layout"] == "grouped-dual-axis-v1"
+        assert image.text["bar_order"] == "wall_seconds,peak_rss_kib"
+        assert image.text["left_axis"] == "wall_seconds"
+        assert image.text["right_axis"] == "peak_rss_kib"
+        assert image.text["contender_order"].split(",") == list(CONTENDER_ORDER)
+        assert image.text["metrics"] == "wall_seconds,peak_rss_kib"
+
+    assert "grouped dual-axis chart" in html
+    assert "wall time first" in html
+    assert "peak process-tree RSS second" in html
+    assert "separate zero-based axes" in html
+
+
+def test_grouped_chart_annotation_boxes_are_in_bounds_and_non_overlapping(tmp_path: Path):
+    """Close six-contender values still get separate deterministic annotation columns."""
+    report = _report()
+    for contender in CONTENDER_ORDER:
+        report["contenders"][contender]["summaries"] = {
+            "wall_seconds": _summary(1.000),
+            "peak_rss_kib": _summary(512.000 * 1024),
+        }
+
+    paths = render_report(report, tmp_path)
+    with Image.open(paths.png) as image:
+        boxes = json.loads(image.text["annotation_boxes"])
+
+    assert len(boxes) == len(CONTENDER_ORDER) * 2 * 2  # median and CI for both metric bars
+    for box in boxes:
+        assert 170 <= box["x"]
+        assert box["x"] + box["width"] <= 1630
+        assert 215 <= box["y"]
+        assert box["y"] + box["height"] <= 725
+    for index, first in enumerate(boxes):
+        for second in boxes[index + 1 :]:
+            overlap_x = first["x"] < second["x"] + second["width"] and second["x"] < first["x"] + first["width"]
+            overlap_y = first["y"] < second["y"] + second["height"] and second["y"] < first["y"] + first["height"]
+            assert not (overlap_x and overlap_y), (first, second)
 
 
 def test_complete_manifest_seals_the_same_json_html_png_and_summary(tmp_path: Path):
@@ -294,8 +339,8 @@ def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path:
     markdown = paths.summary.read_text(encoding="utf-8")
     with Image.open(paths.png) as image:
         png_values = json.loads(image.text["rendered_values"])
-        # The paired panels reserve a readable annotation column for all six contenders.
-        assert image.size == (1800, 920)
+        # The single grouped chart reserves a readable annotation column for each metric bar.
+        assert image.size == (1800, 980)
         assert image.text["contender_order"].split(",") == list(CONTENDER_ORDER)
         assert image.text["metrics"] == "wall_seconds,peak_rss_kib"
 

@@ -335,16 +335,49 @@ def _rendered_values(report: dict[str, Any]) -> dict[str, dict[str, dict[str, ob
     }
 
 
+def _draw_diagonal_hatch(
+    draw: Any,
+    *,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    color: str,
+    width: int,
+    spacing: int,
+) -> None:
+    """Draw clipped, deterministic `/` hatching inside one RSS bar.
+
+    ``ImageDraw`` has no rectangle clip.  The four edge intersections of ``x + y = c``
+    let us draw only the segment inside the bar, so the RSS texture can never leak into a
+    neighboring contender's wall-time bar.
+    """
+    for intercept in range(left + top, right + bottom + 1, spacing):
+        points = []
+        for x, y in ((left, intercept - left), (right, intercept - right), (intercept - top, top), (intercept - bottom, bottom)):
+            if left <= x <= right and top <= y <= bottom and (x, y) not in points:
+                points.append((x, y))
+        if len(points) >= 2:
+            draw.line((points[0], points[1]), fill=color, width=width)
+
+
+def _annotation_box(draw: Any, text: str, font: Any, *, center: float, y: float, scale: int) -> dict[str, float]:
+    """Return a base-pixel text bounding box for machine-checkable overlap tests."""
+    box = draw.textbbox((0, 0), text, font=font)
+    width = (box[2] - box[0]) / scale
+    height = (box[3] - box[1]) / scale
+    return {"x": center - width / 2, "y": y, "width": width, "height": height}
+
+
 def render_png(report: dict[str, Any], path: Path) -> None:
-    """Render wall time and RSS as aligned panels with independent zero-based scales."""
+    """Render each contender's wall-time and RSS bars in one grouped dual-axis chart."""
     from PIL import Image, ImageDraw, PngImagePlugin
 
     validate_report(report)
-    width, height, scale = 1800, 920, 2
+    width, height, scale = 1800, 980, 2
     image = Image.new("RGB", (width * scale, height * scale), "#0d1117")
     draw = ImageDraw.Draw(image)
     title_font = _font(30 * scale)
-    panel_font = _font(22 * scale)
     label_font = _font(15 * scale)
     small_font = _font(12 * scale)
     annotation_font = _font(11 * scale)
@@ -357,73 +390,119 @@ def render_png(report: dict[str, Any], path: Path) -> None:
         fill=muted,
     )
 
-    panels = (("wall_seconds", "Wall link time (seconds)"), ("peak_rss_kib", "Peak process-tree RSS (MiB)"))
-    panel_width, left_margin, panel_stride, top, chart_height = 810, 60, 885, 165, 540
-    bar_width = 78
-    for panel_index, (metric, title) in enumerate(panels):
-        x0 = left_margin + panel_index * panel_stride
-        y_axis = top + chart_height
-        values = _summary_values(report, metric)
-        raw_max = max(float(item["summary"]["bootstrap_95_ci"][1]) for item in values)
-        if metric == "peak_rss_kib":
-            raw_max /= 1024
-        axis_max = max(raw_max * 1.20, 0.001)
-        draw.text((x0 * scale, 120 * scale), title, font=panel_font, fill=fg)
-        draw.rectangle((x0 * scale, top * scale, (x0 + panel_width) * scale, y_axis * scale), outline=grid, width=2 * scale)
-        for tick in range(6):
-            value = axis_max * tick / 5
-            y = y_axis - chart_height * tick / 5
-            draw.line((x0 * scale, int(y * scale), (x0 + panel_width) * scale, int(y * scale)), fill=grid, width=1 * scale)
-            unit = "s" if metric == "wall_seconds" else "MiB"
-            draw.text((x0 * scale, int(y * scale) - 13 * scale), f"{value:.2f} {unit}", font=small_font, fill=muted)
-        gap = panel_width / len(values)
-        for index, item in enumerate(values):
-            summary = item["summary"]
+    # One shared x-axis makes each contender's two independent measurements directly adjacent.
+    # The y-axes intentionally remain independent, linear, and anchored at zero: a normalized
+    # or shared numeric scale would create a composite performance claim.
+    chart_left, chart_right, chart_top, chart_height = 170, 1630, 215, 510
+    chart_bottom = chart_top + chart_height
+    draw.text((chart_left * scale, 120 * scale), "Grouped dual-axis chart: wall time first, peak RSS second", font=label_font, fill=fg)
+    legend = (
+        "Legend — first bar: wall link time, solid, seconds, left axis; "
+        "second bar: peak process-tree RSS, diagonal hatch, MiB, right axis"
+    )
+    draw.text((chart_left * scale, 148 * scale), legend, font=small_font, fill=muted)
+    draw.rectangle(
+        (chart_left * scale, chart_top * scale, chart_right * scale, chart_bottom * scale),
+        outline=grid,
+        width=2 * scale,
+    )
+
+    wall_values = _summary_values(report, "wall_seconds")
+    rss_values = _summary_values(report, "peak_rss_kib")
+    wall_axis_max = max(float(item["summary"]["bootstrap_95_ci"][1]) for item in wall_values) * 1.20
+    rss_axis_max = max(float(item["summary"]["bootstrap_95_ci"][1]) / 1024 for item in rss_values) * 1.20
+    wall_axis_max = max(wall_axis_max, 0.001)
+    rss_axis_max = max(rss_axis_max, 0.001)
+    for tick in range(6):
+        fraction = tick / 5
+        y = chart_bottom - chart_height * fraction
+        draw.line((chart_left * scale, int(y * scale), chart_right * scale, int(y * scale)), fill=grid, width=scale)
+        draw.text((34 * scale, int(y * scale) - 12 * scale), f"{wall_axis_max * fraction:.2f} s", font=small_font, fill=muted)
+        right_label = f"{rss_axis_max * fraction:.0f} MiB"
+        draw.text((int((chart_right + 14) * scale), int(y * scale) - 12 * scale), right_label, font=small_font, fill=muted)
+    draw.text((34 * scale, 186 * scale), "Wall link time (seconds, left axis)", font=small_font, fill=fg)
+    draw.text((int(1330 * scale), 186 * scale), "Peak process-tree RSS (MiB, right axis)", font=small_font, fill=fg)
+
+    group_width = (chart_right - chart_left) / len(CONTENDER_ORDER)
+    bar_width, bar_offset = 70, 60
+    annotation_boxes: list[dict[str, object]] = []
+    for index, contender in enumerate(CONTENDER_ORDER):
+        group_center = chart_left + group_width * (index + 0.5)
+        # The two reserved columns make every annotation deterministic and non-overlapping even
+        # when wall and RSS bar heights (or neighboring contender heights) are nearly identical.
+        for metric, axis_max, center in (
+            ("wall_seconds", wall_axis_max, group_center - bar_offset),
+            ("peak_rss_kib", rss_axis_max, group_center + bar_offset),
+        ):
+            summary = report["contenders"][contender]["summaries"][metric]
             median = float(summary["median"])
             low, high = (float(value) for value in summary["bootstrap_95_ci"])
             if metric == "peak_rss_kib":
                 median, low, high = median / 1024, low / 1024, high / 1024
-            center = x0 + gap * (index + 0.5)
-            bar_top = y_axis - chart_height * median / axis_max
-            color = _hex_rgb(COLORS[item["name"]])
-            draw.rectangle(
-                (int((center - bar_width / 2) * scale), int(bar_top * scale), int((center + bar_width / 2) * scale), y_axis * scale),
-                fill=color,
-            )
-            low_y = y_axis - chart_height * low / axis_max
-            high_y = y_axis - chart_height * high / axis_max
+            bar_top = chart_bottom - chart_height * median / axis_max
+            color = COLORS[contender]
+            left, right = int((center - bar_width / 2) * scale), int((center + bar_width / 2) * scale)
+            top, bottom = int(bar_top * scale), int(chart_bottom * scale)
+            draw.rectangle((left, top, right, bottom), fill=color)
+            if metric == "peak_rss_kib":
+                _draw_diagonal_hatch(
+                    draw,
+                    left=left,
+                    top=top,
+                    right=right,
+                    bottom=bottom,
+                    color="#0d1117",
+                    width=2 * scale,
+                    spacing=10 * scale,
+                )
+            low_y = chart_bottom - chart_height * low / axis_max
+            high_y = chart_bottom - chart_height * high / axis_max
             draw.line((int(center * scale), int(low_y * scale), int(center * scale), int(high_y * scale)), fill=fg, width=2 * scale)
             draw.line((int((center - 10) * scale), int(low_y * scale), int((center + 10) * scale), int(low_y * scale)), fill=fg, width=2 * scale)
             draw.line((int((center - 10) * scale), int(high_y * scale), int((center + 10) * scale), int(high_y * scale)), fill=fg, width=2 * scale)
             value_label = _format_metric(metric, float(summary["median"]))
-            # The panel heading owns the unit.  Avoid repeating it twice in the CI so each
-            # contender keeps a distinct, readable annotation column.
-            if metric == "wall_seconds":
-                ci_label = f"CI {float(summary['bootstrap_95_ci'][0]):.3f} – {float(summary['bootstrap_95_ci'][1]):.3f}"
-            else:
-                ci_label = f"CI {float(summary['bootstrap_95_ci'][0]) / 1024:.3f} – {float(summary['bootstrap_95_ci'][1]) / 1024:.3f}"
-            # Similar contenders naturally have similar bar heights.  Alternate their
-            # annotation rows so adjacent exact values and intervals never print over one
-            # another; the footer identifies every displayed interval as a bootstrap 95% CI.
-            text_y = max(top + 3, high_y - 39 - (index % 2) * 34)
-            value_box = draw.textbbox((0, 0), value_label, font=annotation_font)
-            ci_box = draw.textbbox((0, 0), ci_label, font=annotation_font)
-            value_x = center * scale - (value_box[2] - value_box[0]) / 2
-            ci_x = center * scale - (ci_box[2] - ci_box[0]) / 2
-            draw.text((int(value_x), int(text_y * scale)), value_label, font=annotation_font, fill=fg)
-            draw.text((int(ci_x), int((text_y + 16) * scale)), ci_label, font=annotation_font, fill=muted)
-            label = item["label"]
-            box = draw.textbbox((0, 0), label, font=label_font)
-            draw.text((int((center - (box[2] - box[0]) / scale / 2) * scale), int((y_axis + 12) * scale)), label, font=label_font, fill=fg)
+            ci_label = (
+                f"CI {float(summary['bootstrap_95_ci'][0]):.3f} – {float(summary['bootstrap_95_ci'][1]):.3f} s"
+                if metric == "wall_seconds"
+                else f"CI {float(summary['bootstrap_95_ci'][0]) / 1024:.3f} – {float(summary['bootstrap_95_ci'][1]) / 1024:.3f} MiB"
+            )
+            text_y = max(chart_top + 4, high_y - 37)
+            for row, text, fill in ((0, value_label, fg), (16, ci_label, muted)):
+                annotation = _annotation_box(draw, text, annotation_font, center=center, y=text_y + row, scale=scale)
+                annotation["x"] = min(
+                    max(float(annotation["x"]), chart_left),
+                    chart_right - float(annotation["width"]),
+                )
+                annotation.update({"contender": contender, "metric": metric, "text": text})
+                annotation_boxes.append(annotation)
+                draw.text((int(annotation["x"] * scale), int((text_y + row) * scale)), text, font=annotation_font, fill=fill)
+        contender_label = CONTENDER_LABELS[contender]
+        box = draw.textbbox((0, 0), contender_label, font=label_font)
+        draw.text(
+            (int(group_center * scale - (box[2] - box[0]) / 2), int((chart_bottom + 14) * scale)),
+            contender_label,
+            font=label_font,
+            fill=fg,
+        )
 
-    footer_y = 790
-    draw.text((48 * scale, footer_y * scale), "Bars = median. Whiskers = per-contender bootstrap 95% CI. Metrics are intentionally not scalarized.", font=label_font, fill=muted)
+    footer_y = 865
+    draw.text(
+        (48 * scale, footer_y * scale),
+        "Bars = median. Whiskers and annotations = per-contender bootstrap 95% CI. Metrics are intentionally not scalarized.",
+        font=label_font,
+        fill=muted,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     metadata = PngImagePlugin.PngInfo()
     metadata.add_text("workload", _workload_label(report))
+    metadata.add_text("layout", "grouped-dual-axis-v1")
+    metadata.add_text("bar_order", "wall_seconds,peak_rss_kib")
+    metadata.add_text("left_axis", "wall_seconds")
+    metadata.add_text("right_axis", "peak_rss_kib")
     metadata.add_text("contender_order", ",".join(CONTENDER_ORDER))
     metadata.add_text("metrics", "wall_seconds,peak_rss_kib")
     metadata.add_text("rendered_values", json.dumps(_rendered_values(report), sort_keys=True, separators=(",", ":")))
+    metadata.add_text("annotation_boxes", json.dumps(annotation_boxes, sort_keys=True, separators=(",", ":")))
     image.resize((width, height), Image.Resampling.LANCZOS).save(path, "PNG", pnginfo=metadata)
 
 
@@ -455,9 +534,9 @@ table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #30363d;padd
 .swatch{{display:inline-block;width:.8rem;height:.8rem;border-radius:50%;margin-right:.4rem}}figure{{margin:1.5rem 0}}img{{max-width:100%;height:auto}}
 </style></head><body>
 <h1>Linux ELF competitive linker evidence</h1>
-<p>Workload: <code>{html.escape(_workload_label(report))}</code>. Wall link time and peak process-tree RSS use independent zero-based scales. No scalar combined score is produced.</p>
+<p>Workload: <code>{html.escape(_workload_label(report))}</code>. The figure is a grouped dual-axis chart: for each contender, wall time first is the solid bar on the left seconds axis and peak process-tree RSS second is the diagonally hatched bar on the right MiB axis. The separate zero-based axes preserve both real units; no scalar combined score is produced.</p>
 <aside><strong>Artifact comparison policy:</strong> {html.escape(_artifact_disclaimer(report))}</aside>
-<figure aria-label=\"Competitive linker measurements\"><img src=\"competition.png\" alt=\"Aligned panels for wall link time in seconds and peak process-tree RSS in MiB, in the same fixed contender order.\"><figcaption>Bars show medians; whiskers and labels show per-contender 95% confidence intervals.</figcaption></figure>
+<figure aria-label=\"Grouped dual-axis competitive linker measurements\"><img src=\"competition.png\" alt=\"Grouped dual-axis chart in fixed contender order: wall link time is the first solid bar for each contender on the left zero-based seconds axis; peak process-tree RSS is the second diagonally hatched bar on the right zero-based MiB axis.\"><figcaption>For each contender, wall time comes first and peak process-tree RSS second. Bars show medians; whiskers and labels show per-contender bootstrap 95% confidence intervals. The exact-value table below is the nonvisual source of the measurements.</figcaption></figure>
 <h2>Accessible data table</h2>
 <table><thead><tr><th>Linker</th><th>Wall link time (seconds)</th><th>Wall 95% CI</th><th>Peak process-tree RSS (MiB)</th><th>RSS 95% CI</th></tr></thead>
 <tbody>{_html_table(report)}</tbody></table>
@@ -481,7 +560,7 @@ def render_summary(report: dict[str, Any]) -> str:
     lines = [
         "### Linux ELF competitive linker evidence",
         "",
-        f"Workload: `{_workload_label(report)}`. Wall time and peak RSS are co-primary; No scalar combined score.",
+        f"Workload: `{_workload_label(report)}`. The grouped figure places wall time first and peak RSS second with separate zero-based axes; both remain co-primary. No scalar combined score is produced.",
         "",
         "#### Artifact comparison policy",
         "",
