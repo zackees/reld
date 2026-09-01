@@ -99,6 +99,44 @@ cannot create a false artifact delta, validates the checked lock, downloads its 
 gate, and uploads the report plus retained identity-failure evidence. Do not add this workload to
 the public benchmark matrix.
 
+### Linux linker competition evidence
+
+`.github/workflows/linux-linker-competition.yml` is a separate Linux-only, same-run competitive
+evidence workflow. It is deliberately a direct `ubuntu-24.04` VM job rather than a job container:
+the replay must receive an explicitly preflighted, delegated cgroup-v2 root so the measurement
+runner can validate process-tree RSS. Pull requests run only when their *head* branch starts with
+`perf/linux/`; a manual dispatch requires a full immutable 40-hex `baseline_sha`. A PR baseline is
+always the exact `github.event.pull_request.base.sha`, never a branch name or floating revision.
+
+The workflow builds both reld binaries from separate non-git source archives under the same pinned
+Rust 1.95.0 toolchain, provisions external linkers from the checked
+`ci/linux-linker-comparators.lock.json`, then invokes:
+
+```sh
+python -m ci.linux_linker_competition validate-lock \
+  --lock ci/linux-linker-comparators.lock.json
+python -m ci.linux_linker_competition provision \
+  --lock ci/linux-linker-comparators.lock.json --output-dir <comparators-dir>
+python -m ci.linux_linker_competition replay \
+  --corpus-lock ci/clang-link-corpus.lock.json \
+  --comparator-lock ci/linux-linker-comparators.lock.json \
+  --baseline <baseline-reld> --candidate <candidate-reld> \
+  --comparators-dir <comparators-dir> --cgroup-root <delegated-cgroup-root> \
+  --workdir <workdir> --report <report.json> --samples 10 --warmups 2
+```
+
+The competition runner first enforces the four-run raw reld baseline/candidate identity gate and
+the two-run self-determinism/native oracle gate for every external linker. It records default
+product behavior, with wall time and peak *process-tree RSS* as independent co-primary metrics.
+`memory.peak` and CPU data are whole-tree diagnostics, never relabelled as RSS. Do not substitute
+parent-only `/usr/bin/time` or `getrusage` data: forked linkers make it materially wrong.
+
+The renderer produces one paired wall-time/RSS graph with separate zero-based scales, confidence
+intervals, and fixed contender order. The workflow uploads the schema-versioned report, raw JSONL,
+provenance, accessible HTML, PNG, generated job summary, and (only on failure) retained mismatch
+artifacts. It has no schedule and never writes benchmark history; hosted results support only
+same-run comparisons.
+
 Prefer the complete `RelWithDebInfo` closure. The standard public `ubuntu-24.04` runner has a
 measured 16 GB RAM and 14 GB SSD, and each GitHub Release asset must remain below 2 GiB; the checked
 corpus must fit all three constraints with operational headroom. These ceilings are not permission
@@ -152,6 +190,9 @@ run `xsv count`, the full pinned PCRE2 CTest suite, and the C++ name-mangling CT
 - Benchmark replay and execution oracle: `ci/benchmark_runner.py`
 - Immutable Clang corpus lock/replay: `ci/clang_link_replay.py` and
   `.github/workflows/clang-link-replay.yml`
+- Competitive Linux replay and paired renderer: `ci/linux_linker_competition.py`,
+  `ci/linux_linker_competition_render.py`, and
+  `.github/workflows/linux-linker-competition.yml`
 - Consumer acceptance driver: `ci/consumer_acceptance.py`
 - Linux acceptance and differential CI: `.github/workflows/ci.yml`
 - Three-platform consumer acceptance: `.github/workflows/linker-artifacts.yml`
