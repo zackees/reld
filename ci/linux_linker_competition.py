@@ -49,6 +49,8 @@ CONTENDER_LABELS = {
     "baseline": "reld baseline",
     "candidate": "reld candidate",
 }
+RUNNER_ENV_ALLOWLIST = ("CI", "GITHUB_ACTIONS", "ImageOS", "ImageVersion", "RUNNER_ARCH", "RUNNER_OS")
+RECIPE_ENV_ALLOWLIST = frozenset({"LANG", "LC_ALL", "LC_MESSAGES", "LC_NUMERIC", "PATH", "SOURCE_DATE_EPOCH", "TZ"})
 MIN_SAMPLES = 10
 MIN_WARMUPS = 2
 RSS_BACKEND = "cgroup-v2-proc-vmrss-sum"
@@ -228,7 +230,7 @@ def first_differing_offset(left: Path, right: Path) -> int | None:
 
 
 def identity_gate(
-    contenders: dict[str, Path], *, link: Callable[[str, Path], None], native_oracle: Callable[[Path], bool], artifact_dir: Path
+    contenders: dict[str, Path], *, link: Callable[[str, Path], None], native_oracle: Callable[[Path], bool], artifact_dir: Path, output_path: Path
 ) -> dict[str, Any]:
     """Prove baseline/candidate equivalence and external self-determinism before timing."""
     if tuple(contenders) != CONTENDER_ORDER:
@@ -238,11 +240,13 @@ def identity_gate(
     for label in ("baseline", "candidate", *EXTERNAL_CONTENDERS):
         paths: list[Path] = []
         for run in (1, 2):
-            output = artifact_dir / f"{label}-{run}"
-            link(label, output)
-            if not output.is_file() or output.stat().st_size == 0 or not native_oracle(output):
+            output_path.unlink(missing_ok=True)
+            link(label, output_path)
+            if not output_path.is_file() or output_path.stat().st_size == 0 or not native_oracle(output_path):
                 raise CompetitionError(f"{label} identity run {run} failed exact native oracle")
-            paths.append(output)
+            retained = artifact_dir / f"{label}-{run}"
+            shutil.copyfile(output_path, retained)
+            paths.append(retained)
         artifacts[label] = paths
     hashes = {label: [sha256_file(path) for path in paths] for label, paths in artifacts.items()}
     reference = artifacts["baseline"][0]
@@ -598,8 +602,7 @@ def _direct_command(lock: dict[str, Any], linker: Path, corpus: Path, output: Pa
     recipe = link_recipe(lock)
     # The corpus's no-fork switch is a diagnostic-control flag. Competition measures default
     # product mode, so remove it for every contender and record the resulting argv.
-    arguments = [_expand(arg, corpus, output) for arg in recipe.arguments if arg != "--no-fork"]
-    return [str(linker), *arguments], corpus / recipe.cwd, recipe.environment
+    return _direct_command_from_recipe(recipe, linker, corpus, output)
 
 
 def workload_from_corpus_lock(lock: dict[str, Any]) -> dict[str, Any]:
@@ -615,6 +618,127 @@ def workload_from_corpus_lock(lock: dict[str, Any]) -> dict[str, Any]:
         "platform": lock["platform"],
         "archive": {"url": archive["url"], "sha256": archive["sha256"], "bytes": archive["bytes"]},
     }
+
+
+def _cpu_model(cpuinfo: str) -> str | None:
+    for line in cpuinfo.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in {"model name", "Hardware"}:
+            return value.strip()
+    return None
+
+
+def _memtotal_kib(meminfo: str) -> int | None:
+    for line in meminfo.splitlines():
+        key, separator, value = line.partition(":")
+        if key == "MemTotal" and separator:
+            fields = value.split()
+            if len(fields) >= 2 and fields[1] == "kB" and fields[0].isdigit():
+                return int(fields[0])
+    return None
+
+
+def _pressure_snapshot(pressure: str) -> dict[str, dict[str, float | int]]:
+    snapshot: dict[str, dict[str, float | int]] = {}
+    for line in pressure.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        values: dict[str, float | int] = {}
+        for field in fields[1:]:
+            key, separator, value = field.partition("=")
+            if separator and key in {"avg10", "avg60", "avg300", "total"}:
+                values[key] = int(value) if key == "total" else float(value)
+        if fields[0] in {"some", "full"} and values:
+            snapshot[fields[0]] = values
+    return snapshot
+
+
+def _mount_for_path(mountinfo: str, path: Path) -> dict[str, str] | None:
+    resolved = str(path.resolve())
+    matches: list[dict[str, str]] = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        if "-" not in fields:
+            continue
+        dash = fields.index("-")
+        if len(fields) <= dash + 3 or len(fields) < 6:
+            continue
+        mount_point = fields[4].replace("\\040", " ")
+        if resolved == mount_point or resolved.startswith(mount_point.rstrip("/") + "/"):
+            matches.append(
+                {
+                    "mount_point": mount_point,
+                    "filesystem": fields[dash + 1],
+                    "source": fields[dash + 2],
+                    "mount_options": fields[5],
+                    "super_options": fields[dash + 3],
+                }
+            )
+    return max(matches, key=lambda match: len(match["mount_point"])) if matches else None
+
+
+def _allowlisted_recipe_environment(environment: dict[str, str]) -> dict[str, str]:
+    unexpected = set(environment) - RECIPE_ENV_ALLOWLIST
+    if unexpected:
+        raise CompetitionError(f"recipe environment includes non-allowlisted keys: {sorted(unexpected)}")
+    return {key: environment[key] for key in sorted(environment)}
+
+
+def _optional_read(path: Path, read_text: Callable[[Path], str]) -> str | None:
+    try:
+        return read_text(path)
+    except OSError:
+        return None
+
+
+def capture_host_provenance(
+    *,
+    corpus: Path,
+    workdir: Path,
+    cgroup_root: Path,
+    output_path: Path,
+    recipe: Any,
+    contenders: dict[str, Path],
+    read_text: Callable[[Path], str] = lambda path: path.read_text(encoding="utf-8"),
+) -> dict[str, Any]:
+    """Capture bounded, non-secret runtime evidence immediately before measurement work."""
+    uname = os.uname()
+    try:
+        affinity = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        affinity = []
+    mountinfo = read_text(Path("/proc/self/mountinfo"))
+    commands = {}
+    for label in CONTENDER_ORDER:
+        argv, cwd, environment = _direct_command_from_recipe(recipe, contenders[label], corpus, output_path)
+        commands[label] = {"argv": argv, "cwd": str(cwd), "environment": _allowlisted_recipe_environment(environment)}
+    return {
+        "runner_image_env": {key: os.environ[key] for key in RUNNER_ENV_ALLOWLIST if key in os.environ},
+        "runtime": {"python_version": sys.version, "python_implementation": sys.implementation.name},
+        "host": {
+            "uname": {"sysname": uname.sysname, "release": uname.release, "version": uname.version, "machine": uname.machine},
+            "cpu_model": _cpu_model(read_text(Path("/proc/cpuinfo"))),
+            "cpu_count": os.cpu_count(),
+            "sched_affinity": affinity,
+            "cpuset_effective": (_optional_read(cgroup_root / "cpuset.cpus.effective", read_text) or "").strip() or None,
+            "memtotal_kib": _memtotal_kib(read_text(Path("/proc/meminfo"))),
+            "loadavg": read_text(Path("/proc/loadavg")).strip(),
+            "pressure": {name: _pressure_snapshot(read_text(Path("/proc/pressure") / name)) for name in ("cpu", "memory", "io")},
+        },
+        "filesystems": {"corpus": _mount_for_path(mountinfo, corpus), "workdir": _mount_for_path(mountinfo, workdir)},
+        "cgroup": {
+            "path": str(cgroup_root),
+            "controllers": read_text(cgroup_root / "cgroup.controllers").split(),
+            "subtree_control": read_text(cgroup_root / "cgroup.subtree_control").split(),
+        },
+        "commands": commands,
+    }
+
+
+def _direct_command_from_recipe(recipe: Any, linker: Path, corpus: Path, output: Path) -> tuple[list[str], Path, dict[str, str]]:
+    arguments = [_expand(arg, corpus, output) for arg in recipe.arguments if arg != "--no-fork"]
+    return [str(linker), *arguments], corpus / recipe.cwd, dict(recipe.environment)
 
 
 def artifact_comparison_policy() -> dict[str, Any]:
@@ -756,20 +880,28 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     recipe = link_recipe(corpus_lock)
     environment = dict(recipe.environment)
     cwd = corpus / recipe.cwd
+    operation_output = workdir / "link-output"
+    host_provenance = capture_host_provenance(
+        corpus=corpus,
+        workdir=workdir,
+        cgroup_root=args.cgroup_root.resolve(),
+        output_path=operation_output,
+        recipe=recipe,
+        contenders=contenders,
+    )
     def link(label: str, output: Path) -> None:
         command, _, env = _direct_command(corpus_lock, contenders[label], corpus, output)
         completed = subprocess.run(command, cwd=cwd, env=env, capture_output=True, check=False)
         if completed.returncode != 0 or completed.stdout != recipe.stdout or completed.stderr != recipe.stderr:
             raise CompetitionError(f"{label} link failed exact link-output oracle")
-    identity = identity_gate(contenders, link=link, native_oracle=lambda output: _native_oracle(output, corpus_lock, corpus, cwd, environment), artifact_dir=workdir / "identity-artifacts")
+    identity = identity_gate(contenders, link=link, native_oracle=lambda output: _native_oracle(output, corpus_lock, corpus, cwd, environment), artifact_dir=workdir / "identity-artifacts", output_path=operation_output)
     plan = round_plan(samples=args.samples, warmups=args.warmups, seed=103)
     expected_hashes = {label: identity["reld_identity"]["sha256"] if label in {"baseline", "candidate"} else identity["comparators"][label]["sha256"] for label in CONTENDER_ORDER}
     samples: list[dict[str, Any]] = []
     for phase, rows in (("warmup", plan["warmups"]), ("sample", plan["rounds"])):
         for row in rows:
             for position, label in enumerate(row["order"]):
-                output = workdir / "outputs" / f"{phase}-{row['round']}-{label}"
-                output.parent.mkdir(parents=True, exist_ok=True)
+                output = operation_output
                 output.unlink(missing_ok=True)
                 trial = TrialCgroup.create(args.cgroup_root.resolve(), f"{phase}-{row['round']}-{label}")
                 try:
@@ -797,10 +929,12 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
             "comparator_lock": {"path": str(args.comparator_lock.resolve()), "sha256": sha256_file(args.comparator_lock)},
             "execution": {
                 "removed_recipe_arguments": ["--no-fork"],
+                "effective_output_path": str(operation_output),
                 "metric_backends": {"wall_seconds": WALL_CLOCK_BACKEND, "peak_rss_kib": RSS_BACKEND},
                 "cgroup_root": str(args.cgroup_root.resolve()),
                 "rss_self_test": rss_self_test,
             },
+            "host": host_provenance,
         },
         workload=workload_from_corpus_lock(corpus_lock),
     )

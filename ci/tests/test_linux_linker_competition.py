@@ -10,6 +10,7 @@ import tarfile
 import time
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -130,9 +131,11 @@ def test_provision_verifies_archive_binary_and_exact_version(tmp_path: Path) -> 
 
 def test_identity_gate_requires_four_reld_bytes_and_two_per_external(tmp_path: Path) -> None:
     calls: list[str] = []
+    outputs: list[Path] = []
 
     def link(label: str, output: Path) -> None:
         calls.append(label)
+        outputs.append(output)
         output.write_bytes(b"reld" if label in {"baseline", "candidate"} else label.encode())
 
     result = competition.identity_gate(
@@ -140,8 +143,10 @@ def test_identity_gate_requires_four_reld_bytes_and_two_per_external(tmp_path: P
         link=link,
         native_oracle=lambda output: output.is_file(),
         artifact_dir=tmp_path,
+        output_path=tmp_path / "fixed-output",
     )
     assert calls == ["baseline", "baseline", "candidate", "candidate", "bfd", "bfd", "lld", "lld", "mold", "mold", "wild", "wild"]
+    assert outputs == [tmp_path / "fixed-output"] * 12
     assert result["reld_identity"]["sha256"] == _sha(b"reld")
     assert result["comparators"]["wild"]["sha256"] == _sha(b"wild")
 
@@ -156,6 +161,7 @@ def test_identity_gate_retains_first_offset_on_candidate_delta(tmp_path: Path) -
             link=link,
             native_oracle=lambda output: True,
             artifact_dir=tmp_path,
+            output_path=tmp_path / "fixed-output",
         )
     assert {path.name for path in tmp_path.iterdir()} >= {"baseline-1", "baseline-2", "candidate-1", "candidate-2", "identity-failure.json"}
     assert json.loads((tmp_path / "identity-failure.json").read_text())["first_differing_offset"] == 1
@@ -351,6 +357,47 @@ def test_workload_from_checked_corpus_lock_is_explicit_for_renderer() -> None:
         "platform": "x86_64-unknown-linux-gnu",
         "archive": {"url": "https://example.invalid/corpus.tar.zst", "sha256": "b" * 64, "bytes": 42},
     }
+
+
+def test_host_provenance_parses_bounded_host_evidence_and_equivalent_operation_templates(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    workdir = tmp_path / "workdir"
+    cgroup = tmp_path / "cgroup"
+    corpus.mkdir()
+    workdir.mkdir()
+    cgroup.mkdir()
+    contenders = {label: tmp_path / label for label in competition.CONTENDER_ORDER}
+    fixtures = {
+        "/proc/cpuinfo": "processor : 0\nmodel name : Test CPU\n",
+        "/proc/meminfo": "MemTotal:       12345 kB\n",
+        "/proc/loadavg": "1.00 2.00 3.00 4/5 6\n",
+        "/proc/self/mountinfo": "24 1 0:20 / / rw,relatime - ext4 /dev/test rw\n",
+        "/proc/pressure/cpu": "some avg10=0.01 avg60=0.02 avg300=0.03 total=4\n",
+        "/proc/pressure/memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=5\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=6\n",
+        "/proc/pressure/io": "some avg10=0.00 avg60=0.00 avg300=0.00 total=7\n",
+        str(cgroup / "cpuset.cpus.effective"): "0-3\n",
+        str(cgroup / "cgroup.controllers"): "cpu memory\n",
+        str(cgroup / "cgroup.subtree_control"): "cpu memory\n",
+    }
+    provenance = competition.capture_host_provenance(
+        corpus=corpus,
+        workdir=workdir,
+        cgroup_root=cgroup,
+        output_path=workdir / "link-output",
+        recipe=SimpleNamespace(arguments=("--no-fork", "-o", "{OUTPUT}", "@{CORPUS}/link.rsp"), cwd=".", environment={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}),
+        contenders=contenders,
+        read_text=lambda path: fixtures[str(path)],
+    )
+    assert provenance["host"]["cpu_model"] == "Test CPU"
+    assert provenance["host"]["memtotal_kib"] == 12345
+    assert provenance["host"]["pressure"]["memory"]["full"]["total"] == 6
+    assert provenance["cgroup"] == {"path": str(cgroup), "controllers": ["cpu", "memory"], "subtree_control": ["cpu", "memory"]}
+    commands = provenance["commands"]
+    assert [commands[label]["argv"][1:] for label in competition.CONTENDER_ORDER] == [commands["bfd"]["argv"][1:]] * len(competition.CONTENDER_ORDER)
+    assert {commands[label]["cwd"] for label in competition.CONTENDER_ORDER} == {str(corpus)}
+    assert {json.dumps(commands[label]["environment"], sort_keys=True) for label in competition.CONTENDER_ORDER} == {json.dumps({"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}, sort_keys=True)}
+    with pytest.raises(competition.CompetitionError, match="non-allowlisted"):
+        competition._allowlisted_recipe_environment({"SECRET": "nope"})
 
 
 def test_replay_runs_rss_self_test_before_expensive_corpus_acquisition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
