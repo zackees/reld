@@ -41,8 +41,19 @@ def _entry(*, archive: bytes = b"archive", binary: bytes = b"binary") -> dict[st
 def _archive(path: Path, member: str, payload: bytes) -> bytes:
     with tarfile.open(path, "w:gz") as archive:
         info = tarfile.TarInfo(member)
+        info.mode = 0o755
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
+    return path.read_bytes()
+
+
+def _archive_tree(path: Path, members: dict[str, tuple[bytes, int]]) -> bytes:
+    with tarfile.open(path, "w:gz") as archive:
+        for member, (payload, mode) in members.items():
+            info = tarfile.TarInfo(member)
+            info.mode = mode
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
     return path.read_bytes()
 
 
@@ -127,6 +138,35 @@ def test_provision_verifies_archive_binary_and_exact_version(tmp_path: Path) -> 
     bad = _lock({name: {**entry, "binary_sha256": "1" * 64} for name in competition.EXTERNAL_CONTENDERS})
     with pytest.raises(competition.CompetitionError, match="binary SHA-256 mismatch"):
         competition.provision_comparators(bad, tmp_path / "bad", fetch=fetch)
+
+
+def test_provision_keeps_verified_runtime_tree_and_replaces_stale_closure(tmp_path: Path) -> None:
+    first_archive = _archive_tree(
+        tmp_path / "first.tar.gz",
+        {
+            "bin/tool": (b"#!/bin/sh\ncat \"$(dirname \"$0\")/tool.bin\"\n", 0o755),
+            "bin/tool.bin": (b"tool 1.0\n", 0o644),
+            "lib/obsolete": (b"old", 0o644),
+        },
+    )
+    launcher = b"#!/bin/sh\ncat \"$(dirname \"$0\")/tool.bin\"\n"
+    first_entry = _entry(archive=first_archive, binary=launcher)
+    first_lock = _lock({name: first_entry for name in competition.EXTERNAL_CONTENDERS})
+    paths = competition.provision_comparators(first_lock, tmp_path / "out", fetch=lambda url: first_archive)
+    assert paths["mold"] == tmp_path / "out" / "mold" / "bin" / "tool"
+    assert paths["mold"].stat().st_mode & 0o111
+    assert (tmp_path / "out" / "mold" / "bin" / "tool.bin").read_text() == "tool 1.0\n"
+    assert (tmp_path / "out" / "mold" / "lib" / "obsolete").read_text() == "old"
+
+    second_archive = _archive_tree(
+        tmp_path / "second.tar.gz",
+        {"bin/tool": (launcher, 0o755), "bin/tool.bin": (b"tool 1.0\n", 0o644)},
+    )
+    second_entry = _entry(archive=second_archive, binary=launcher)
+    second_lock = _lock({name: second_entry for name in competition.EXTERNAL_CONTENDERS})
+    second_paths = competition.provision_comparators(second_lock, tmp_path / "out", fetch=lambda url: second_archive)
+    assert second_paths["mold"].read_bytes() == launcher
+    assert not (tmp_path / "out" / "mold" / "lib" / "obsolete").exists()
 
 
 def test_identity_gate_requires_four_reld_bytes_and_two_per_external(tmp_path: Path) -> None:

@@ -199,8 +199,11 @@ def provision_comparators(
         actual = _sha256_bytes(data)
         if actual != entry["archive_sha256"]:
             raise CompetitionError(f"{label} archive SHA-256 mismatch: expected {entry['archive_sha256']}, got {actual}")
-        archive = output_dir / f".{label}.archive"
-        staging = output_dir / f".{label}.extract"
+        archive = output_dir / f".{label}.{os.getpid()}.archive"
+        staging = output_dir / f".{label}.{os.getpid()}.extract"
+        destination = output_dir / label
+        installed = False
+        verified = False
         archive.write_bytes(data)
         try:
             if staging.exists():
@@ -212,17 +215,24 @@ def provision_comparators(
                 raise CompetitionError(f"{label} archive lacks checked binary {entry['binary_path']}")
             if sha256_file(source) != entry["binary_sha256"]:
                 raise CompetitionError(f"{label} binary SHA-256 mismatch")
-            destination = output_dir / label
-            shutil.copyfile(source, destination)
-            destination.chmod(destination.stat().st_mode | 0o111)
-            completed = subprocess.run([destination, *entry["version_argv"]], capture_output=True, check=False)
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            elif destination.exists():
+                shutil.rmtree(destination)
+            os.replace(staging, destination)
+            installed = True
+            binary = destination / entry["binary_path"]
+            completed = subprocess.run([binary, *entry["version_argv"]], capture_output=True, check=False)
             if completed.returncode or completed.stdout.decode("utf-8", "replace") != entry["version_stdout"] or completed.stderr.decode("utf-8", "replace") != entry["version_stderr"]:
                 raise CompetitionError(f"{label} exact version output mismatch")
-            result[label] = destination
+            result[label] = binary
+            verified = True
         finally:
             archive.unlink(missing_ok=True)
             if staging.exists():
                 shutil.rmtree(staging)
+            if installed and not verified:
+                shutil.rmtree(destination)
     return result
 
 
