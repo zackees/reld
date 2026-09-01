@@ -111,11 +111,33 @@ def _validate_summary(summary: object, field: str) -> None:
 
 
 def _workload_label(report: dict[str, Any]) -> str:
-    """Use optional workload metadata when available without making it canonical schema."""
-    workload = report.get("workload")
-    if isinstance(workload, dict) and isinstance(workload.get("id"), str) and workload["id"]:
-        return workload["id"]
-    return "Immutable Linux ELF final-link replay"
+    workload = _mapping(report["workload"], "workload")
+    return str(workload["id"])
+
+
+def _validate_workload(value: object) -> None:
+    """Require the immutable corpus identity that makes the comparison reproducible."""
+    workload = _mapping(value, "workload")
+    _require_exact_keys(
+        workload,
+        {"id", "source_tag", "source_repository", "source_peeled_commit", "platform", "archive"},
+        "workload",
+    )
+    for field in ("id", "source_tag", "source_repository", "platform"):
+        if not isinstance(workload[field], str) or not workload[field]:
+            raise CompetitionRenderError(f"workload.{field} must be a non-empty string")
+    commit = workload["source_peeled_commit"]
+    if not isinstance(commit, str) or len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        raise CompetitionRenderError("workload.source_peeled_commit must be a lowercase Git SHA-1")
+    archive = _mapping(workload["archive"], "workload.archive")
+    _require_exact_keys(archive, {"url", "sha256", "bytes"}, "workload.archive")
+    if not isinstance(archive["url"], str) or not archive["url"]:
+        raise CompetitionRenderError("workload.archive.url must be a non-empty string")
+    digest = archive["sha256"]
+    if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise CompetitionRenderError("workload.archive.sha256 must be a lowercase SHA-256 digest")
+    if not isinstance(archive["bytes"], int) or isinstance(archive["bytes"], bool) or archive["bytes"] <= 0:
+        raise CompetitionRenderError("workload.archive.bytes must be a positive integer")
 
 
 def _validate_metric_backend(value: object, field: str) -> None:
@@ -133,12 +155,7 @@ def validate_report(report: object) -> None:
     _reject_scores(report)
     if report.get("schema_version") != SCHEMA_VERSION:
         raise CompetitionRenderError(f"schema_version must be {SCHEMA_VERSION}")
-    workload = report.get("workload")
-    if workload is not None:
-        workload_detail = _mapping(workload, "workload")
-        workload_id = workload_detail.get("id")
-        if not isinstance(workload_id, str) or not workload_id:
-            raise CompetitionRenderError("workload.id must be a non-empty string when workload is supplied")
+    _validate_workload(report.get("workload"))
 
     order = _list(report.get("contender_order"), "contender_order")
     if tuple(order) != CONTENDER_ORDER:

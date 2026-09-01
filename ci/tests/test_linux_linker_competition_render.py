@@ -29,6 +29,21 @@ def _summary(median: float) -> dict[str, object]:
     }
 
 
+def _workload() -> dict[str, object]:
+    return {
+        "id": "llvmorg-22.1.8-clang-final-link",
+        "source_tag": "llvmorg-22.1.8",
+        "source_repository": "https://github.com/llvm/llvm-project.git",
+        "source_peeled_commit": "a" * 40,
+        "platform": "x86_64-unknown-linux-gnu",
+        "archive": {
+            "url": "https://example.invalid/releases/llvmorg-22.1.8-corpus.tar.zst",
+            "sha256": "b" * 64,
+            "bytes": 73_413_916,
+        },
+    }
+
+
 def _report() -> dict[str, object]:
     medians = {
         "bfd": (3.57, 983.0 * 1024),
@@ -70,6 +85,7 @@ def _report() -> dict[str, object]:
             )
     return {
         "schema_version": 2,
+        "workload": _workload(),
         "contender_order": list(CONTENDER_ORDER),
         "contenders": contenders,
         "comparisons": [
@@ -152,6 +168,7 @@ def test_report_contract_is_fixed_and_accepts_complete_evidence():
         (lambda report: report.__setitem__("contender_order", list(reversed(CONTENDER_ORDER))), "contender_order"),
         (lambda report: report["contenders"]["lld"]["summaries"].pop("peak_rss_kib"), "peak_rss_kib"),
         (lambda report: report.__setitem__("combined_score", 1.0), "combined score"),
+        (lambda report: report["workload"].pop("archive"), "workload is missing"),
         (lambda report: report["contenders"]["mold"]["summaries"]["wall_seconds"].__setitem__("bootstrap_95_ci", [0.1]), "bootstrap_95_ci"),
         (lambda report: report["raw_samples"][0].__setitem__("metric_backend", "gnu-time-parent"), "metric_backend"),
         (lambda report: report["raw_samples"].pop(), "raw_samples"),
@@ -265,6 +282,7 @@ def test_measurement_build_report_renders_without_schema_translation(tmp_path: P
         identity={"reld_identity": {"sha256": "a" * 64}, "comparators": {}},
         plan=competition.round_plan(samples=10, warmups=2, seed=103),
         provenance={"corpus_lock": {"sha256": "b" * 64}},
+        workload=_workload(),
     )
 
     validate_report(report)
