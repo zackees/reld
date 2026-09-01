@@ -617,6 +617,27 @@ def workload_from_corpus_lock(lock: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def artifact_comparison_policy() -> dict[str, Any]:
+    """Declare the only artifact-equivalence reference without conflating performance peers."""
+    return {
+        "artifact_reference": "baseline",
+        "baseline": {
+            "artifact_reference": True,
+            "role": "exact pre-change reld artifact reference",
+        },
+        "wild": {
+            "role": "external performance comparator only",
+            "artifact_reference": False,
+            "artifact_equivalence_claim": False,
+            "disclaimer": (
+                "Wild is an external performance comparator only. Exact pre-change reld baseline "
+                "is the artifact reference; no Wild/reld equivalence claim is made because reld "
+                "intentionally changed build-ID/output-layout policy in PR #76."
+            ),
+        },
+    }
+
+
 def build_report(
     *,
     contenders: dict[str, Path],
@@ -663,6 +684,7 @@ def build_report(
         }
         for label in (*EXTERNAL_CONTENDERS, "baseline")
     ]
+    policy = artifact_comparison_policy()
     return {
         "schema_version": 2,
         "contender_order": list(CONTENDER_ORDER),
@@ -670,8 +692,9 @@ def build_report(
         "comparisons": comparisons,
         "raw_samples": raw_samples,
         "workload": workload,
+        "artifact_comparison_policy": policy,
         "identity": identity,
-        "provenance": provenance,
+        "provenance": {**provenance, "artifact_comparison_policy": policy},
         "metric_scope": {
             "wall_seconds": "direct linker transaction, default fork mode",
             "peak_rss_kib": "maximum summed VmRSS of PIDs in unique cgroup-v2 trial; validated by parent+child allocation preflight",

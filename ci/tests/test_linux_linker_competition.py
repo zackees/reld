@@ -219,8 +219,22 @@ def test_report_uses_the_renderer_canonical_contender_summary_and_comparison_sch
 
     assert report["contender_order"] == list(competition.CONTENDER_ORDER)
     assert list(report["contenders"]) == list(competition.CONTENDER_ORDER)
-    assert set(report) >= {"contender_order", "contenders", "comparisons", "raw_samples", "workload", "identity", "provenance", "metric_scope"}
+    assert set(report) >= {"contender_order", "contenders", "comparisons", "raw_samples", "workload", "artifact_comparison_policy", "identity", "provenance", "metric_scope"}
     assert report["workload"]["id"] == "llvmorg-22.1.8-clang-final-link"
+    policy = report["artifact_comparison_policy"]
+    assert policy == report["provenance"]["artifact_comparison_policy"]
+    assert policy["artifact_reference"] == "baseline"
+    assert policy["baseline"]["artifact_reference"] is True
+    assert policy["wild"] == {
+        "role": "external performance comparator only",
+        "artifact_reference": False,
+        "artifact_equivalence_claim": False,
+        "disclaimer": (
+            "Wild is an external performance comparator only. Exact pre-change reld baseline "
+            "is the artifact reference; no Wild/reld equivalence claim is made because reld "
+            "intentionally changed build-ID/output-layout policy in PR #76."
+        ),
+    }
     for label, contender in report["contenders"].items():
         assert contender["label"] == competition.CONTENDER_LABELS[label]
         assert set(contender) == {"label", "path", "sha256", "summaries"}
