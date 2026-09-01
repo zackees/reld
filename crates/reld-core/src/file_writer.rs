@@ -55,6 +55,8 @@ struct OutputConfig {
     file_replacement_mode: FileReplacementMode,
     should_write_trace: bool,
     file_write_mode: Option<FileWriteMode>,
+    fallocate_output_file: Option<bool>,
+    madvise_huge_pages: Option<bool>,
 }
 
 enum FileCreator<O: OutputFileData> {
@@ -133,6 +135,8 @@ impl<F: FileSystem> Output<F> {
                 file_replacement_mode,
                 should_write_trace: args.common().write_trace,
                 file_write_mode: args.common().file_write_mode,
+                fallocate_output_file: args.common().fallocate_output_file,
+                madvise_huge_pages: args.common().madvise_huge_pages,
             },
         }
     }
@@ -275,6 +279,8 @@ impl<O: OutputFileData> SizedOutput<O> {
                 size: file_size,
                 file_replacement_mode: output_config.file_replacement_mode,
                 write_mode: output_config.file_write_mode,
+                fallocate_output_file: output_config.fallocate_output_file,
+                madvise_huge_pages: output_config.madvise_huge_pages,
             },
         )?;
         let trace = TraceOutput::new(output_config.should_write_trace, path);
