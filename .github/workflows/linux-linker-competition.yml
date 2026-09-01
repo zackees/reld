@@ -39,6 +39,7 @@ jobs:
       REPORT: competition-evidence/report.json
       RENDER_DIR: competition-evidence/render
       SUMMARY_OUTPUT: competition-evidence/summary.md
+      VENV_PYTHON: ${{ github.workspace }}/.venv/bin/python
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -85,16 +86,14 @@ jobs:
           sudo sh -c 'printf "+memory +cpu\\n" > /sys/fs/cgroup/cgroup.subtree_control'
           sudo mkdir -p "$CGROUP_ROOT"
           sudo sh -c "printf '+memory +cpu\\n' > '$CGROUP_ROOT/cgroup.subtree_control'"
-          sudo chown "$(id -u):$(id -g)" "$CGROUP_ROOT"
-          test -w "$CGROUP_ROOT/cgroup.procs"
-          test -w "$CGROUP_ROOT/cgroup.subtree_control"
 
       - name: Self-test cgroup-v2 RSS collector
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$REPLAY_WORKDIR"
-          uv run --no-sync python -m ci.linux_linker_competition self-test \
+          test -x "$VENV_PYTHON"
+          sudo --non-interactive "$VENV_PYTHON" -m ci.linux_linker_competition self-test \
             --cgroup-root "$CGROUP_ROOT" \
             --workdir "$REPLAY_WORKDIR"
 
@@ -150,7 +149,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --no-sync python -m ci.linux_linker_competition replay \
+          test -x "$VENV_PYTHON"
+          sudo --non-interactive "$VENV_PYTHON" -m ci.linux_linker_competition replay \
             --corpus-lock "$CORPUS_LOCK" \
             --comparator-lock "$COMPARATOR_LOCK" \
             --baseline "$EVIDENCE_DIR/baseline-reld" \

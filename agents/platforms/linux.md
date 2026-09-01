@@ -104,7 +104,10 @@ the public benchmark matrix.
 `.github/workflows/linux-linker-competition.yml` is a separate Linux-only, same-run competitive
 evidence workflow. It is deliberately a direct `ubuntu-24.04` VM job rather than a job container:
 the replay must receive an explicitly preflighted, delegated cgroup-v2 root so the measurement
-runner can validate process-tree RSS. Pull requests run only when their *head* branch starts with
+runner can validate process-tree RSS. Because an Actions step begins outside that subtree, the
+workflow invokes its cgroup collector self-test and replay through the pinned absolute venv Python
+under non-interactive `sudo`; this root-scoped boundary is required for a process launcher to move
+itself and its descendants into measurement children. Pull requests run only when their *head* branch starts with
 `perf/linux/`; a manual dispatch requires a full immutable 40-hex `baseline_sha`. A PR baseline is
 always the exact `github.event.pull_request.base.sha`, never a branch name or floating revision.
 
