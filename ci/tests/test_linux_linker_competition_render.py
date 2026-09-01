@@ -294,6 +294,8 @@ def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path:
     markdown = paths.summary.read_text(encoding="utf-8")
     with Image.open(paths.png) as image:
         png_values = json.loads(image.text["rendered_values"])
+        # The paired panels reserve a readable annotation column for all six contenders.
+        assert image.size == (1800, 920)
         assert image.text["contender_order"].split(",") == list(CONTENDER_ORDER)
         assert image.text["metrics"] == "wall_seconds,peak_rss_kib"
 

@@ -294,7 +294,9 @@ def _font(size: int):
             return ImageFont.truetype(candidate, size=size)
         except OSError:
             pass
-    return ImageFont.load_default()
+    # Pillow 11 ships a scalable default font; preserve the requested size on minimal hosts
+    # instead of shrinking an unscaled bitmap font during supersampling.
+    return ImageFont.load_default(size=size)
 
 
 def _hex_rgb(value: str) -> tuple[int, int, int]:
@@ -345,6 +347,7 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     panel_font = _font(22 * scale)
     label_font = _font(15 * scale)
     small_font = _font(12 * scale)
+    annotation_font = _font(11 * scale)
     fg, muted, grid = "#e6edf3", "#9da7b3", "#30363d"
     draw.text((48 * scale, 30 * scale), "Linux ELF competitive linker evidence", font=title_font, fill=fg)
     draw.text(
@@ -355,10 +358,10 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     )
 
     panels = (("wall_seconds", "Wall link time (seconds)"), ("peak_rss_kib", "Peak process-tree RSS (MiB)"))
-    panel_width, left_margin, top, chart_height = 810, 60, 165, 540
+    panel_width, left_margin, panel_stride, top, chart_height = 810, 60, 885, 165, 540
     bar_width = 78
     for panel_index, (metric, title) in enumerate(panels):
-        x0 = left_margin + panel_index * 885
+        x0 = left_margin + panel_index * panel_stride
         y_axis = top + chart_height
         values = _summary_values(report, metric)
         raw_max = max(float(item["summary"]["bootstrap_95_ci"][1]) for item in values)
@@ -393,10 +396,22 @@ def render_png(report: dict[str, Any], path: Path) -> None:
             draw.line((int((center - 10) * scale), int(low_y * scale), int((center + 10) * scale), int(low_y * scale)), fill=fg, width=2 * scale)
             draw.line((int((center - 10) * scale), int(high_y * scale), int((center + 10) * scale), int(high_y * scale)), fill=fg, width=2 * scale)
             value_label = _format_metric(metric, float(summary["median"]))
-            ci_label = f"95% CI [{_format_metric(metric, float(summary['bootstrap_95_ci'][0]))}, {_format_metric(metric, float(summary['bootstrap_95_ci'][1]))}]"
-            text_y = max(top + 3, high_y - 39)
-            draw.text((int((center - gap * 0.43) * scale), int(text_y * scale)), value_label, font=small_font, fill=fg)
-            draw.text((int((center - gap * 0.43) * scale), int((text_y + 16) * scale)), ci_label, font=small_font, fill=muted)
+            # The panel heading owns the unit.  Avoid repeating it twice in the CI so each
+            # contender keeps a distinct, readable annotation column.
+            if metric == "wall_seconds":
+                ci_label = f"CI {float(summary['bootstrap_95_ci'][0]):.3f} – {float(summary['bootstrap_95_ci'][1]):.3f}"
+            else:
+                ci_label = f"CI {float(summary['bootstrap_95_ci'][0]) / 1024:.3f} – {float(summary['bootstrap_95_ci'][1]) / 1024:.3f}"
+            # Similar contenders naturally have similar bar heights.  Alternate their
+            # annotation rows so adjacent exact values and intervals never print over one
+            # another; the footer identifies every displayed interval as a bootstrap 95% CI.
+            text_y = max(top + 3, high_y - 39 - (index % 2) * 34)
+            value_box = draw.textbbox((0, 0), value_label, font=annotation_font)
+            ci_box = draw.textbbox((0, 0), ci_label, font=annotation_font)
+            value_x = center * scale - (value_box[2] - value_box[0]) / 2
+            ci_x = center * scale - (ci_box[2] - ci_box[0]) / 2
+            draw.text((int(value_x), int(text_y * scale)), value_label, font=annotation_font, fill=fg)
+            draw.text((int(ci_x), int((text_y + 16) * scale)), ci_label, font=annotation_font, fill=muted)
             label = item["label"]
             box = draw.textbbox((0, 0), label, font=label_font)
             draw.text((int((center - (box[2] - box[0]) / scale / 2) * scale), int((y_axis + 12) * scale)), label, font=label_font, fill=fg)
