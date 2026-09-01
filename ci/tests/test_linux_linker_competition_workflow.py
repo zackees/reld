@@ -103,6 +103,10 @@ def test_competition_workflow_renders_and_uploads_same_run_evidence_without_hist
     text = workflow_text()
 
     assert "ci.linux_linker_competition_render" in text
+    assert "Render grouped dual-axis wall-time and peak-RSS evidence" in text
+    assert "Upload report, raw samples, provenance, and grouped dual-axis graph" in text
+    assert "paired wall-time" not in text
+    assert "and paired graph" not in text
     assert '--report "$REPORT"' in text
     assert '--output-dir "$RENDER_DIR"' in text
     assert '--summary-output "$SUMMARY_OUTPUT"' in text
