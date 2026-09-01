@@ -143,11 +143,25 @@ Wild is an external performance comparator only: the exact pre-change reld basel
 artifact reference, and no Wild/reld artifact-equivalence claim is made because reld intentionally
 changed its build-ID/output-layout policy in PR #76.
 
-The renderer produces one paired wall-time/RSS graph with separate zero-based scales, confidence
-intervals, and fixed contender order. The workflow uploads the schema-versioned report, raw JSONL,
-provenance, accessible HTML, PNG, generated job summary, and (only on failure) retained mismatch
-artifacts. It has no schedule and never writes benchmark history; hosted results support only
-same-run comparisons.
+The renderer produces one grouped dual-axis wall-time/RSS graph. Its fixed contender order is
+`bfd`, `lld`, `mold`, `wild`, `reld baseline`, then `reld candidate`. Each contender group has a
+solid wall-time bar first, read against the zero-based left axis in seconds, followed by a
+diagonally hatched peak process-tree RSS bar, read against the independent zero-based right axis
+in MiB. The matching contender hue is retained for both bars; solid versus hatch is the required
+non-colour metric distinction. Exact medians and bootstrap 95% confidence intervals are annotated
+on both bars. The accessible HTML figure description and full exact-value table are required
+nonvisual sources for the same values, units, bar order, and axis ownership.
+
+This grouped presentation is not normalization or scalarization: it adds no combined, weighted,
+or composite score, and performance claims still require the independent confidence rules for both
+metrics. The workflow uploads the schema-versioned report, raw JSONL, provenance, accessible HTML,
+PNG, generated job summary, and (only on failure) retained mismatch artifacts. Inspect the hosted
+PNG before publication for bar order, left/right zero-based axis labels, solid/hatched legend,
+exact median/CI annotations, clipping, and non-overlap. A successful combined-layout run is
+published as an immutable `linux-linker-competition-v2` evidence bundle (PNG, HTML, report, raw
+samples, provenance, locks, summary, and completion manifest); v1 remains available as its
+historical two-panel evidence. The workflow has no schedule and never writes benchmark history;
+hosted results support only same-run comparisons.
 
 Prefer the complete `RelWithDebInfo` closure. The standard public `ubuntu-24.04` runner has a
 measured 16 GB RAM and 14 GB SSD, and each GitHub Release asset must remain below 2 GiB; the checked
@@ -202,7 +216,7 @@ run `xsv count`, the full pinned PCRE2 CTest suite, and the C++ name-mangling CT
 - Benchmark replay and execution oracle: `ci/benchmark_runner.py`
 - Immutable Clang corpus lock/replay: `ci/clang_link_replay.py` and
   `.github/workflows/clang-link-replay.yml`
-- Competitive Linux replay and paired renderer: `ci/linux_linker_competition.py`,
+- Competitive Linux replay and grouped dual-axis renderer: `ci/linux_linker_competition.py`,
   `ci/linux_linker_competition_render.py`, and
   `.github/workflows/linux-linker-competition.yml`
 - Consumer acceptance driver: `ci/consumer_acceptance.py`
