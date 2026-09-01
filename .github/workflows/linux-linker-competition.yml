@@ -110,6 +110,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/reld-baseline" "$RUNNER_TEMP/reld-candidate" "$EVIDENCE_DIR"
+          rustc -Vv > "$EVIDENCE_DIR/rustc-version.txt"
+          cargo -V > "$EVIDENCE_DIR/cargo-version.txt"
           git archive "$BASELINE_SHA" | tar -xf - -C "$RUNNER_TEMP/reld-baseline"
           git archive HEAD | tar -xf - -C "$RUNNER_TEMP/reld-candidate"
           test ! -e "$RUNNER_TEMP/reld-baseline/.git"
@@ -200,6 +202,10 @@ jobs:
             competition-evidence/render/*.png
             competition-evidence/source-archives.sha256
             competition-evidence/reld-binaries.sha256
+            competition-evidence/baseline-version.txt
+            competition-evidence/candidate-version.txt
+            competition-evidence/rustc-version.txt
+            competition-evidence/cargo-version.txt
           if-no-files-found: warn
           retention-days: 30
 

@@ -80,6 +80,8 @@ def test_competition_workflow_builds_non_git_relds_and_replays_exact_contract() 
     assert text.count("cargo build --locked --release --package reld --bin reld") == 2
     assert 'test ! -e "$RUNNER_TEMP/reld-baseline/.git"' in text
     assert 'test ! -e "$RUNNER_TEMP/reld-candidate/.git"' in text
+    assert 'rustc -Vv > "$EVIDENCE_DIR/rustc-version.txt"' in text
+    assert 'cargo -V > "$EVIDENCE_DIR/cargo-version.txt"' in text
     assert "ci.linux_linker_competition replay" in text
     assert 'sudo --non-interactive --preserve-env="$REPLAY_PROVENANCE_ENV"' in text
     assert '"$VENV_PYTHON" -m ci.linux_linker_competition replay' in text
@@ -108,6 +110,10 @@ def test_competition_workflow_renders_and_uploads_same_run_evidence_without_hist
     assert "if: always()" in text
     assert "if: failure()" in text
     assert "raw-samples.jsonl" in text
+    assert "competition-evidence/baseline-version.txt" in text
+    assert "competition-evidence/candidate-version.txt" in text
+    assert "competition-evidence/rustc-version.txt" in text
+    assert "competition-evidence/cargo-version.txt" in text
     assert "target/linux-linker-competition/identity-artifacts/" in text
     assert "target/linux-linker-competition/mismatch-artifacts/" not in text
     assert ".html" in text
