@@ -412,9 +412,15 @@ class CgroupLauncher:
             _close_fd(go_read)
         try:
             readable, _, _ = select.select([ready_read], [], [], LAUNCHER_READY_TIMEOUT_SECONDS)
-            ready = os.read(ready_read, 1) if readable else b""
+            if not readable:
+                raise CompetitionError("cgroup launcher did not become ready before the measurement timeout")
+            ready = os.read(ready_read, 1)
             if ready != b"R":
-                raise CompetitionError("cgroup launcher failed to become ready before the measurement timeout")
+                stdout, stderr = process.communicate()
+                raise CompetitionError(
+                    "cgroup launcher exited before readiness: "
+                    f"returncode={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+                )
         except BaseException:
             _close_fd(go_write)
             if process.poll() is None:

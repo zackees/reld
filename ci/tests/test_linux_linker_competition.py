@@ -279,6 +279,20 @@ def test_cgroup_launcher_blocks_target_until_ready_measurement_release(tmp_path:
     assert float(marker.read_text()) >= measurement_started
 
 
+def test_cgroup_launcher_reports_immediate_readiness_failure_output(tmp_path: Path) -> None:
+    cgroup = tmp_path / "missing-cgroup-procs"
+
+    with pytest.raises(competition.CompetitionError, match=r"exited before readiness: returncode=1") as error:
+        competition.CgroupLauncher.start(
+            cgroup,
+            [competition.sys.executable, "-c", "raise SystemExit(0)"],
+            cwd=tmp_path,
+            environment=dict(os.environ),
+        )
+    assert "FileNotFoundError" in str(error.value)
+    assert "measurement timeout" not in str(error.value)
+
+
 def test_rss_self_test_rejects_missing_descendant_or_out_of_range_peak() -> None:
     parent_pid, child_pid = "10", "11"
     competition._validate_rss_probe(
