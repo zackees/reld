@@ -1,0 +1,114 @@
+name: Immutable Clang link replay
+
+# This is deliberately separate from benchmark-stats.yml. It replays one precompiled Linux ELF
+# link for profiling/regression evidence and must never add LLVM compilation to the timed interval.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: clang-link-replay-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  replay-linux:
+    runs-on: ubuntu-24.04
+    container:
+      image: rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+    timeout-minutes: 120
+    env:
+      BASELINE_SHA: 6ec92be6674d026e74f7524271fbcbce68b50a39
+      CORPUS_LOCK: ci/clang-link-corpus.lock.json
+      EVIDENCE_DIR: clang-replay-evidence
+      REPLAY_WORKDIR: target/clang-link-replay
+      RUSTUP_TOOLCHAIN: 1.95.0
+      CARGO_INCREMENTAL: "0"
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          python-version: "3.12.11"
+
+      - name: Install pinned archive decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            zstd=1.5.4+dfsg2-5
+          rm -rf /var/lib/apt/lists/*
+          zstd --version
+
+      - name: Validate immutable corpus lock
+        run: >-
+          uv run --no-project --python 3.12.11
+          python -m ci.clang_link_replay validate-lock --lock "$CORPUS_LOCK"
+
+      - name: Export controlled non-git source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse "$BASELINE_SHA")" = "$BASELINE_SHA"
+          mkdir -p "$RUNNER_TEMP/reld-baseline" "$RUNNER_TEMP/reld-candidate" "$EVIDENCE_DIR"
+          git archive "$BASELINE_SHA" | tar -xf - -C "$RUNNER_TEMP/reld-baseline"
+          git archive HEAD | tar -xf - -C "$RUNNER_TEMP/reld-candidate"
+          test ! -e "$RUNNER_TEMP/reld-baseline/.git"
+          test ! -e "$RUNNER_TEMP/reld-candidate/.git"
+          git archive --format=tar --output="$EVIDENCE_DIR/baseline-source.tar" "$BASELINE_SHA"
+          git archive --format=tar --output="$EVIDENCE_DIR/candidate-source.tar" HEAD
+          sha256sum "$EVIDENCE_DIR/baseline-source.tar" \
+            "$EVIDENCE_DIR/candidate-source.tar" | tee "$EVIDENCE_DIR/source-archives.sha256"
+
+      - name: Build baseline and candidate with identical provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package reld --bin reld \
+            --manifest-path "$RUNNER_TEMP/reld-baseline/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/reld-baseline-target"
+          cargo build --locked --release --package reld --bin reld \
+            --manifest-path "$RUNNER_TEMP/reld-candidate/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/reld-candidate-target"
+          install -D "$RUNNER_TEMP/reld-baseline-target/release/reld" \
+            "$EVIDENCE_DIR/baseline-reld"
+          install -D "$RUNNER_TEMP/reld-candidate-target/release/reld" \
+            "$EVIDENCE_DIR/candidate-reld"
+          "$EVIDENCE_DIR/baseline-reld" --version > "$EVIDENCE_DIR/baseline-version.txt"
+          "$EVIDENCE_DIR/candidate-reld" --version > "$EVIDENCE_DIR/candidate-version.txt"
+          cmp "$EVIDENCE_DIR/baseline-version.txt" "$EVIDENCE_DIR/candidate-version.txt"
+          grep -F "non-git-build" "$EVIDENCE_DIR/baseline-version.txt"
+          sha256sum "$EVIDENCE_DIR/baseline-reld" "$EVIDENCE_DIR/candidate-reld" \
+            | tee "$EVIDENCE_DIR/linkers.sha256"
+
+      - name: Acquire, verify, and replay immutable final link
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-project --python 3.12.11 \
+            python -m ci.clang_link_replay replay \
+            --lock "$CORPUS_LOCK" \
+            --baseline "$EVIDENCE_DIR/baseline-reld" \
+            --candidate "$EVIDENCE_DIR/candidate-reld" \
+            --workdir "$REPLAY_WORKDIR" \
+            --report "$EVIDENCE_DIR/replay-report.json" \
+            2>&1 | tee "$EVIDENCE_DIR/replay.log"
+
+      - name: Upload replay and artifact-identity evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clang-link-replay-${{ github.sha }}
+          path: |
+            ci/clang-link-corpus.lock.json
+            clang-replay-evidence/
+            target/clang-link-replay/identity-artifacts/
+          if-no-files-found: warn
+          retention-days: 30

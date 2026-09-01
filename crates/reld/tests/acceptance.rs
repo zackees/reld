@@ -110,6 +110,8 @@
 //!
 //! RunEnabled:{bool} Defaults to true. Set to false to disable execution of the resulting binary.
 //!
+//! ExpectRunOutputEmpty:{bool} Require the executed binary to write no bytes to stdout or stderr.
+//!
 //! RunDynSym:{string} If set and RunEnabled:true, then, instead of executing the binary normally,
 //! the binary is loaded as a shared library and the function specified by the string is called. The
 //! function must return an integer to indicate status (status != 42 is an error). Such run is
@@ -574,7 +576,6 @@ fn is_deferred_legacy_directive(name: &str) -> bool {
             | "NoDynamic"
             | "NoProgramHeader"
             | "ReldExtraLinkArgs"
-            | "Relocatable"
             | "RelrCount"
             | "RemoveSection"
             | "RunDynSym"
@@ -649,6 +650,7 @@ struct ProgramInputs {
 struct Program<'a> {
     link_output: LinkOutput,
     assertions: &'a Assertions,
+    intermediates: Vec<LinkerInput>,
     shared_objects: Vec<LinkerInput>,
 }
 
@@ -1040,6 +1042,7 @@ struct Config {
     should_diff: bool,
     diff_match_any: bool,
     should_run: bool,
+    expect_run_output_empty: bool,
     run_dyn_sym: Option<String>,
     should_error: bool,
     expect_stderr: Vec<ErrorMatcher>,
@@ -1747,6 +1750,7 @@ impl Config {
             compiler: platform.default_c_compiler().to_owned(),
             should_diff: platform.diff_supported(),
             should_run: platform.can_execute_on_host(),
+            expect_run_output_empty: false,
             diff_match_any: false,
             run_dyn_sym: None,
             should_error: false,
@@ -1845,6 +1849,22 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
         bail!("Missing non-abstract Config");
     }
 
+    for config in &configs {
+        if config.expect_run_output_empty && !config.should_run {
+            bail!(
+                "Config `{}` sets ExpectRunOutputEmpty:true with RunEnabled:false",
+                config.config_name
+            );
+        }
+        if config.expect_run_output_empty && config.run_dyn_sym.is_some() {
+            bail!(
+                "Config `{}` sets ExpectRunOutputEmpty:true with RunDynSym, which does not capture \
+                 process output",
+                config.config_name
+            );
+        }
+    }
+
     Ok(configs)
 }
 
@@ -1864,6 +1884,7 @@ fn is_frozen_directive(name: &str) -> bool {
         "Config"
             | "AbstractConfig"
             | "Object"
+            | "Relocatable"
             | "Archive"
             | "Shared"
             | "LinkerScript"
@@ -1887,6 +1908,7 @@ fn is_frozen_directive(name: &str) -> bool {
             | "ExpectError"
             | "Contains"
             | "RunEnabled"
+            | "ExpectRunOutputEmpty"
             | "DiffEnabled"
             | "DiffIgnore"
             | "DiffMatchAny"
@@ -2158,6 +2180,11 @@ fn process_directive(
             config.diff_match_any = arg.parse().context("Invalid bool for DiffMatchAny")?
         }
         "RunEnabled" => config.should_run = arg.parse().context("Invalid bool for RunEnabled")?,
+        "ExpectRunOutputEmpty" => {
+            config.expect_run_output_empty = arg
+                .parse()
+                .context("Invalid bool for ExpectRunOutputEmpty")?
+        }
         "RunDynSym" => {
             config.run_dyn_sym = Some(arg.parse().context("Invalid string for RunDynSym")?)
         }
@@ -2402,9 +2429,14 @@ impl ProgramInputs {
             self.run_update_in_place_test(&inputs, config, cross_arch, &link_output)?;
         }
 
-        let shared_objects = inputs
+        let intermediates: Vec<_> = inputs
             .into_iter()
+            .filter(|input| input.command.is_some())
+            .collect();
+        let shared_objects = intermediates
+            .iter()
             .filter(|input| input.path.extension().is_some_and(|ext| ext == "so"))
+            .cloned()
             .collect();
 
         if !config.remove_sections.is_empty() {
@@ -2414,6 +2446,7 @@ impl ProgramInputs {
         Ok(Program {
             link_output,
             assertions: &config.assertions,
+            intermediates,
             shared_objects,
         })
     }
@@ -2602,7 +2635,7 @@ const TEST_BINARY_TIMEOUT: Duration = std::time::Duration::from_secs(10);
 const EXIT_SUCCESS: i32 = 42;
 
 impl Program<'_> {
-    fn run(&self, cross_arch: Option<Architecture>) -> Result {
+    fn run(&self, cross_arch: Option<Architecture>, expect_output_empty: bool) -> Result {
         let mut command = if let Some(arch) = cross_arch {
             let mut c = Command::new(format!("qemu-{arch}"));
             c.arg("-L");
@@ -2620,11 +2653,9 @@ impl Program<'_> {
             Command::new(&self.link_output.binary)
         };
 
-        // Similarly to cargo test, capture all the run-time output, since it may contain useful
-        // error messages. We only show it if the exit status is a failure since otherwise messages
-        // that are expected, e.g. panic messages, would be potentially confusing to see.
-        let (mut recv, send) = std::io::pipe()?;
-        command.stdout(send.try_clone()?).stderr(send);
+        // Similarly to cargo test, capture all run-time output so it can be checked or included in
+        // a failure diagnostic. Keep the streams separate so fixtures can require exact silence.
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let spawn_result = spawn_with_retry(&mut command, Duration::from_secs(10));
 
@@ -2635,30 +2666,62 @@ impl Program<'_> {
             )
         })?;
 
-        // Drop pipes from command. While they are open, our `recv_to_end` call below can't finish.
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
-
-        let mut output = Vec::new();
+        let mut stdout_pipe = child
+            .stdout
+            .take()
+            .context("Failed to capture binary stdout")?;
+        let mut stderr_pipe = child
+            .stderr
+            .take()
+            .context("Failed to capture binary stderr")?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
 
         let status = std::thread::scope(|scope| -> Result<ExitStatus> {
-            scope.spawn(|| {
-                let _ = recv.read_to_end(&mut output);
+            let stdout_reader = scope.spawn(|| {
+                stdout_pipe
+                    .read_to_end(&mut stdout)
+                    .context("Failed to read binary stdout")
+            });
+            let stderr_reader = scope.spawn(|| {
+                stderr_pipe
+                    .read_to_end(&mut stderr)
+                    .context("Failed to read binary stderr")
             });
 
-            match child.wait_timeout(TEST_BINARY_TIMEOUT)? {
-                Some(s) => Ok(s),
+            let status = match child.wait_timeout(TEST_BINARY_TIMEOUT)? {
+                Some(s) => s,
                 None => {
                     child.kill()?;
                     bail!("Binary ran for too long");
                 }
-            }
+            };
+
+            stdout_reader
+                .join()
+                .map_err(|_| error!("Binary stdout reader panicked"))??;
+            stderr_reader
+                .join()
+                .map_err(|_| error!("Binary stderr reader panicked"))??;
+
+            Ok(status)
         })?;
 
-        let output = String::from_utf8_lossy(&output);
+        let stdout_display = String::from_utf8_lossy(&stdout);
+        let stderr_display = String::from_utf8_lossy(&stderr);
 
         if status.code() != Some(EXIT_SUCCESS) {
-            bail!("Binary exited with unexpected {status}: {output}\nCommand:\n  {command:?}");
+            bail!(
+                "Binary exited with unexpected {status}:\n-- stdout --\n{stdout_display}\n\
+                 -- stderr --\n{stderr_display}\nCommand:\n  {command:?}"
+            );
+        }
+
+        if expect_output_empty && (!stdout.is_empty() || !stderr.is_empty()) {
+            bail!(
+                "Binary produced output but exact silence was required:\n\
+                 -- stdout --\n{stdout_display}\n-- stderr --\n{stderr_display}\nCommand:\n  {command:?}"
+            );
         }
 
         Ok(())
@@ -6341,7 +6404,7 @@ fn run_with_config(
                 }
             } else {
                 program
-                    .run(cross_arch)
+                    .run(cross_arch, config.expect_run_output_empty)
                     .with_context(|| format!("Failed to run program. {program}"))?;
             }
         } else if config.run_dyn_sym.is_some() {
@@ -6402,14 +6465,14 @@ fn check_unexpected_intermediate_output(
 ) -> Result {
     let intermediate_count = programs
         .iter()
-        .map(|program| program.shared_objects.len())
+        .map(|program| program.intermediates.len())
         .max()
         .unwrap_or(0);
 
     for index in 0..intermediate_count {
         let intermediates = programs
             .iter()
-            .filter_map(|program| program.shared_objects.get(index))
+            .filter_map(|program| program.intermediates.get(index))
             .collect_vec();
 
         let reld = intermediates.last().unwrap();

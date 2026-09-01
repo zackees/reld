@@ -48,6 +48,68 @@ Every produced executable must also run natively with exact exit status, stdout,
 the randomized `reld-difftest` execution comparison as a supplemental oracle; it does not replace
 artifact comparison.
 
+### Immutable Clang final-link corpus
+
+The long-form Linux workload is a captured LLVM/Clang final link, separate from the published
+five-linker × three-LTO matrix. The checked `ci/clang-link-corpus.lock.json` is the contract for a
+GitHub Release `.tar.gz` or `.tar.zst` asset. It records the LLVM source tag, annotated tag object,
+and peeled commit; digest-pinned builder image; exact package and toolchain versions; configure and
+build argv; archive URL, byte size, and SHA-256; captured linker argv, working directory,
+environment, response files, and expected linker output; exact native oracle; and every regular
+file in the input closure with its relative path, byte size, and SHA-256. The archive must contain
+no symlinks or unrecorded files. Arguments use `{CORPUS}` for the verified extraction root and one
+`{OUTPUT}` token for the fixed output path.
+
+Validate a checked lock without downloading the asset:
+
+```sh
+uv run --no-project --python 3.12.11 \
+  python -m ci.clang_link_replay validate-lock \
+  --lock ci/clang-link-corpus.lock.json
+```
+
+For pre-publication validation, replay the locally packed archive explicitly; never substitute an
+unverified or floating URL, digest, toolchain, cache, or branch:
+
+```sh
+uv run --no-project --python 3.12.11 \
+  python -m ci.clang_link_replay replay \
+  --lock ci/clang-link-corpus.lock.json \
+  --archive /absolute/path/to/clang-link-corpus.tar.zst \
+  --baseline /absolute/path/to/baseline-reld \
+  --candidate /absolute/path/to/candidate-reld \
+  --workdir target/clang-link-replay \
+  --report clang-replay-evidence/replay-report.json
+```
+
+Omit `--archive` only after the lock names the immutable GitHub Release asset. The replay verifies
+the archive and complete extracted closure before any link. Its locked direct-link arguments must
+include `--no-fork`; compilation, download, extraction, output removal, native execution, and
+evidence writing are outside timing. It first links twice with the pinned baseline and twice with
+the candidate, runs the exact native oracle after every output, and requires raw identity within
+and between both sides. A mismatch retains all four files, both hashes, and the first differing
+offset. One excluded candidate warmup supplies the calibration duration; the resulting fixed count
+of identical candidate links targets 30 seconds total. The native oracle still runs after every
+timed link, after its timer stops.
+
+The manual-only `.github/workflows/clang-link-replay.yml` owns hosted replay. It builds baseline
+`6ec92be6674d026e74f7524271fbcbce68b50a39` and the candidate from separate non-git source archives
+with Rust 1.95.0, requires identical `non-git-build` linker-version output so `.comment` provenance
+cannot create a false artifact delta, validates the checked lock, downloads its asset, runs the
+gate, and uploads the report plus retained identity-failure evidence. Do not add this workload to
+the public benchmark matrix.
+
+Prefer the complete `RelWithDebInfo` closure. The standard public `ubuntu-24.04` runner has a
+measured 16 GB RAM and 14 GB SSD, and each GitHub Release asset must remain below 2 GiB; the checked
+corpus must fit all three constraints with operational headroom. These ceilings are not permission
+for an undocumented transform, and this guide does not invent a smaller fixed gate that the harness
+does not enforce. If the complete closure cannot fit, the only accepted reduced variant is produced
+by deterministic GNU binutils 2.40 `strip --strip-debug` applied to copied ELF `.o` and `.a` inputs
+only. Retain complete pre-strip and post-strip SHA-256 manifests, and record the exact strip
+package, version, and argv in the lock. Keep every other link argument fixed and apply the same
+raw-artifact and native gates after the transform. Such a corpus represents a non-debug Clang final
+link and must not support claims about debug-heavy link performance.
+
 For allocator changes, build and replay the same captured ELF link in the default,
 sampled-profiling, and exact-DHAT configurations. First establish two-run self-determinism for each
 configuration, then compare the default artifact with the pinned pre-change system-allocator
@@ -88,6 +150,8 @@ run `xsv count`, the full pinned PCRE2 CTest suite, and the C++ name-mangling CT
 - Native implementation: `crates/reld-core/src/`
 - Differential runner: `crates/reld-testkit/src/bin/reld-difftest.rs`
 - Benchmark replay and execution oracle: `ci/benchmark_runner.py`
+- Immutable Clang corpus lock/replay: `ci/clang_link_replay.py` and
+  `.github/workflows/clang-link-replay.yml`
 - Consumer acceptance driver: `ci/consumer_acceptance.py`
 - Linux acceptance and differential CI: `.github/workflows/ci.yml`
 - Three-platform consumer acceptance: `.github/workflows/linker-artifacts.yml`

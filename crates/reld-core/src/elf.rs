@@ -710,7 +710,7 @@ impl platform::Platform for Elf {
     }
 
     fn validate_sizes(mem_sizes: &OutputSectionPartMap<u64>) -> Result {
-        if *mem_sizes.get(part_id::GNU_VERSION) > 0 {
+        if mem_sizes.get(part_id::GNU_VERSION) > 0 {
             let num_dynamic_symbols =
                 mem_sizes.get(part_id::DYNSYM) / crate::elf::SYMTAB_ENTRY_SIZE;
             let num_versym = mem_sizes.get(part_id::GNU_VERSION) / size_of::<Versym>() as u64;
@@ -727,7 +727,7 @@ impl platform::Platform for Elf {
 
     fn finalise_group_layout(memory_offsets: &OutputSectionPartMap<u64>) -> Self::GroupLayoutExt {
         GroupLayoutExt {
-            eh_frame_start_address: *memory_offsets.get(part_id::EH_FRAME),
+            eh_frame_start_address: memory_offsets.get(part_id::EH_FRAME),
         }
     }
 
@@ -735,7 +735,7 @@ impl platform::Platform for Elf {
         // References to symbols defined in .eh_frame are a bit weird, since it's a section where
         // we're GCing stuff, but crtbegin.o and crtend.o use them in order to find the start and
         // end of the whole .eh_frame section.
-        *memory_offsets.get(part_id::EH_FRAME)
+        memory_offsets.get(part_id::EH_FRAME)
     }
 
     fn finalise_find_required_sections<'data>(
@@ -845,7 +845,7 @@ impl platform::Platform for Elf {
                 .section_layouts
                 .get(output_section_id::GNU_VERSION_R);
 
-            is_last_verneed = *memory_offsets.get(part_id::GNU_VERSION_R)
+            is_last_verneed = memory_offsets.get(part_id::GNU_VERSION_R)
                 == version_r_layout.mem_offset + version_r_layout.mem_size;
         }
 
@@ -1629,7 +1629,7 @@ impl platform::Platform for Elf {
         format_specific: &Self::FinaliseSizesExt<'_>,
         args: &ElfArgs,
     ) -> Result {
-        if format_specific.has_eh_frame_input || *current_sizes.get(part_id::EH_FRAME) != 0 {
+        if format_specific.has_eh_frame_input || current_sizes.get(part_id::EH_FRAME) != 0 {
             extra_sizes.increment(part_id::EH_FRAME, size_of::<u32>() as u64);
             state.needs_eh_frame_terminator = true;
         }
@@ -1638,7 +1638,7 @@ impl platform::Platform for Elf {
             allocate_sysv_hash(state, current_sizes, extra_sizes, dynamic_symbol_defs)?;
         }
         if args.is_relr_enabled() {
-            let got_relr_size = *current_sizes.get(part_id::GOT_RELR);
+            let got_relr_size = current_sizes.get(part_id::GOT_RELR);
             let n = got_relr_size / RELR_ENTRY_SIZE;
             let relr_entries = got_relr_bitmap_relr_count(n);
             if relr_entries > 0 {
@@ -1653,7 +1653,7 @@ impl platform::Platform for Elf {
         extra_sizes: &mut OutputSectionPartMap<u64>,
         args: &ElfArgs,
     ) -> Result {
-        if args.should_write_eh_frame_hdr && *current_sizes.get(part_id::EH_FRAME_HDR) != 0 {
+        if args.should_write_eh_frame_hdr && current_sizes.get(part_id::EH_FRAME_HDR) != 0 {
             extra_sizes.increment(part_id::EH_FRAME_HDR, size_of::<EhFrameHdr>() as u64);
         }
         Ok(())
@@ -1956,7 +1956,7 @@ impl platform::Platform for Elf {
         }
 
         let tlsld_got_entry = prelude.format_specific.needs_tlsld_got_entry.then(|| {
-            let address = NonZeroU64::new(*memory_offsets.get(part_id::GOT))
+            let address = NonZeroU64::new(memory_offsets.get(part_id::GOT))
                 .expect("GOT address must never be zero");
             memory_offsets.increment(part_id::GOT, elf::GOT_ENTRY_SIZE * 2);
             address
@@ -2590,7 +2590,7 @@ impl platform::Platform for Elf {
         let locals = group_sizes.get(part_id::SYMTAB_LOCAL) / symtab_entry_size;
         let globals = group_sizes.get(part_id::SYMTAB_GLOBAL) / symtab_entry_size;
 
-        let mut extra_sizes = OutputSectionPartMap::with_size(group_sizes.num_parts());
+        let mut extra_sizes = group_sizes.new_empty_like();
         extra_sizes.increment(
             part_id::SYMTAB_SHNDX_LOCAL,
             locals * symtab_shndx_entry_size,
@@ -3443,7 +3443,7 @@ fn allocate_sysv_hash(
     let bucket_count = (num_defs / 2).max(1).next_power_of_two() as u32;
     // Whereas `num_defs` above is the number of definitions, this is the number of dynamic
     // symbols, which also includes undefined dynamic symbols.
-    let num_dynsym = *current_sizes.get(part_id::DYNSYM) / SYMTAB_ENTRY_SIZE;
+    let num_dynsym = current_sizes.get(part_id::DYNSYM) / SYMTAB_ENTRY_SIZE;
     let chain_count = num_dynsym
         .try_into()
         .context("Too many dynamic symbols for .hash")?;
@@ -5939,19 +5939,19 @@ fn got_relr_bitmap_relr_count(n: u64) -> u64 {
 }
 
 fn allocate_got(num_entries: u64, memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
-    let got_address = NonZeroU64::new(*memory_offsets.get(part_id::GOT)).unwrap();
+    let got_address = NonZeroU64::new(memory_offsets.get(part_id::GOT)).unwrap();
     memory_offsets.increment(part_id::GOT, elf::GOT_ENTRY_SIZE * num_entries);
     got_address
 }
 
 fn allocate_got_relr(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
-    let got_address = NonZeroU64::new(*memory_offsets.get(part_id::GOT_RELR)).unwrap();
+    let got_address = NonZeroU64::new(memory_offsets.get(part_id::GOT_RELR)).unwrap();
     memory_offsets.increment(part_id::GOT_RELR, elf::GOT_ENTRY_SIZE);
     got_address
 }
 
 fn allocate_plt(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
-    let plt_address = NonZeroU64::new(*memory_offsets.get(part_id::PLT_GOT)).unwrap();
+    let plt_address = NonZeroU64::new(memory_offsets.get(part_id::PLT_GOT)).unwrap();
     memory_offsets.increment(part_id::PLT_GOT, elf::PLT_ENTRY_SIZE);
     plt_address
 }

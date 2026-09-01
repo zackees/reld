@@ -691,7 +691,7 @@ impl<'out> VersionWriter<'out> {
             return Err(excessive_allocation(
                 ".gnu.version",
                 versym.len() as u64 * elf::GNU_VERSION_ENTRY_SIZE,
-                *mem_sizes.get(part_id::GNU_VERSION),
+                mem_sizes.get(part_id::GNU_VERSION),
             ));
         }
         if !self.version_r.is_empty() {
@@ -861,7 +861,7 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
         {
             *got_entry = 0;
             debug_assert_bail!(
-                *compute_allocations::<Elf>(res, self.output_kind, args)
+                compute_allocations::<Elf>(res, self.output_kind, args)
                     .get(part_id::RELA_DYN_GENERAL)
                     > 0,
                 "Tried to write glob-dat with no allocation. {}",
@@ -941,7 +941,7 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             *got_entry = address.wrapping_sub(A::tp_offset_start(layout));
         } else {
             debug_assert_bail!(
-                *compute_allocations::<Elf>(res, self.output_kind, layout.args())
+                compute_allocations::<Elf>(res, self.output_kind, layout.args())
                     .get(part_id::RELA_DYN_GENERAL)
                     > 0,
                 "Tried to write tpoff with no allocation. {}",
@@ -965,7 +965,7 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             *got_entry = 0;
             let dynamic_symbol_index = res.dynamic_symbol_index.map_or(0, std::num::NonZero::get);
             debug_assert_bail!(
-                *compute_allocations::<Elf>(res, self.output_kind, args)
+                compute_allocations::<Elf>(res, self.output_kind, args)
                     .get(part_id::RELA_DYN_GENERAL)
                     > 0,
                 "Tried to write dtpmod with no allocation. {}",
@@ -1009,7 +1009,7 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
 
         let dynamic_symbol_index = res.dynamic_symbol_index.map_or(0, std::num::NonZero::get);
         debug_assert_bail!(
-            *compute_allocations::<Elf>(res, self.output_kind, args).get(part_id::RELA_DYN_GENERAL)
+            compute_allocations::<Elf>(res, self.output_kind, args).get(part_id::RELA_DYN_GENERAL)
                 > 0,
             "Tried to write TLS descriptor with no allocation. {}",
             res.flags
@@ -1096,28 +1096,28 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             return Err(excessive_allocation(
                 ".got",
                 self.got.len() as u64 * elf::GOT_ENTRY_SIZE,
-                *mem_sizes.get(part_id::GOT),
+                mem_sizes.get(part_id::GOT),
             ));
         }
         if !self.got_relr.is_empty() {
             return Err(excessive_allocation(
                 ".got (relr)",
                 self.got_relr.len() as u64 * elf::GOT_ENTRY_SIZE,
-                *mem_sizes.get(part_id::GOT_RELR),
+                mem_sizes.get(part_id::GOT_RELR),
             ));
         }
         if !self.rela_dyn_relative.is_empty() {
             return Err(excessive_allocation(
                 ".rela.dyn (relative)",
                 self.rela_dyn_relative.len() as u64 * elf::RELA_ENTRY_SIZE,
-                *mem_sizes.get(part_id::RELA_DYN_RELATIVE),
+                mem_sizes.get(part_id::RELA_DYN_RELATIVE),
             ));
         }
         if !self.rela_dyn_general.is_empty() {
             return Err(excessive_allocation(
                 ".rela.dyn (general)",
                 self.rela_dyn_general.len() as u64 * elf::RELA_ENTRY_SIZE,
-                *mem_sizes.get(part_id::RELA_DYN_GENERAL),
+                mem_sizes.get(part_id::RELA_DYN_GENERAL),
             ));
         }
         if let Some(relr_dyn) = &self.relr_dyn
@@ -1126,7 +1126,7 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             return Err(excessive_allocation(
                 ".relr.dyn",
                 relr_dyn.len() as u64 * elf::RELR_ENTRY_SIZE,
-                *mem_sizes.get(part_id::RELR_DYN),
+                mem_sizes.get(part_id::RELR_DYN),
             ));
         }
         self.dynsym_writer.check_exhausted()?;
@@ -1136,21 +1136,21 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             return Err(excessive_allocation(
                 ".eh_frame",
                 self.eh_frame.len() as u64,
-                *mem_sizes.get(part_id::EH_FRAME),
+                mem_sizes.get(part_id::EH_FRAME),
             ));
         }
         if !self.eh_frame_hdr.is_empty() {
             return Err(excessive_allocation(
                 ".eh_frame_hdr",
                 self.eh_frame_hdr.len() as u64,
-                *mem_sizes.get(part_id::EH_FRAME_HDR),
+                mem_sizes.get(part_id::EH_FRAME_HDR),
             ));
         }
         if !self.dynamic.out.is_empty() {
             return Err(excessive_allocation(
                 ".dynamic",
                 std::mem::size_of_val(self.dynamic.out) as u64,
-                *mem_sizes.get(part_id::DYNAMIC),
+                mem_sizes.get(part_id::DYNAMIC),
             ));
         }
         Ok(())

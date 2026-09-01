@@ -24,13 +24,14 @@ one directive outside the proposed set.** `ReferenceLinkers:` alone has 126 uses
 `Malfunction:` directive was not in the set — so P1-T5's fixtures would fail to parse under
 P1-T1's own reject-unknown parser, within a single phase.
 
-**Freeze at the following 30.** Still far below wild's 77-in-use, and still rejecting the two
+**Freeze at the following 32.** Still far below wild's 77-in-use, and still rejecting the two
 deprecated spellings (`SkipLinker:`, `EnableLinker:`), but expressible against the inherited
 corpus:
 
 ```
 Config:{name}[:{inherits}]     AbstractConfig:{name}[:{inherits}]
-Object:{file}[:args]           Archive:{file}        Shared:{file}[:args]
+Object:{file}[:args]           Relocatable:{file}[:args]
+Archive:{file}                 Shared:{file}[:args]
 LinkerScript:{file}
 CompArgs:...                   LinkArgs:...          LinkerDriver:gcc|clang|none
 Compiler:gcc|g++|clang|clang++
@@ -40,7 +41,8 @@ ExpectSym:{name} [props]       NoSym:{name}
 ExpectDynSym:{name} [props]    NoDynSym:{name}
 ExpectSection:{name}           NoSection:{name}      ExpectSectionBytes:{name}=0x{hex}
 ExpectDynamic:{tag}            ExpectError:{regex}   Contains:{string}
-RunEnabled:{bool}              DiffEnabled:{bool}    DiffMatchAny:{bool}
+RunEnabled:{bool}              ExpectRunOutputEmpty:{bool}
+DiffEnabled:{bool}             DiffMatchAny:{bool}
 DiffIgnore:{key} #{issue} [arch={a}[,{b}...]]
 Malfunction:{id}               Requires{Glibc,NightlyRustc,LinkerPlugin,...}:{bool}
 ```
@@ -48,6 +50,12 @@ Malfunction:{id}               Requires{Glibc,NightlyRustc,LinkerPlugin,...}:{bo
 `Requires*` is a family, not one directive — and it is load-bearing: `RELD_VERIFY_PLATFORM_
 REQUIREMENTS` (P1-T8) exists precisely to assert that `Requires*`-gated skips were unnecessary.
 Delete the family and the escape hatch has nothing to verify.
+
+`Relocatable:` compiles its inputs, performs a linker-specific partial link (`-r` for ELF), checks
+that intermediate for linker diagnostics and object validity, and feeds it to the final link.
+`ExpectRunOutputEmpty:true` keeps the exit-code-42 oracle and additionally requires exact empty
+stdout and stderr from normal executable execution. It is rejected with `RunEnabled:false` or
+`RunDynSym:` rather than becoming a silent no-op.
 
 Directives still deliberately dropped, with their fixture cost accepted: `TestUpdateInPlace:`
 (17), `ExpectProgramHeader:` (16), `AutoAddObjects:`, `RemoveSection:`, `DriverMode:`,
