@@ -49,7 +49,19 @@ CONTENDER_LABELS = {
     "baseline": "reld baseline",
     "candidate": "reld candidate",
 }
-RUNNER_ENV_ALLOWLIST = ("CI", "GITHUB_ACTIONS", "ImageOS", "ImageVersion", "RUNNER_ARCH", "RUNNER_OS")
+RUNNER_ENV_ALLOWLIST = (
+    "BASELINE_SHA",
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_RUN_ID",
+    "GITHUB_SHA",
+    "ImageOS",
+    "ImageVersion",
+    "RUNNER_ARCH",
+    "RUNNER_ENVIRONMENT",
+    "RUNNER_OS",
+)
 RECIPE_ENV_ALLOWLIST = frozenset({"LANG", "LC_ALL", "LC_MESSAGES", "LC_NUMERIC", "PATH", "SOURCE_DATE_EPOCH", "TZ"})
 MIN_SAMPLES = 10
 MIN_WARMUPS = 2

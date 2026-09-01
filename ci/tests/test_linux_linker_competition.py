@@ -359,7 +359,15 @@ def test_workload_from_checked_corpus_lock_is_explicit_for_renderer() -> None:
     }
 
 
-def test_host_provenance_parses_bounded_host_evidence_and_equivalent_operation_templates(tmp_path: Path) -> None:
+def test_host_provenance_parses_bounded_host_evidence_and_equivalent_operation_templates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in {
+        "GITHUB_SHA": "candidate-sha",
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+        "BASELINE_SHA": "baseline-sha",
+    }.items():
+        monkeypatch.setenv(key, value)
     corpus = tmp_path / "corpus"
     workdir = tmp_path / "workdir"
     cgroup = tmp_path / "cgroup"
@@ -391,6 +399,13 @@ def test_host_provenance_parses_bounded_host_evidence_and_equivalent_operation_t
     assert provenance["host"]["cpu_model"] == "Test CPU"
     assert provenance["host"]["memtotal_kib"] == 12345
     assert provenance["host"]["pressure"]["memory"]["full"]["total"] == 6
+    assert {key: provenance["runner_image_env"][key] for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_ENVIRONMENT", "BASELINE_SHA")} == {
+        "GITHUB_SHA": "candidate-sha",
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+        "BASELINE_SHA": "baseline-sha",
+    }
     assert provenance["cgroup"] == {"path": str(cgroup), "controllers": ["cpu", "memory"], "subtree_control": ["cpu", "memory"]}
     commands = provenance["commands"]
     assert [commands[label]["argv"][1:] for label in competition.CONTENDER_ORDER] == [commands["bfd"]["argv"][1:]] * len(competition.CONTENDER_ORDER)
