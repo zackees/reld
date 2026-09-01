@@ -2458,6 +2458,23 @@ mod tests {
     }
 
     #[test]
+    fn output_preallocation_flags_select_the_last_requested_value() {
+        let args = parse_args([
+            "--fallocate-output-file",
+            "--no-fallocate-output-file",
+            "--madvise-huge-pages",
+            "--no-madvise-huge-pages",
+        ]);
+
+        assert_eq!(args.common().fallocate_output_file, Some(false));
+        assert_eq!(args.common().madvise_huge_pages, Some(false));
+
+        let args = parse_args(["--fallocate-output-file", "--madvise-huge-pages"]);
+        assert_eq!(args.common().fallocate_output_file, Some(true));
+        assert_eq!(args.common().madvise_huge_pages, Some(true));
+    }
+
+    #[test]
     fn test_ttext_hex_round_trip() {
         use crate::output_section_id::SectionName;
         let args = parse_args(["-Ttext=0x700000"]);

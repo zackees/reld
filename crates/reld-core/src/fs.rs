@@ -24,6 +24,12 @@ const PARALLEL_OUTPUT_WRITE_MIN: usize = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const PARALLEL_OUTPUT_WRITE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
+// nix does not expose this Linux filesystem magic on musl targets.
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+const XFS_SUPER_MAGIC: nix::sys::statfs::FsType = nix::sys::statfs::FsType(0x5846_5342);
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+const XFS_SUPER_MAGIC: nix::sys::statfs::FsType = nix::sys::statfs::XFS_SUPER_MAGIC;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileReplacementMode {
     /// The existing output file, if any, will be unlinked (deleted) and a new file with the same
@@ -51,6 +57,8 @@ pub struct OutputOptions {
     pub size: u64,
     pub file_replacement_mode: FileReplacementMode,
     pub write_mode: Option<FileWriteMode>,
+    pub fallocate_output_file: Option<bool>,
+    pub madvise_huge_pages: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,19 +551,64 @@ impl FileSystem for OsFileSystem {
         let file_write_mode = options
             .write_mode
             .unwrap_or_else(|| default_file_write_mode_for_file(&file, options.size));
+        let (default_fallocate, default_madvise_huge_pages) =
+            default_mmap_setup_for_file(&file, file_write_mode, options.file_replacement_mode);
+        let (fallocate_output_file, madvise_huge_pages) = resolve_mmap_setup(
+            (default_fallocate, default_madvise_huge_pages),
+            options.fallocate_output_file,
+            options.madvise_huge_pages,
+        );
+        let huge_pages_required = options.madvise_huge_pages == Some(true);
+
+        if huge_pages_required && file_write_mode == FileWriteMode::BufferThenWrite {
+            return Err(crate::error!(
+                "--madvise-huge-pages requires mmapped output file"
+            ));
+        }
+
+        let set_len_result = file.set_len(options.size);
+
+        if fallocate_output_file
+            && let Err(error) = preallocate_output_file(&file, options.size)
+            && options.fallocate_output_file.is_some()
+        {
+            return Err(error).with_context(|| format!("Failed to fallocate `{}`", path.display()));
+        }
         let parallel_buffer_write = should_parallel_buffer_write(&file, options.size);
 
         let buffer = match file_write_mode {
             FileWriteMode::Mmap => {
                 // For some types of output file (e.g. character devices) we can't mmap, so we try
                 // to mmap the file and if it fails, fall back to non-mmapped output.
-                if file.set_len(options.size).is_ok() {
-                    match unsafe { MmapOptions::new().map_mut(&file) } {
-                        Ok(mmap) => OsOutputBuffer::Mmap(mmap),
+                match set_len_result {
+                    Ok(()) => match unsafe { MmapOptions::new().map_mut(&file) } {
+                        Ok(mmap) => {
+                            if let Err(error) =
+                                advise_huge_pages_if_requested(&mmap, madvise_huge_pages)
+                                && huge_pages_required
+                            {
+                                return Err(error).with_context(|| {
+                                    format!("madvise huge pages failed for `{}`", path.display())
+                                });
+                            }
+                            OsOutputBuffer::Mmap(mmap)
+                        }
+                        Err(error) if huge_pages_required => {
+                            return Err(error).with_context(|| {
+                                format!(
+                                    "--madvise-huge-pages requires mmap, but mmap of `{}` failed",
+                                    path.display()
+                                )
+                            });
+                        }
                         Err(_) => OsOutputBuffer::InMemory(vec![0; options.size as usize]),
+                    },
+                    Err(error) if huge_pages_required => {
+                        return Err(error).with_context(|| {
+                            format!("Failed to set size `{}` for mmap", path.display())
+                        });
                     }
-                } else {
-                    OsOutputBuffer::InMemory(vec![0; options.size as usize])
+                    Err(_) => OsOutputBuffer::InMemory(vec![0; options.size as usize]),
                 }
             }
             FileWriteMode::BufferThenWrite => {
@@ -563,7 +616,7 @@ impl FileSystem for OsFileSystem {
                 // to fail for some types of files, e.g. /dev/null. If there's actually a problem
                 // writing to the file, we'll discover that when we go to write the content later
                 // on.
-                let _ = file.set_len(options.size);
+                let _ = set_len_result;
                 OsOutputBuffer::InMemory(vec![0; options.size as usize])
             }
         };
@@ -580,6 +633,90 @@ impl FileSystem for OsFileSystem {
         (&file).write_all(bytes)?;
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn preallocate_output_file(file: &File, size: u64) -> Result {
+    if size > 0 {
+        nix::fcntl::fallocate(
+            file,
+            nix::fcntl::FallocateFlags::empty(),
+            0,
+            i64::try_from(size).context("Output file is too large for fallocate")?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn preallocate_output_file(_file: &File, _size: u64) -> Result {
+    Err(crate::error!("fallocate is only supported on Linux"))
+}
+
+#[cfg(target_os = "linux")]
+fn advise_huge_pages_if_requested(mmap: &memmap2::MmapMut, requested: bool) -> Result {
+    if requested {
+        mmap.advise(memmap2::Advice::HugePage)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn advise_huge_pages_if_requested(_mmap: &memmap2::MmapMut, requested: bool) -> Result {
+    if requested {
+        return Err(crate::error!("MADV_HUGEPAGE is only supported on Linux"));
+    }
+    Ok(())
+}
+
+fn default_mmap_setup_for_file(
+    file: &File,
+    write_mode: FileWriteMode,
+    file_replacement_mode: FileReplacementMode,
+) -> (bool, bool) {
+    #[cfg(target_os = "linux")]
+    {
+        if write_mode != FileWriteMode::Mmap {
+            return (false, false);
+        }
+        default_mmap_setup_for_filesystem_type(
+            nix::sys::statfs::fstatfs(file)
+                .map(|stat| stat.filesystem_type())
+                .ok(),
+            file_replacement_mode,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, write_mode, file_replacement_mode);
+        (false, false)
+    }
+}
+
+fn resolve_mmap_setup(
+    defaults: (bool, bool),
+    fallocate_output_file: Option<bool>,
+    madvise_huge_pages: Option<bool>,
+) -> (bool, bool) {
+    (
+        fallocate_output_file.unwrap_or(defaults.0),
+        madvise_huge_pages.unwrap_or(defaults.1),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn default_mmap_setup_for_filesystem_type(
+    filesystem_type: Option<nix::sys::statfs::FsType>,
+    file_replacement_mode: FileReplacementMode,
+) -> (bool, bool) {
+    if file_replacement_mode != FileReplacementMode::UnlinkAndReplace {
+        return (false, false);
+    }
+
+    let is_ext4_or_xfs = filesystem_type.is_some_and(|filesystem_type| {
+        filesystem_type == nix::sys::statfs::EXT4_SUPER_MAGIC || filesystem_type == XFS_SUPER_MAGIC
+    });
+    (is_ext4_or_xfs, false)
 }
 
 fn should_parallel_buffer_write(file: &File, output_size: u64) -> bool {
@@ -727,6 +864,68 @@ mod tests {
                 64 * 1024 * 1024,
             ),
             FileWriteMode::BufferThenWrite
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fresh_ext4_mmap_outputs_default_to_preallocation_but_not_huge_pages() {
+        assert_eq!(
+            default_mmap_setup_for_filesystem_type(
+                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                FileReplacementMode::UnlinkAndReplace,
+            ),
+            (true, false)
+        );
+        assert_eq!(
+            default_mmap_setup_for_filesystem_type(
+                Some(XFS_SUPER_MAGIC),
+                FileReplacementMode::UnlinkAndReplace,
+            ),
+            (true, false)
+        );
+        assert_eq!(
+            default_mmap_setup_for_filesystem_type(
+                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                FileReplacementMode::UpdateInPlaceWithFallback,
+            ),
+            (false, false)
+        );
+
+        assert_eq!(resolve_mmap_setup((true, false), None, None), (true, false));
+        assert_eq!(
+            resolve_mmap_setup((true, false), Some(false), Some(true)),
+            (false, true)
+        );
+        assert_eq!(
+            default_mmap_setup_for_filesystem_type(
+                Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+                FileReplacementMode::UnlinkAndReplace,
+            ),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn explicitly_requested_huge_pages_reject_buffered_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::<Path>::from(directory.path().join("output"));
+        let Err(error) = OsFileSystem.create_output(
+            path,
+            OutputOptions {
+                size: 1,
+                file_replacement_mode: FileReplacementMode::UnlinkAndReplace,
+                write_mode: Some(FileWriteMode::BufferThenWrite),
+                fallocate_output_file: None,
+                madvise_huge_pages: Some(true),
+            },
+        ) else {
+            panic!("explicit huge pages with buffered output must fail");
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "--madvise-huge-pages requires mmapped output file"
         );
     }
 }
