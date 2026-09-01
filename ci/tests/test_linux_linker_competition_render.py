@@ -275,6 +275,27 @@ def test_grouped_chart_annotation_boxes_are_in_bounds_and_non_overlapping(tmp_pa
             assert not (overlap_x and overlap_y), (first, second)
 
 
+def test_grouped_chart_long_value_annotations_stay_readable_and_non_overlapping(tmp_path: Path):
+    """Host-feasible long seconds/MiB labels cannot collide across metric columns."""
+    report = _report()
+    for contender in CONTENDER_ORDER:
+        report["contenders"][contender]["summaries"] = {
+            "wall_seconds": _summary(9_000.000),
+            "peak_rss_kib": _summary(13 * 1024 * 1024),
+        }
+
+    paths = render_report(report, tmp_path)
+    with Image.open(paths.png) as image:
+        boxes = json.loads(image.text["annotation_boxes"])
+
+    assert all(box["font_size"] >= 8 for box in boxes)
+    for index, first in enumerate(boxes):
+        for second in boxes[index + 1 :]:
+            overlap_x = first["x"] < second["x"] + second["width"] and second["x"] < first["x"] + first["width"]
+            overlap_y = first["y"] < second["y"] + second["height"] and second["y"] < first["y"] + first["height"]
+            assert not (overlap_x and overlap_y), (first, second)
+
+
 def test_complete_manifest_seals_the_same_json_html_png_and_summary(tmp_path: Path):
     paths = render_report(_report(), tmp_path / "published")
     manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))

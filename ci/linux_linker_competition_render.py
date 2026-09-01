@@ -361,12 +361,64 @@ def _draw_diagonal_hatch(
             draw.line((points[0], points[1]), fill=color, width=width)
 
 
-def _annotation_box(draw: Any, text: str, font: Any, *, center: float, y: float, scale: int) -> dict[str, float]:
-    """Return a base-pixel text bounding box for machine-checkable overlap tests."""
-    box = draw.textbbox((0, 0), text, font=font)
+def _annotation_extent(draw: Any, text: str, font: Any, *, scale: int) -> tuple[float, float]:
+    """Return multiline base-pixel dimensions so placement follows the rendered glyphs."""
+    box = draw.multiline_textbbox((0, 0), text, font=font, spacing=scale)
     width = (box[2] - box[0]) / scale
     height = (box[3] - box[1]) / scale
-    return {"x": center - width / 2, "y": y, "width": width, "height": height}
+    return width, height
+
+
+def _wrap_annotation_text(draw: Any, text: str, font: Any, *, max_width: float, scale: int) -> str | None:
+    """Wrap exact annotation tokens without abbreviating their values or units."""
+    lines: list[str] = []
+    line = ""
+    for token in text.split(" "):
+        proposed = token if not line else f"{line} {token}"
+        width, _ = _annotation_extent(draw, proposed, font, scale=scale)
+        if width <= max_width:
+            line = proposed
+            continue
+        if not line:
+            return None
+        lines.append(line)
+        line = token
+        width, _ = _annotation_extent(draw, line, font, scale=scale)
+        if width > max_width:
+            return None
+    lines.append(line)
+    return "\n".join(lines)
+
+
+def _fit_annotation_text(
+    draw: Any,
+    text: str,
+    *,
+    max_width: float,
+    scale: int,
+) -> tuple[Any, str, int]:
+    """Use the largest readable 8–11 px font and exact word wrapping for one column."""
+    for font_size in range(11, 7, -1):
+        font = _font(font_size * scale)
+        wrapped = _wrap_annotation_text(draw, text, font, max_width=max_width, scale=scale)
+        if wrapped is not None:
+            return font, wrapped, font_size
+    raise CompetitionRenderError(f"annotation cannot fit a {max_width:.1f}px metric column: {text}")
+
+
+def _annotation_box(
+    draw: Any,
+    text: str,
+    font: Any,
+    *,
+    center: float,
+    y: float,
+    scale: int,
+    font_size: int,
+) -> dict[str, float | int]:
+    """Return a base-pixel text bounding box for machine-checkable overlap tests."""
+    width, height = _annotation_extent(draw, text, font, scale=scale)
+    return {"x": center - width / 2, "y": y, "width": width, "height": height, "font_size": font_size}
 
 
 def render_png(report: dict[str, Any], path: Path) -> None:
@@ -380,7 +432,6 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     title_font = _font(30 * scale)
     label_font = _font(15 * scale)
     small_font = _font(12 * scale)
-    annotation_font = _font(11 * scale)
     fg, muted, grid = "#e6edf3", "#9da7b3", "#30363d"
     draw.text((48 * scale, 30 * scale), "Linux ELF competitive linker evidence", font=title_font, fill=fg)
     draw.text(
@@ -424,7 +475,11 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     draw.text((int(1330 * scale), 186 * scale), "Peak process-tree RSS (MiB, right axis)", font=small_font, fill=fg)
 
     group_width = (chart_right - chart_left) / len(CONTENDER_ORDER)
-    bar_width, bar_offset = 70, 60
+    # Each group is split into two fixed annotation columns. Every annotation is word-wrapped
+    # and, only if needed, reduced to an eight-pixel minimum before it is drawn. Thus large but
+    # host-feasible values retain their exact text without spilling into an adjacent metric.
+    annotation_column_width = group_width / 2 - 4
+    bar_width, bar_offset = 70, group_width / 4
     annotation_boxes: list[dict[str, object]] = []
     for index, contender in enumerate(CONTENDER_ORDER):
         group_center = chart_left + group_width * (index + 0.5)
@@ -466,16 +521,37 @@ def render_png(report: dict[str, Any], path: Path) -> None:
                 if metric == "wall_seconds"
                 else f"CI {float(summary['bootstrap_95_ci'][0]) / 1024:.3f} – {float(summary['bootstrap_95_ci'][1]) / 1024:.3f} MiB"
             )
-            text_y = max(chart_top + 4, high_y - 37)
-            for row, text, fill in ((0, value_label, fg), (16, ci_label, muted)):
-                annotation = _annotation_box(draw, text, annotation_font, center=center, y=text_y + row, scale=scale)
-                annotation["x"] = min(
-                    max(float(annotation["x"]), chart_left),
-                    chart_right - float(annotation["width"]),
+            value_font, wrapped_value, value_font_size = _fit_annotation_text(
+                draw, value_label, max_width=annotation_column_width, scale=scale
+            )
+            ci_font, wrapped_ci, ci_font_size = _fit_annotation_text(
+                draw, ci_label, max_width=annotation_column_width, scale=scale
+            )
+            _, value_height = _annotation_extent(draw, wrapped_value, value_font, scale=scale)
+            _, ci_height = _annotation_extent(draw, wrapped_ci, ci_font, scale=scale)
+            text_y = max(chart_top + 4, high_y - value_height - ci_height - 7)
+            for row, text, font, font_size, fill in (
+                (0, wrapped_value, value_font, value_font_size, fg),
+                (value_height + 2, wrapped_ci, ci_font, ci_font_size, muted),
+            ):
+                annotation = _annotation_box(
+                    draw,
+                    text,
+                    font,
+                    center=center,
+                    y=text_y + row,
+                    scale=scale,
+                    font_size=font_size,
                 )
                 annotation.update({"contender": contender, "metric": metric, "text": text})
                 annotation_boxes.append(annotation)
-                draw.text((int(annotation["x"] * scale), int((text_y + row) * scale)), text, font=annotation_font, fill=fill)
+                draw.multiline_text(
+                    (int(float(annotation["x"]) * scale), int((text_y + row) * scale)),
+                    text,
+                    font=font,
+                    fill=fill,
+                    spacing=scale,
+                )
         contender_label = CONTENDER_LABELS[contender]
         box = draw.textbbox((0, 0), contender_label, font=label_font)
         draw.text(
