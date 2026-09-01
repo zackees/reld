@@ -157,11 +157,11 @@ or composite score, and performance claims still require the independent confide
 metrics. The workflow uploads the schema-versioned report, raw JSONL, provenance, accessible HTML,
 PNG, generated job summary, and (only on failure) retained mismatch artifacts. Inspect the hosted
 PNG before publication for bar order, left/right zero-based axis labels, solid/hatched legend,
-exact median/CI annotations, clipping, and non-overlap. A successful combined-layout run is
-published as an immutable `linux-linker-competition-v2` evidence bundle (PNG, HTML, report, raw
-samples, provenance, locks, summary, and completion manifest); v1 remains available as its
-historical two-panel evidence. The workflow has no schedule and never writes benchmark history;
-hosted results support only same-run comparisons.
+exact median/CI annotations, clipping, and non-overlap. Publish successful combined-layout
+evidence as an immutable `linux-linker-competition-v2` bundle (PNG, HTML, report, raw samples,
+provenance, locks, summary, and completion manifest); retain v1 as the historical two-panel
+evidence. The workflow has no schedule and never writes benchmark history; hosted results support
+only same-run comparisons.
 
 Prefer the complete `RelWithDebInfo` closure. The standard public `ubuntu-24.04` runner has a
 measured 16 GB RAM and 14 GB SSD, and each GitHub Release asset must remain below 2 GiB; the checked
