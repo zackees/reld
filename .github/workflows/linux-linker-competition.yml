@@ -40,6 +40,7 @@ jobs:
       RENDER_DIR: competition-evidence/render
       SUMMARY_OUTPUT: competition-evidence/summary.md
       VENV_PYTHON: ${{ github.workspace }}/.venv/bin/python
+      REPLAY_PROVENANCE_ENV: GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS,RUNNER_ARCH,RUNNER_ENVIRONMENT,ImageOS,ImageVersion,BASELINE_SHA
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -76,7 +77,7 @@ jobs:
           git rev-parse --verify "$BASELINE_SHA^{commit}" >/dev/null
           echo "BASELINE_SHA=$BASELINE_SHA" >> "$GITHUB_ENV"
 
-      - name: Preflight delegated cgroup-v2 root
+      - name: Preflight root-scoped cgroup-v2 hierarchy
         shell: bash
         run: |
           set -euo pipefail
@@ -150,7 +151,8 @@ jobs:
         run: |
           set -euo pipefail
           test -x "$VENV_PYTHON"
-          sudo --non-interactive "$VENV_PYTHON" -m ci.linux_linker_competition replay \
+          sudo --non-interactive --preserve-env="$REPLAY_PROVENANCE_ENV" \
+            "$VENV_PYTHON" -m ci.linux_linker_competition replay \
             --corpus-lock "$CORPUS_LOCK" \
             --comparator-lock "$COMPARATOR_LOCK" \
             --baseline "$EVIDENCE_DIR/baseline-reld" \

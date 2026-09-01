@@ -107,7 +107,10 @@ the replay must receive an explicitly preflighted, delegated cgroup-v2 root so t
 runner can validate process-tree RSS. Because an Actions step begins outside that subtree, the
 workflow invokes its cgroup collector self-test and replay through the pinned absolute venv Python
 under non-interactive `sudo`; this root-scoped boundary is required for a process launcher to move
-itself and its descendants into measurement children. Pull requests run only when their *head* branch starts with
+itself and its descendants into measurement children. The root-scoped replay preserves only the
+explicit hosted-provenance allowlist (`GITHUB_ACTIONS`, `GITHUB_SHA`, `GITHUB_RUN_ID`,
+`GITHUB_RUN_ATTEMPT`, `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_ENVIRONMENT`, `ImageOS`, `ImageVersion`,
+and `BASELINE_SHA`); it must never use blanket sudo environment preservation. Pull requests run only when their *head* branch starts with
 `perf/linux/`; a manual dispatch requires a full immutable 40-hex `baseline_sha`. A PR baseline is
 always the exact `github.event.pull_request.base.sha`, never a branch name or floating revision.
 
@@ -133,6 +136,9 @@ the two-run self-determinism/native oracle gate for every external linker. It re
 product behavior, with wall time and peak *process-tree RSS* as independent co-primary metrics.
 `memory.peak` and CPU data are whole-tree diagnostics, never relabelled as RSS. Do not substitute
 parent-only `/usr/bin/time` or `getrusage` data: forked linkers make it materially wrong.
+Wild is an external performance comparator only: the exact pre-change reld baseline is the
+artifact reference, and no Wild/reld artifact-equivalence claim is made because reld intentionally
+changed its build-ID/output-layout policy in PR #76.
 
 The renderer produces one paired wall-time/RSS graph with separate zero-based scales, confidence
 intervals, and fixed contender order. The workflow uploads the schema-versioned report, raw JSONL,

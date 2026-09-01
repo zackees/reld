@@ -58,8 +58,14 @@ def test_competition_workflow_preflights_a_delegated_cgroup_v2_root() -> None:
     assert "cgroup.subtree_control" in text
     assert "+memory +cpu" in text
     assert "VENV_PYTHON: ${{ github.workspace }}/.venv/bin/python" in text
+    assert (
+        "REPLAY_PROVENANCE_ENV: "
+        "GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS,"
+        "RUNNER_ARCH,RUNNER_ENVIRONMENT,ImageOS,ImageVersion,BASELINE_SHA"
+    ) in text
     assert "sudo chown" not in text
     assert 'test -w "$CGROUP_ROOT' not in text
+    assert "sudo -E" not in text
     assert "--cgroup-root \"$CGROUP_ROOT\"" in text
     self_test_at = text.index("ci.linux_linker_competition self-test")
     lock_validation_at = text.index("ci.linux_linker_competition validate-lock")
@@ -75,7 +81,8 @@ def test_competition_workflow_builds_non_git_relds_and_replays_exact_contract() 
     assert 'test ! -e "$RUNNER_TEMP/reld-baseline/.git"' in text
     assert 'test ! -e "$RUNNER_TEMP/reld-candidate/.git"' in text
     assert "ci.linux_linker_competition replay" in text
-    assert 'sudo --non-interactive "$VENV_PYTHON" -m ci.linux_linker_competition replay' in text
+    assert 'sudo --non-interactive --preserve-env="$REPLAY_PROVENANCE_ENV"' in text
+    assert '"$VENV_PYTHON" -m ci.linux_linker_competition replay' in text
     assert "--corpus-lock \"$CORPUS_LOCK\"" in text
     assert "--comparator-lock \"$COMPARATOR_LOCK\"" in text
     assert '--baseline "$EVIDENCE_DIR/baseline-reld"' in text
