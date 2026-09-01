@@ -172,6 +172,8 @@ def validate_lock(lock: dict[str, Any]) -> None:
         raise ReplayError("link.arguments must contain the exact captured linker argument vector")
     for index, argument in enumerate(arguments):
         _require_string(argument, f"link.arguments[{index}]", allow_empty=True)
+    if "--no-fork" not in arguments:
+        raise ReplayError("link.arguments must include '--no-fork' for link-process-only timing")
     if sum(argument.count(OUTPUT_TOKEN) for argument in arguments) != 1:
         raise ReplayError(f"link.arguments must contain {OUTPUT_TOKEN!r} exactly once")
     for argument in arguments:

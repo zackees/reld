@@ -55,7 +55,7 @@ def _lock(
             "bytes": archive_bytes,
         },
         "link": {
-            "arguments": [f"@{{CORPUS}}/link.rsp", "-o", "{OUTPUT}"],
+            "arguments": ["--no-fork", f"@{{CORPUS}}/link.rsp", "-o", "{OUTPUT}"],
             "cwd": ".",
             "environment": {"LC_ALL": "C", "PATH": "/usr/bin"},
             "stdout_utf8": "",
@@ -119,12 +119,20 @@ def test_lock_requires_pinned_provenance_and_fixed_replay_contract(corpus_files)
 
 def test_lock_requires_exact_output_placeholder_and_complete_response_closure(corpus_files) -> None:
     lock = _lock(corpus_files)
-    lock["link"]["arguments"] = ["@{CORPUS}/link.rsp"]
+    lock["link"]["arguments"] = ["--no-fork", "@{CORPUS}/link.rsp"]
     with pytest.raises(ReplayError, match="exactly once"):
         validate_lock(lock)
 
     lock = _lock({"objects/input.o": b"ELF-object"})
     with pytest.raises(ReplayError, match="response files are absent"):
+        validate_lock(lock)
+
+
+def test_lock_requires_no_fork_for_link_process_timing(corpus_files) -> None:
+    lock = _lock(corpus_files)
+    lock["link"]["arguments"].remove("--no-fork")
+
+    with pytest.raises(ReplayError, match="must include '--no-fork'"):
         validate_lock(lock)
 
 
