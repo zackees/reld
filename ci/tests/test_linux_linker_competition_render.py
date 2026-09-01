@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from ci.linux_linker_competition_render import (
     CONTENDER_ORDER,
@@ -36,6 +37,7 @@ def _report() -> dict[str, object]:
         "baseline": (0.15, 241.0 * 1024),
         "candidate": (0.12, 231.0 * 1024),
     }
+
     contenders = {
         name: {
             "label": label,
@@ -87,6 +89,47 @@ def _report() -> dict[str, object]:
     }
 
 
+def _realistic_issue_103_report() -> dict[str, object]:
+    """A measurement-shaped report with optional provenance and cgroup diagnostics."""
+    report = _report()
+    report.update(
+        {
+            "status": "passed",
+            "target": "x86_64-unknown-linux-gnu",
+            "metric_backend": "cgroup-v2-process-tree-rss",
+            "provenance": {
+                "runner": {"image": "ubuntu-24.04", "kernel": "6.8.0", "cpu_model": "example CPU"},
+                "corpus_lock_sha256": "b" * 64,
+                "baseline_source_sha": "c" * 40,
+                "candidate_source_sha": "d" * 40,
+            },
+            "identity": {"status": "passed", "first_differing_offset": None},
+        }
+    )
+    for contender in CONTENDER_ORDER:
+        detail = report["contenders"][contender]
+        detail["binary"] = {"sha256": "e" * 64, "version": f"{contender} version"}
+        detail["artifact_identity"] = {"sha256": "a" * 64, "self_deterministic": True}
+        detail["diagnostics"] = {"cgroup_memory_peak_bytes": 1024 * 1024, "cpu_usage_usec": 1_000}
+        for metric in ("wall_seconds", "peak_rss_kib"):
+            detail["summaries"][metric]["sample_count"] = 10
+            detail["summaries"][metric]["unit"] = "seconds" if metric == "wall_seconds" else "KiB"
+    report["comparisons"][0].update(
+        {"method": "paired bootstrap median ratio", "iterations": 20_000, "seed": 103}
+    )
+    for sample in report["raw_samples"]:
+        sample.update(
+            {
+                "order": list(CONTENDER_ORDER),
+                "cgroup_memory_peak_bytes": 1_024 * 1_024,
+                "cpu_usage_usec": 100_000,
+                "cgroup_path": "/sys/fs/cgroup/reld/example",
+                "identity_sha256": "a" * 64,
+            }
+        )
+    return report
+
+
 def test_report_contract_is_fixed_and_accepts_complete_evidence():
     report = _report()
 
@@ -135,6 +178,42 @@ def test_render_surfaces_have_aligned_wall_and_rss_values(tmp_path: Path):
     assert "Peak RSS (MiB)" in summary
     assert "No scalar combined score" in summary
     assert json.loads(paths.json.read_text(encoding="utf-8"))["contender_order"] == list(CONTENDER_ORDER)
+
+
+def test_realistic_measurement_schema_and_every_surface_stay_in_parity(tmp_path: Path):
+    report = _realistic_issue_103_report()
+
+    validate_report(report)
+    paths = render_report(report, tmp_path)
+    copied = json.loads(paths.json.read_text(encoding="utf-8"))
+    html = paths.html.read_text(encoding="utf-8")
+    markdown = paths.summary.read_text(encoding="utf-8")
+    with Image.open(paths.png) as image:
+        png_values = json.loads(image.text["rendered_values"])
+        assert image.text["contender_order"].split(",") == list(CONTENDER_ORDER)
+        assert image.text["metrics"] == "wall_seconds,peak_rss_kib"
+
+    # The verbatim copy retains raw samples and optional cgroup/provenance diagnostics.
+    assert copied == report
+    assert copied["raw_samples"][0]["metric_backend"] == "cgroup-v2-process-tree-rss"
+    assert copied["raw_samples"][0]["cgroup_memory_peak_bytes"] == 1_024 * 1_024
+    assert copied["contenders"]["candidate"]["diagnostics"]["cpu_usage_usec"] == 1_000
+
+    # HTML, Markdown, and PNG metadata all use the same fixed order and absolute values/CIs.
+    for contender in CONTENDER_ORDER:
+        detail = report["contenders"][contender]
+        wall = detail["summaries"]["wall_seconds"]
+        rss = detail["summaries"]["peak_rss_kib"]
+        assert detail["label"] in html
+        assert detail["label"] in markdown
+        assert f"{wall['median']:.3f} s" in html
+        assert f"{wall['median']:.3f} s" in markdown
+        assert f"{rss['median'] / 1024:.3f} MiB" in html
+        assert f"{rss['median'] / 1024:.3f} MiB" in markdown
+        assert png_values[contender]["wall_seconds"]["median"] == wall["median"]
+        assert png_values[contender]["wall_seconds"]["bootstrap_95_ci"] == wall["bootstrap_95_ci"]
+        assert png_values[contender]["peak_rss_kib"]["median"] == rss["median"]
+        assert png_values[contender]["peak_rss_kib"]["bootstrap_95_ci"] == rss["bootstrap_95_ci"]
 
 
 def test_summary_rejects_wall_only_or_rss_only_claims():

@@ -224,6 +224,24 @@ def _summary_values(report: dict[str, Any], metric: str) -> list[dict[str, Any]]
     return values
 
 
+def _rendered_values(report: dict[str, Any]) -> dict[str, dict[str, dict[str, object]]]:
+    """Return the absolute medians/CIs printed in both visual surfaces.
+
+    Keeping this compact representation in PNG metadata lets parity tests verify the binary
+    chart without trying to OCR its labels. It contains no derived score or normalized value.
+    """
+    return {
+        contender: {
+            metric: {
+                "median": report["contenders"][contender]["summaries"][metric]["median"],
+                "bootstrap_95_ci": report["contenders"][contender]["summaries"][metric]["bootstrap_95_ci"],
+            }
+            for metric in METRICS
+        }
+        for contender in CONTENDER_ORDER
+    }
+
+
 def render_png(report: dict[str, Any], path: Path) -> None:
     """Render wall time and RSS as aligned panels with independent zero-based scales."""
     from PIL import Image, ImageDraw, PngImagePlugin
@@ -299,6 +317,7 @@ def render_png(report: dict[str, Any], path: Path) -> None:
     metadata.add_text("workload", str(report["workload"]["id"]))
     metadata.add_text("contender_order", ",".join(CONTENDER_ORDER))
     metadata.add_text("metrics", "wall_seconds,peak_rss_kib")
+    metadata.add_text("rendered_values", json.dumps(_rendered_values(report), sort_keys=True, separators=(",", ":")))
     image.resize((width, height), Image.Resampling.LANCZOS).save(path, "PNG", pnginfo=metadata)
 
 
