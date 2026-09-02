@@ -46,12 +46,40 @@ jobs:
         include:
           - name: windows-msvc
             target: x86_64-pc-windows-msvc
+            cross_targets: x86_64-pc-windows-msvc
+            linker: fast
+            cache: "true"
             artifact: reld-windows-x86_64-msvc
             executable: reld.exe
           - name: macos-arm64
             target: aarch64-apple-darwin
+            cross_targets: aarch64-apple-darwin
+            linker: fast
+            cache: "true"
             artifact: reld-macos-arm64
             executable: reld
+          # windows-gnu cross-from-Linux: soldr provisions the Linux-hosted
+          # mingw cross gcc toolchain (soldr-toolchain#114 Phase 2), so no
+          # hand-installed `gcc-mingw-w64`. Requires soldr >= 0.8.44.
+          #
+          # cross_targets is deliberately EMPTY here: soldr#2341 wired the
+          # win-gnu Linux-host toolchain into `soldr build --target` (which
+          # self-provisions) but not yet into `soldr prepare --target` (what
+          # setup-soldr's cross-targets runs) — that path still finds no
+          # mingw dir and fails with an empty archive. Skipping the prepare
+          # step and letting `soldr build --target` fetch the toolchain works
+          # today; `soldr prepare` parity is tracked in soldr#2342.
+          # linker: platform-default — the mingw gcc driver links with its
+          # own bundled `x86_64-w64-mingw32-ld`. soldr's default `fast`
+          # injects `-fuse-ld=lld`, which the cross gcc can't resolve
+          # (collect2: cannot find 'ld').
+          - name: windows-gnu
+            target: x86_64-pc-windows-gnu
+            cross_targets: ""
+            linker: platform-default
+            cache: "false"
+            artifact: reld-windows-x86_64-gnu
+            executable: reld.exe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -66,10 +94,26 @@ jobs:
         id: setup
         uses: zackees/setup-soldr@main
         with:
-          cross-targets: ${{ matrix.target }}
-          cache: true
+          # 0.8.44 is the first release with Linux-hosted win-gnu cross
+          # support (soldr#2341); msvc/darwin work on it too.
+          version: 0.8.44
+          # Empty for win-gnu (see matrix note) — `soldr build --target`
+          # self-provisions that toolchain.
+          cross-targets: ${{ matrix.cross_targets }}
+          # win-gnu links via the mingw gcc's own ld (see matrix note).
+          linker: ${{ matrix.linker }}
+          cache: ${{ matrix.cache }}
           cache-preset: full
           prebuild-deps: soldr-cook
+
+      # Guarantee the target's rust-std in SOLDR's managed toolchain home
+      # (soldr build uses that, not the runner's default rustup). A cache
+      # restore can leave soldr believing std is present when the rlibs are
+      # not, yielding E0463 ("can't find crate for core"); this idempotent
+      # add through soldr's rustup front door repairs that.
+      - name: Ensure Rust std for target (soldr toolchain)
+        shell: bash
+        run: soldr rustup target add "${{ matrix.target }}"
 
       - name: Cross-compile reld (release) via blessed front door
         shell: bash
@@ -94,6 +138,7 @@ jobs:
           file "package/${{ matrix.executable }}"
           case "${{ matrix.target }}" in
             x86_64-pc-windows-msvc) file "package/${{ matrix.executable }}" | grep -q 'PE32' ;;
+            x86_64-pc-windows-gnu)  file "package/${{ matrix.executable }}" | grep -q 'PE32' ;;
             aarch64-apple-darwin)   file "package/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
           esac
 
@@ -144,15 +189,20 @@ jobs:
             runner: macos-14
             artifact: reld-macos-arm64
             executable: reld
+          - name: windows-gnu
+            runner: windows-2022
+            artifact: reld-windows-x86_64-gnu
+            executable: reld.exe
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: package
 
-      # On windows-msvc, reld is a normal executable and prints its version.
-      - name: Smoke deployed reld (windows-msvc)
-        if: matrix.name == 'windows-msvc'
+      # On Windows (msvc or gnu), reld is a normal executable and prints its
+      # version.
+      - name: Smoke deployed reld (windows)
+        if: startsWith(matrix.name, 'windows')
         shell: pwsh
         run: |
           $out = & ".\package\${{ matrix.executable }}" --version 2>&1 | Out-String
