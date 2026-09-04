@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>reld benchmarks</title>
+<style>
+body{background:#0d1117;color:#e6edf3;font:14px system-ui,sans-serif;margin:2rem auto;max-width:960px}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #30363d;padding:.4rem .6rem;text-align:right}
+th:first-child,td:first-child{text-align:left}img{max-width:100%}a{color:#58a6ff}
+td.na{color:#7d8590}td.pending{color:#bb8009}
+</style></head><body>
+<h1>reld &mdash; link benchmark</h1>
+<p>2026-09-04T13:54:34Z &middot; aarch64-apple-darwin &middot; macOS-14.8.9-arm64-arm-64bit-Mach-O</p>
+<img src="benchmark-link.jpg" alt="benchmark chart">
+<table><thead><tr><th>Configuration</th><th>ld</th><th>ld64.lld</th><th>reld (bridge/ld64.lld)</th></tr></thead><tbody><tr><td>no-LTO</td><td>2.1983s</td><td>1.4718s</td><td>1.5550s</td></tr><tr><td>ThinLTO</td><td>2.5046s</td><td>2.0261s</td><td>2.0021s</td></tr><tr><td>full-LTO</td><td>2.5472s</td><td>1.9865s</td><td>1.9768s</td></tr></tbody></table>
+<h2>Fixed linker startup</h2><p>Reported raw and never subtracted from final-link medians.</p>
+<table><thead><tr><th>Series</th><th>Seconds</th></tr></thead><tbody><tr><td>ld</td><td>0.0172s</td></tr><tr><td>ld64.lld</td><td>0.0122s</td></tr><tr><td>reld (bridge/ld64.lld)</td><td>0.1161s</td></tr></tbody></table>
+<p><a href="https://github.com/zackees/reld">zackees/reld</a></p>
+</body></html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>reld benchmarks</title>
+<style>
+body{background:#0d1117;color:#e6edf3;font:14px system-ui,sans-serif;margin:2rem auto;max-width:960px}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #30363d;padding:.4rem .6rem;text-align:right}
+th:first-child,td:first-child{text-align:left}img{max-width:100%}a{color:#58a6ff}
+td.na{color:#7d8590}td.pending{color:#bb8009}
+</style></head><body>
+<h1>reld &mdash; link benchmark</h1>
+<p>2026-09-04T13:51:16Z &middot; x86_64-pc-windows-msvc &middot; Windows-2022Server-10.0.20348-SP0</p>
+<img src="benchmark-link.jpg" alt="benchmark chart">
+<table><thead><tr><th>Configuration</th><th>link.exe</th><th>lld</th><th>reld (bridge/lld-link)</th></tr></thead><tbody><tr><td>no-LTO</td><td>1.7803s</td><td>1.9736s</td><td>2.1529s</td></tr><tr><td>ThinLTO</td><td>1.5247s</td><td>1.8392s</td><td>1.9998s</td></tr><tr><td>full-LTO</td><td>1.4922s</td><td>1.7340s</td><td>1.8990s</td></tr></tbody></table>
+<h2>Fixed linker startup</h2><p>Reported raw and never subtracted from final-link medians.</p>
+<table><thead><tr><th>Series</th><th>Seconds</th></tr></thead><tbody><tr><td>link.exe</td><td>0.0118s</td></tr><tr><td>lld</td><td>0.0130s</td></tr><tr><td>reld (bridge/lld-link)</td><td>0.1233s</td></tr></tbody></table>
+<p><a href="https://github.com/zackees/reld">zackees/reld</a></p>
+</body></html>

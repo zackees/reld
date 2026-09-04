@@ -1,0 +1,195 @@
+{
+  "schema_version": 6,
+  "benchmark_id": "artifact-auditor-native-linux-lto-v2",
+  "metadata": {
+    "generated_at": "2026-09-04T13:47:54Z",
+    "repository": "zackees/reld",
+    "git_sha": "92436c0a983b0828de445ddc86945cf35c90831f",
+    "git_ref": "refs/heads/main",
+    "run_url": "https://github.com/zackees/reld/actions/runs/33878582795",
+    "target": "x86_64-linux",
+    "benchmark": {
+      "id": "artifact-auditor-native-linux-lto-v2",
+      "workload": "ci/e2e/link-workload",
+      "configurations": [
+        "no-LTO",
+        "ThinLTO",
+        "full-LTO"
+      ]
+    },
+    "runner": {
+      "os": "Linux",
+      "arch": "x86_64",
+      "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+      "cpu_count": 4
+    },
+    "versions": {
+      "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+      "mold": "mold 2.30.0 (compatible with GNU ld)",
+      "wild": "Wild 0.10.0 non-git-build (compatible with GNU linkers)",
+      "ld.lld": "Ubuntu LLD 18.1.3 (compatible with GNU linkers)"
+    },
+    "raw_image_base_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-stats",
+    "raw_image_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-linux/benchmark-link.jpg",
+    "pages_url": null
+  },
+  "results": [
+    {
+      "configuration": "no-LTO",
+      "series": "bfd",
+      "seconds": 2.3951,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "bfd"
+    },
+    {
+      "configuration": "no-LTO",
+      "series": "lld",
+      "seconds": 0.5464,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "configuration": "no-LTO",
+      "series": "mold",
+      "seconds": 0.4303,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "mold"
+    },
+    {
+      "configuration": "no-LTO",
+      "series": "wild",
+      "seconds": 0.4595,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "wild"
+    },
+    {
+      "configuration": "no-LTO",
+      "series": "reld",
+      "seconds": 0.3666,
+      "status": "measured",
+      "mode": "native",
+      "engine": "reld"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "bfd",
+      "seconds": 1.8629,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "bfd"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "lld",
+      "seconds": 0.5165,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "mold",
+      "seconds": 0.5099,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "mold"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "wild",
+      "seconds": 0.4377,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "wild"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "reld",
+      "seconds": 0.3396,
+      "status": "measured",
+      "mode": "native",
+      "engine": "reld"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "bfd",
+      "seconds": 1.7508,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "bfd"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "lld",
+      "seconds": 0.4023,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "mold",
+      "seconds": 0.2959,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "mold"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "wild",
+      "seconds": 0.3876,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "wild"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "reld",
+      "seconds": 0.2766,
+      "status": "measured",
+      "mode": "native",
+      "engine": "reld"
+    }
+  ],
+  "startup": [
+    {
+      "series": "bfd",
+      "seconds": 0.0014,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "bfd"
+    },
+    {
+      "series": "lld",
+      "seconds": 0.0115,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "series": "mold",
+      "seconds": 0.0022,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "mold"
+    },
+    {
+      "series": "wild",
+      "seconds": 0.0019,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "wild"
+    },
+    {
+      "series": "reld",
+      "seconds": 0.0018,
+      "status": "measured",
+      "mode": "native",
+      "engine": "reld"
+    }
+  ]
+}

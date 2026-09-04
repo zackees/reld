@@ -1,0 +1,133 @@
+{
+  "schema_version": 6,
+  "benchmark_id": "artifact-auditor-native-linux-lto-v2",
+  "metadata": {
+    "generated_at": "2026-09-04T13:51:16Z",
+    "repository": "zackees/reld",
+    "git_sha": "92436c0a983b0828de445ddc86945cf35c90831f",
+    "git_ref": "refs/heads/main",
+    "run_url": "https://github.com/zackees/reld/actions/runs/33878582795",
+    "target": "x86_64-pc-windows-msvc",
+    "benchmark": {
+      "id": "artifact-auditor-native-linux-lto-v2",
+      "workload": "ci/e2e/link-workload",
+      "configurations": [
+        "no-LTO",
+        "ThinLTO",
+        "full-LTO"
+      ]
+    },
+    "runner": {
+      "os": "Windows",
+      "arch": "AMD64",
+      "platform": "Windows-2022Server-10.0.20348-SP0",
+      "cpu_count": 4
+    },
+    "versions": {
+      "clang": "clang version 20.1.8",
+      "mold": null,
+      "wild": null,
+      "ld.lld": null
+    },
+    "raw_image_base_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-stats",
+    "raw_image_url": "https://raw.githubusercontent.com/zackees/reld/benchmark-stats/x86_64-pc-windows-msvc/benchmark-link.jpg",
+    "pages_url": null
+  },
+  "results": [
+    {
+      "configuration": "no-LTO",
+      "series": "link.exe",
+      "seconds": 1.7803,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "link.exe"
+    },
+    {
+      "configuration": "no-LTO",
+      "series": "lld",
+      "seconds": 1.9736,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "configuration": "no-LTO",
+      "series": "reld",
+      "seconds": 2.1529,
+      "status": "measured",
+      "mode": "bridge",
+      "engine": "lld-link"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "link.exe",
+      "seconds": 1.5247,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "link.exe"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "lld",
+      "seconds": 1.8392,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "configuration": "ThinLTO",
+      "series": "reld",
+      "seconds": 1.9998,
+      "status": "measured",
+      "mode": "bridge",
+      "engine": "lld-link"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "link.exe",
+      "seconds": 1.4922,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "link.exe"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "lld",
+      "seconds": 1.734,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "configuration": "full-LTO",
+      "series": "reld",
+      "seconds": 1.899,
+      "status": "measured",
+      "mode": "bridge",
+      "engine": "lld-link"
+    }
+  ],
+  "startup": [
+    {
+      "series": "link.exe",
+      "seconds": 0.0118,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "link.exe"
+    },
+    {
+      "series": "lld",
+      "seconds": 0.013,
+      "status": "measured",
+      "mode": "reference",
+      "engine": "lld"
+    },
+    {
+      "series": "reld",
+      "seconds": 0.1233,
+      "status": "measured",
+      "mode": "bridge",
+      "engine": "lld-link"
+    }
+  ]
+}
