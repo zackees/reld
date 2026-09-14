@@ -23,8 +23,8 @@ on:
       - ".github/workflows/stress.yml"
 
 concurrency:
-  group: stress-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   stress:

@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: linker-modes-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   exercise:
