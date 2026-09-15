@@ -37,6 +37,10 @@ path = "tests/external_runner.rs"
 name = "acceptance-policy"
 path = "tests/acceptance_policy_tests.rs"
 
+[[test]]
+name = "nix-rpath"
+path = "tests/nix_rpath.rs"
+
 [dependencies]
 reld-core = { path = "../reld-core", version = "0.0.0", default-features = false }
 
