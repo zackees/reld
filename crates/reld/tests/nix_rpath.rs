@@ -2,7 +2,8 @@
 //!
 //! These tests link a real shared object against a library in a fake Nix store directory and
 //! assert that reld derives the matching `DT_RUNPATH`. They are skipped when no C compiler is
-//! available.
+//! available, and only run on Linux, where `cc` produces ELF objects.
+#![cfg(target_os = "linux")]
 
 use object::Object as _;
 use object::ObjectSection as _;
