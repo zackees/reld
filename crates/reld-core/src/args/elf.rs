@@ -135,6 +135,8 @@ pub struct ElfArgs {
 
     rpath_set: IndexSet<String>,
 
+    nix_rpath: NixRpathMode,
+
     experimental_sframe: bool,
 
     pub(crate) debug_compression_kind: Option<CompressionKind>,
@@ -146,6 +148,17 @@ pub struct ElfArgs {
 pub(crate) enum SortSectionMode {
     Name,
     Alignment,
+}
+
+/// Controls reld's NixOS RUNPATH derivation, mirroring nixpkgs' `ld-wrapper.sh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NixRpathMode {
+    /// Derive RUNPATH entries from store `-L` directories unless `NIX_DONT_SET_RPATH=1`.
+    Auto,
+    /// Force derivation on, ignoring `NIX_DONT_SET_RPATH`.
+    On,
+    /// Force derivation off (e.g. for hermetic builds).
+    Off,
 }
 
 #[derive(Debug)]
@@ -353,6 +366,7 @@ impl Default for ElfArgs {
             max_page_size: None,
             auxiliary: Vec::new(),
             rpath_set: Default::default(),
+            nix_rpath: NixRpathMode::Auto,
             plugin_path: None,
             plugin_args: Vec::new(),
 
@@ -406,6 +420,94 @@ impl ElfArgs {
             || self.pack_dyn_relocs == PackDynRelocs::Relr
             || self.pack_dyn_relocs == PackDynRelocs::AndroidRelr
     }
+
+    /// Reads the Nix configuration from the environment and derives RUNPATH entries for store
+    /// libraries, mirroring nixpkgs' `ld-wrapper.sh`.
+    fn add_nix_rpath_entries(&mut self) {
+        let dont_set = crate::env::var("NIX_DONT_SET_RPATH").is_ok_and(|v| v == "1");
+        let nix_store = crate::env::var("NIX_STORE").unwrap_or_else(|_| "/nix/store".to_owned());
+        self.add_nix_rpath_entries_with(&nix_store, dont_set);
+    }
+
+    /// Derivation logic, split out so it can be exercised directly in tests without touching the
+    /// environment.
+    fn add_nix_rpath_entries_with(&mut self, nix_store: &str, dont_set_rpath: bool) {
+        if self.nix_rpath == NixRpathMode::Off {
+            return;
+        }
+        if self.nix_rpath == NixRpathMode::Auto && dont_set_rpath {
+            return;
+        }
+
+        let store = Path::new(nix_store);
+
+        // Basenames requested through `-l<name>` or by an explicit `.so` path.
+        let mut requested: HashSet<String> = HashSet::new();
+        for input in &self.common.inputs {
+            match &input.spec {
+                InputSpec::Lib(name) => {
+                    requested.insert(format!("lib{name}.so"));
+                }
+                InputSpec::Search(name) => {
+                    requested.insert(name.to_string());
+                }
+                InputSpec::File(path) => {
+                    if is_shared_library_path(path)
+                        && let Some(name) = path.file_name()
+                    {
+                        requested.insert(name.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        if requested.is_empty() {
+            return;
+        }
+
+        // Candidate directories in command-line order: `-L` directories first, then the parent of
+        // any shared library passed by path.
+        let mut candidate_dirs: Vec<&Path> =
+            self.lib_search_path.iter().map(|p| p.as_ref()).collect();
+        for input in &self.common.inputs {
+            if let InputSpec::File(path) = &input.spec
+                && is_shared_library_path(path)
+                && let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                candidate_dirs.push(parent);
+            }
+        }
+
+        let mut seen: HashSet<&Path> = HashSet::new();
+        for dir in candidate_dirs {
+            if dir != store && !dir.starts_with(store) {
+                continue;
+            }
+            if !seen.insert(dir) {
+                continue;
+            }
+            // Add the directory only if it provides a requested shared library, matching the
+            // wrapper, which globs the directory and matches against the requested basenames.
+            let provides = requested
+                .iter()
+                .any(|name| std::fs::symlink_metadata(dir.join(name)).is_ok());
+            if provides {
+                self.rpath_set.insert(dir.to_string_lossy().into_owned());
+            }
+        }
+    }
+}
+
+// Whether `path` names a shared library (`*.so` or `*.so.<version>`).
+fn is_shared_library_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    // Match `libfoo.so` (linker name) and `libfoo.so.1` (versioned soname).
+    Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("so"))
+        || name.contains(".so.")
 }
 
 // Parse the supplied input arguments, which should not include the program name.
@@ -427,6 +529,10 @@ pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
         args.copy_relocations =
             CopyRelocations::Disallowed(CopyRelocationsDisabledReason::SharedObject);
     }
+
+    // Derive RUNPATH entries for Nix store libraries, mirroring nixpkgs' ld-wrapper. These are
+    // appended after any explicit `-rpath` entries, matching the wrapper's `extraAfter` placement.
+    args.add_nix_rpath_entries();
 
     if !args.rpath_set.is_empty() {
         args.rpath = Some(std::mem::take(&mut args.rpath_set).into_iter().join(":"));
@@ -1581,6 +1687,23 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
 
     parser
         .declare_with_param()
+        .long("nix-rpath")
+        .help("Control automatic Nix store RUNPATH derivation (auto|on|off)")
+        .execute(|args, _modifier_stack, value| {
+            args.nix_rpath = match value {
+                "auto" => NixRpathMode::Auto,
+                "on" => NixRpathMode::On,
+                "off" => NixRpathMode::Off,
+                other => {
+                    args.warn_unsupported(&format!("--nix-rpath={other}"))?;
+                    return Ok(());
+                }
+            };
+            Ok(())
+        });
+
+    parser
+        .declare_with_param()
         .long("sysroot")
         .help("Set system root")
         .execute(|args, _modifier_stack, value| {
@@ -2552,5 +2675,137 @@ mod tests {
             args.start_address_for_section(SectionName(b".text")),
             Some(0x600000)
         );
+    }
+
+    // --- Nix RUNPATH derivation ---
+
+    use super::NixRpathMode;
+
+    /// Creates a temp directory acting as a Nix store, containing `lib/lib<name>.so`.
+    /// Returns the temp dir guard, the store path string and the lib directory string.
+    fn make_store_lib(name: &str) -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().expect("could not create temp dir");
+        let lib = dir.path().join("lib");
+        std::fs::create_dir_all(&lib).expect("could not create lib dir");
+        std::fs::write(lib.join(format!("lib{name}.so")), []).expect("could not write lib");
+        let store = dir.path().to_string_lossy().into_owned();
+        let lib_str = lib.to_string_lossy().into_owned();
+        (dir, store, lib_str)
+    }
+
+    /// Reconstructs the final joined rpath: explicit `-rpath` entries (already moved into
+    /// `args.rpath` by `parse`) followed by the derived store entries still in `rpath_set`.
+    fn effective_rpath(args: &ElfArgs) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(explicit) = &args.rpath {
+            parts.extend(explicit.split(':'));
+        }
+        parts.extend(args.rpath_set.iter().map(|s| s.as_str()));
+        parts.join(":")
+    }
+
+    #[test]
+    fn nix_rpath_derives_store_lib_dir() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-L", lib.as_str(), "-lfoo"].into_iter())
+            .unwrap();
+        args.add_nix_rpath_entries_with(&store, false);
+        assert_eq!(effective_rpath(&args), lib);
+    }
+
+    #[test]
+    fn nix_rpath_skips_non_store_dir() {
+        let (_dir, _store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-L", lib.as_str(), "-lfoo"].into_iter())
+            .unwrap();
+        // Store is some other path, so the temp lib dir is not under it.
+        args.add_nix_rpath_entries_with("/nix/store", false);
+        assert!(args.rpath_set.is_empty());
+    }
+
+    #[test]
+    fn nix_rpath_skips_without_requested_lib() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        // No `-lfoo`, so nothing requests `libfoo.so`.
+        args.parse(["-L", lib.as_str()].into_iter()).unwrap();
+        args.add_nix_rpath_entries_with(&store, false);
+        assert!(args.rpath_set.is_empty());
+    }
+
+    #[test]
+    fn nix_rpath_skips_on_dont_set_in_auto_mode() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-L", lib.as_str(), "-lfoo"].into_iter())
+            .unwrap();
+        args.add_nix_rpath_entries_with(&store, true);
+        assert!(args.rpath_set.is_empty());
+    }
+
+    #[test]
+    fn nix_rpath_on_ignores_dont_set() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-L", lib.as_str(), "-lfoo"].into_iter())
+            .unwrap();
+        args.nix_rpath = NixRpathMode::On;
+        args.add_nix_rpath_entries_with(&store, true);
+        assert_eq!(effective_rpath(&args), lib);
+    }
+
+    #[test]
+    fn nix_rpath_off_disables() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-L", lib.as_str(), "-lfoo"].into_iter())
+            .unwrap();
+        args.nix_rpath = NixRpathMode::Off;
+        args.add_nix_rpath_entries_with(&store, false);
+        assert!(args.rpath_set.is_empty());
+    }
+
+    #[test]
+    fn nix_rpath_derives_from_direct_so_path() {
+        let dir = tempfile::tempdir().expect("could not create temp dir");
+        let so = dir.path().join("libbar.so");
+        std::fs::write(&so, []).expect("could not write .so");
+        let store = dir.path().to_string_lossy().into_owned();
+        let so_str = so.to_string_lossy().into_owned();
+
+        let mut args = ElfArgs::new().unwrap();
+        args.parse([so_str.as_str()].into_iter()).unwrap();
+        args.add_nix_rpath_entries_with(&store, false);
+        // The directory of the store `.so` is added.
+        assert_eq!(effective_rpath(&args), store);
+    }
+
+    #[test]
+    fn nix_rpath_explicit_entries_come_first() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-rpath", "/explicit", "-L", lib.as_str(), "-lfoo"].into_iter())
+            .unwrap();
+        args.add_nix_rpath_entries_with(&store, false);
+        assert_eq!(effective_rpath(&args), format!("/explicit:{lib}"));
+    }
+
+    #[test]
+    fn nix_rpath_dedupes_directories() {
+        let (_dir, store, lib) = make_store_lib("foo");
+        let mut args = ElfArgs::new().unwrap();
+        args.parse(["-L", lib.as_str(), "-L", lib.as_str(), "-lfoo", "-lfoo"].into_iter())
+            .unwrap();
+        args.add_nix_rpath_entries_with(&store, false);
+        assert_eq!(effective_rpath(&args), lib);
+    }
+
+    #[test]
+    fn nix_rpath_flag_parses() {
+        assert_eq!(parse_args(["--nix-rpath=off"]).nix_rpath, NixRpathMode::Off);
+        assert_eq!(parse_args(["--nix-rpath=on"]).nix_rpath, NixRpathMode::On);
+        assert_eq!(parse_args([]).nix_rpath, NixRpathMode::Auto);
     }
 }
