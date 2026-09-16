@@ -275,7 +275,9 @@ const SILENTLY_IGNORED_SHORT_FLAGS: &[&str] = &[
 ];
 
 const IGNORED_FLAGS: &[&str] = &[
-    "fix-cortex-a53-835769",
+    // `fix-cortex-a53-843419` routes to lld (which honors it); this entry is
+    // only the native-forced fallback. `fix-cortex-a53-835769` is NOT listed:
+    // lld also rejects it, so it must be a loud "unrecognized option" error.
     "fix-cortex-a53-843419",
     "discard-all",
     "x", // alias for --discard-all
@@ -305,13 +307,10 @@ impl Default for ElfArgs {
             should_output_partial_object: false,
             dynamic_linker: None,
             strip: Strip::Nothing,
-            // For now, we default to --gc-sections. This is different to other linkers, but other
-            // than being different, there doesn't seem to be any downside to doing
-            // this. We don't currently do any less work if we're not GCing sections,
-            // but do end up writing more, so --no-gc-sections will almost always be as
-            // slow or slower than --gc-sections. For that reason, the latter is
-            // probably a good default.
-            gc_sections: true,
+            // Default --gc-sections off, matching lld/ld/mold. rustc expresses
+            // `-C link-dead-code` by omitting `--gc-sections`; GCing anyway
+            // silently drops code the user asked to keep.
+            gc_sections: false,
             merge_sections: true,
             copy_relocations: CopyRelocations::Allowed,
             version_script_path: None,
@@ -2554,6 +2553,20 @@ mod tests {
     fn parse_args_err<'a>(args: impl IntoIterator<Item = &'a str>) -> crate::error::Error {
         let mut elf_args = ElfArgs::new().unwrap();
         elf_args.parse(args.into_iter()).unwrap_err()
+    }
+
+    #[test]
+    fn gc_sections_defaults_off() {
+        // Matching lld/ld/mold: GC only when asked, so `-C link-dead-code`
+        // (rustc omits `--gc-sections`) keeps the code the user requested.
+        assert!(!parse_args([]).gc_sections);
+        assert!(parse_args(["--gc-sections"]).gc_sections);
+    }
+
+    #[test]
+    fn fix_cortex_a53_835769_is_a_loud_error() {
+        // lld rejects this flag too, so it must error rather than silently drop.
+        parse_args_err(["--fix-cortex-a53-835769"]);
     }
 
     #[test]
