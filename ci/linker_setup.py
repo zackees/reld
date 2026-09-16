@@ -92,7 +92,7 @@ def resolve_artifacts(env: dict[str, str]) -> list[Artifact]:
                 "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/"
                 f"libtinfo5_{libtinfo5_version}_amd64.deb"
             ),
-            sha256="b9bb64e716a7d9de05b1b33992763142ca81bcae3a7f8ce7e29fa3c6fd32f1e8",
+            sha256="4df4288404108f1a156d014e8764a064e977e34e6d44931ab60451694c03c90d",
             kind="deb",
         ),
     ]
