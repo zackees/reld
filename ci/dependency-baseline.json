@@ -217,7 +217,7 @@
     "cc|1.4.0|registry+https://github.com/rust-lang/crates.io-index|5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9",
     "cfg-if|1.0.4|registry+https://github.com/rust-lang/crates.io-index|9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
     "cfg_aliases|0.2.2|registry+https://github.com/rust-lang/crates.io-index|f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527",
-    "chacha20|0.10.1|registry+https://github.com/rust-lang/crates.io-index|d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81",
+    "chacha20|0.10.2|registry+https://github.com/rust-lang/crates.io-index|65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06",
     "clap_builder|4.5.60|registry+https://github.com/rust-lang/crates.io-index|24a241312cea5059b13574bb9b3861cabf758b879c15190b37b6d6fd63ab6876",
     "clap_derive|4.5.55|registry+https://github.com/rust-lang/crates.io-index|a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5",
     "clap_lex|1.0.0|registry+https://github.com/rust-lang/crates.io-index|3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831",
