@@ -9,6 +9,4 @@
 
 extern int ext_global;
 
-int *get_ext(void) {
-    return &ext_global;
-}
+int* get_ext(void) { return &ext_global; }
