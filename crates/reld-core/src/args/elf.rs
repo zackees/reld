@@ -257,6 +257,8 @@ const SILENTLY_IGNORED_FLAGS: &[&str] = &[
     // TODO: This is supposed to suppress built-in search paths, but I don't think we have any
     // built-in search paths. Perhaps we should?
     "nostdlib",
+    // rustc passes `-nodefaultlibs`; reld adds no default libraries of its own, so it is a no-op.
+    "nodefaultlibs",
     // TODO
     "no-undefined-version",
     "fatal-warnings",
@@ -513,15 +515,32 @@ fn is_shared_library_path(path: &Path) -> bool {
 // Parse the supplied input arguments, which should not include the program name.
 pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
     args: &mut ElfArgs,
-    mut input: I,
+    input: I,
 ) -> Result {
     let mut modifier_stack = vec![Modifiers::default()];
 
     let arg_parser = setup_argument_parser();
-    while let Some(arg) = input.next() {
-        let arg = arg.as_ref();
 
-        arg_parser.handle_argument(args, &mut modifier_stack, arg, &mut input)?;
+    // rustc wraps linker flags in GNU `-Wl,<flags>` when reld is the direct
+    // `CARGO_TARGET_*_LINKER`. Expand those here (splitting on commas) so
+    // `-Wl,-z,relro,-z,now` is processed as `-z relro -z now`.
+    let mut expanded: Vec<String> = Vec::new();
+    for arg in input {
+        let arg = arg.as_ref();
+        if let Some(rest) = arg.strip_prefix("-Wl,") {
+            for flag in rest.split(',') {
+                if !flag.is_empty() {
+                    expanded.push(flag.to_owned());
+                }
+            }
+        } else {
+            expanded.push(arg.to_owned());
+        }
+    }
+
+    let mut iter = expanded.into_iter();
+    while let Some(arg) = iter.next() {
+        arg_parser.handle_argument(args, &mut modifier_stack, arg.as_str(), &mut iter)?;
     }
 
     // Copy relocations are only permitted when building executables.
@@ -649,6 +668,12 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
 
     parser
         .declare_with_param()
+        .prefix("B")
+        .help("Search path for the linker (ignored: reld is the linker)")
+        .execute(|_args, _modifier_stack, _value| Ok(()));
+
+    parser
+        .declare_with_param()
         .prefix("m")
         .help("Set target architecture")
         .sub_option("elf_x86_64", "x86-64 ELF target", |args, _| {
@@ -689,6 +714,16 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .sub_option("elf64lppc", "PowerPC64 LE ELF target", |args, _| {
             args.arch = Architecture::Ppc64;
             Ok(())
+        })
+        // GCC-style `-m64` / `-m32` (rustc passes `-m64` on x86_64).
+        .sub_option("64", "x86-64 (GCC -m64)", |args, _| {
+            args.arch = Architecture::X86_64;
+            Ok(())
+        })
+        .sub_option("32", "x86-32 (GCC -m32)", |args, _| {
+            // reld has no 32-bit backend; reject clearly rather than the
+            // generic "not yet supported" fall-through.
+            bail!("-m32 (32-bit x86) is not supported; reld targets 64-bit only");
         })
         .execute(|_args, _modifier_stack, value| {
             bail!("-m {value} is not yet supported");
