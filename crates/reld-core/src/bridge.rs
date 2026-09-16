@@ -74,7 +74,7 @@ pub struct Engine {
 
 /// Capabilities that affect engine selection rather than merely argument spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Capability {
+pub(crate) enum Capability {
     NativeControl,
     Lto,
     Icf,
@@ -86,7 +86,7 @@ enum Capability {
 }
 
 impl Capability {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Capability::NativeControl => "reld-only validation or diagnostic output",
             Capability::Lto => "LTO",
