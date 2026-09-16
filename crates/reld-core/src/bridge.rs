@@ -897,6 +897,95 @@ fn forwarded_args_for_engine<I: IntoIterator<Item = OsString>>(
     Ok(forwarded)
 }
 
+/// Derives Nix RUNPATH `-rpath` flags from the forwarded argv, mirroring nixpkgs'
+/// `ld-wrapper.sh`. The native engine performs this derivation while parsing (see
+/// `ElfArgs::add_nix_rpath_entries`); a link that routes to lld never goes through that
+/// parser, so the bridge must derive the same store RUNPATH and forward it explicitly.
+/// Without this, every routed link (LTO, `-z text`, `+crt-static`, …) on NixOS loses the
+/// store RUNPATH — the exact rust-lang/rust#162781 failure reld exists to fix.
+fn nix_rpath_flags(argv: &[OsString]) -> Vec<OsString> {
+    let dont_set = std::env::var("NIX_DONT_SET_RPATH").is_ok_and(|v| v == "1");
+    let nix_store = std::env::var("NIX_STORE").unwrap_or_else(|_| "/nix/store".to_owned());
+    nix_rpath_flags_with(argv, &nix_store, dont_set)
+}
+
+/// Derivation core, split out so it can be exercised directly in tests without touching the
+/// environment (mirrors `ElfArgs::add_nix_rpath_entries_with`).
+fn nix_rpath_flags_with(argv: &[OsString], nix_store: &str, dont_set_rpath: bool) -> Vec<OsString> {
+    if dont_set_rpath {
+        return Vec::new();
+    }
+    let store = Path::new(nix_store);
+
+    let mut lib_dirs: Vec<PathBuf> = Vec::new();
+    let mut file_parents: Vec<PathBuf> = Vec::new();
+    let mut requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut iter = argv.iter();
+    while let Some(arg) = iter.next() {
+        let Some(s) = arg.to_str() else { continue };
+        if s == "-L" {
+            if let Some(dir) = iter.next() {
+                lib_dirs.push(PathBuf::from(dir));
+            }
+        } else if let Some(dir) = s.strip_prefix("-L") {
+            if !dir.is_empty() {
+                lib_dirs.push(PathBuf::from(dir));
+            }
+        } else if s == "-l" {
+            if let Some(name) = iter.next().and_then(|n| n.to_str()) {
+                requested.insert(format!("lib{name}.so"));
+            }
+        } else if let Some(name) = s.strip_prefix("-l:") {
+            requested.insert(name.to_owned());
+        } else if let Some(name) = s.strip_prefix("-l") {
+            if !name.is_empty() {
+                requested.insert(format!("lib{name}.so"));
+            }
+        } else if Path::new(s)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("so"))
+            || s.contains(".so.")
+        {
+            let path = Path::new(s);
+            if let Some(name) = path.file_name() {
+                requested.insert(name.to_string_lossy().into_owned());
+            }
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                file_parents.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    if requested.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidate_dirs: Vec<&Path> = lib_dirs.iter().map(|p| p.as_path()).collect();
+    candidate_dirs.extend(file_parents.iter().map(|p| p.as_path()));
+
+    let mut seen: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+    let mut flags = Vec::new();
+    for dir in candidate_dirs {
+        if dir != store && !dir.starts_with(store) {
+            continue;
+        }
+        if !seen.insert(dir) {
+            continue;
+        }
+        let provides = requested
+            .iter()
+            .any(|name| std::fs::symlink_metadata(dir.join(name)).is_ok());
+        if provides {
+            flags.push(OsString::from("-rpath"));
+            flags.push(OsString::from(dir.to_string_lossy().into_owned()));
+        }
+    }
+    flags
+}
+
 fn is_driver_lto_flag(arg: &str) -> bool {
     arg.eq_ignore_ascii_case("-flto")
         || arg.eq_ignore_ascii_case("--flto")
@@ -968,6 +1057,9 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
     let linker = discover_linker(engine)?;
 
     let forwarded = forwarded_args_for_engine(argv, engine)?;
+    let mut forwarded = forwarded;
+    // A routed link must keep the Nix store RUNPATH the native engine would have derived.
+    forwarded.extend(nix_rpath_flags(&forwarded));
     let child_args = child_command_line(&linker, engine, forwarded);
 
     if route_logging_enabled() {
@@ -1589,6 +1681,47 @@ mod tests {
             .unwrap();
             assert_eq!(route.engine.name, "reld", "argv {argv:?}");
         }
+    }
+
+    #[test]
+    fn nix_rpath_flags_derive_store_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("libfoo.so"), []).unwrap();
+        let store = dir.path().to_string_lossy().into_owned();
+        let lib_str = lib.to_string_lossy().into_owned();
+
+        let argv = [
+            OsString::from("ld.reld"),
+            OsString::from("-L"),
+            OsString::from(&lib_str),
+            OsString::from("-lfoo"),
+            OsString::from("foo.o"),
+        ];
+        let flags = nix_rpath_flags_with(&argv, &store, false);
+        assert_eq!(
+            flags,
+            vec![OsString::from("-rpath"), OsString::from(&lib_str)]
+        );
+    }
+
+    #[test]
+    fn nix_rpath_flags_skip_when_dont_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("libfoo.so"), []).unwrap();
+        let store = dir.path().to_string_lossy().into_owned();
+        let lib_str = lib.to_string_lossy().into_owned();
+
+        let argv = [
+            OsString::from("ld.reld"),
+            OsString::from("-L"),
+            OsString::from(&lib_str),
+            OsString::from("-lfoo"),
+        ];
+        assert!(nix_rpath_flags_with(&argv, &store, true).is_empty());
     }
 
     #[test]
