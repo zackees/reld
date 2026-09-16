@@ -35,6 +35,8 @@ use object::elf::GNU_PROPERTY_X86_ISA_1_BASELINE;
 use object::elf::GNU_PROPERTY_X86_ISA_1_V2;
 use object::elf::GNU_PROPERTY_X86_ISA_1_V3;
 use object::elf::GNU_PROPERTY_X86_ISA_1_V4;
+use object::read::Object as _;
+use object::read::ObjectSymbol as _;
 use std::ffi::CString;
 use std::mem::size_of;
 use std::num::NonZero;
@@ -570,6 +572,31 @@ fn add_default_library_search_paths(args: &mut ElfArgs) {
     }
 }
 
+/// Whether any input object already defines the `_start` entry point (e.g. a
+/// standalone test fixture that provides its own runtime). If so, injecting the
+/// CRT startup objects would introduce a duplicate `_start`.
+fn inputs_define_start(args: &ElfArgs) -> bool {
+    args.common().inputs.iter().any(|i| match &i.spec {
+        InputSpec::File(path) => file_defines_start(path),
+        _ => false,
+    })
+}
+
+fn file_defines_start(path: &Path) -> bool {
+    // Only plain object files carry the `_start` definition; archives are large
+    // and never provide the entry point themselves.
+    if path.extension().and_then(|e| e.to_str()) != Some("o") {
+        return false;
+    }
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(file) = object::read::elf::ElfFile64::<object::LittleEndian>::parse(&*data) else {
+        return false;
+    };
+    file.symbols().any(|sym| sym.name() == Ok("_start"))
+}
+
 /// The gcc driver injects the CRT startup objects (`crt1.o`, `crti.o`, etc.)
 /// that provide `_start` and the init/fini machinery. A direct linker (reld)
 /// must supply them itself, or the output has no `_start` and the entry point
@@ -598,6 +625,12 @@ fn add_crt_objects(args: &mut ElfArgs) {
         }
         _ => false,
     }) {
+        return;
+    }
+    // A standalone input that already defines `_start` (e.g. a linker-diff
+    // fixture providing its own runtime) must not get a second `_start` from the
+    // injected crt1.o.
+    if inputs_define_start(args) {
         return;
     }
     let find = |name: &str| -> Option<PathBuf> {
