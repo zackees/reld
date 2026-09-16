@@ -513,6 +513,29 @@ fn is_shared_library_path(path: &Path) -> bool {
 }
 
 // Parse the supplied input arguments, which should not include the program name.
+fn add_default_library_search_paths(args: &mut ElfArgs) {
+    // LIBRARY_PATH mirrors the gcc driver's search dirs when set.
+    if let Some(paths) = std::env::var_os("LIBRARY_PATH") {
+        for dir in std::env::split_paths(&paths) {
+            args.lib_search_path.push(dir.into());
+        }
+    }
+    // Common multiarch + generic system directories.
+    for dir in [
+        "/usr/local/lib",
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/lib64",
+        "/usr/lib",
+        "/lib",
+    ] {
+        args.lib_search_path.push(Path::new(dir).into());
+    }
+}
+
 pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
     args: &mut ElfArgs,
     input: I,
@@ -542,6 +565,11 @@ pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
     while let Some(arg) = iter.next() {
         arg_parser.handle_argument(args, &mut modifier_stack, arg.as_str(), &mut iter)?;
     }
+
+    // The gcc driver normally supplies the system library search paths; as a
+    // direct `CARGO_TARGET_*_LINKER` reld must provide them itself so `-lgcc_s`,
+    // `-lc`, etc. resolve.
+    add_default_library_search_paths(args);
 
     // Copy relocations are only permitted when building executables.
     if !args.should_output_executable {
