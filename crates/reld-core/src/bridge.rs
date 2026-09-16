@@ -1083,6 +1083,17 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
         .with_context(|| format!("Failed to spawn bridge linker `{}`", linker.display()))?;
 
     if !status.success() {
+        // Propagate a signal-killed child as `128 + signal`, naming the engine and signal, so a
+        // crashed bridge (ld.lld, lld-link, ld64.lld) is diagnosable rather than collapsing to a
+        // bare exit 1 (reld#123 D6).
+        #[cfg(unix)]
+        if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+            eprintln!(
+                "reld: {} bridge terminated by signal {}",
+                engine.name, signal
+            );
+            std::process::exit(128 + signal);
+        }
         // Match how reld currently exits (see `report_error_and_exit`): terminate the process
         // directly with the child's exit code, rather than propagating a `Result` error that
         // would go through our own error formatting.
