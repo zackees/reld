@@ -246,28 +246,11 @@ impl HashStyle {
     }
 }
 
-// These flags don't currently affect our behaviour. TODO: Assess whether we should error or warn if
-// these are given. This is tricky though. On the one hand we want to be a drop-in replacement for
-// other linkers. On the other, we should perhaps somehow let the user know that we don't support a
-// feature.
-const SILENTLY_IGNORED_FLAGS: &[&str] = &[
-    // Just like other modern linkers, we don't need groups in order to resolve cycles.
-    "start-group",
-    "end-group",
-    // TODO: This is supposed to suppress built-in search paths, but I don't think we have any
-    // built-in search paths. Perhaps we should?
-    "nostdlib",
-    // TODO
-    "no-undefined-version",
-    "fatal-warnings",
-    "color-diagnostics",
-    "undefined-version",
-    "sort-common",
-    "stats",
-];
+// No linker flags are silently ignored: any flag the native engine does not
+// honor is routed to the bundled `lld` engine (see `bridge.rs`), or — under an
+// explicit `--engine=reld` — rejected, never silently dropped.
+const SILENTLY_IGNORED_FLAGS: &[&str] = &[];
 const SILENTLY_IGNORED_SHORT_FLAGS: &[&str] = &[
-    "(",
-    ")",
     // On Illumos, the Clang driver inserts a meaningless -C flag before calling any non-GNU ld
     // linker.
     #[cfg(target_os = "illumos")]

@@ -83,6 +83,10 @@ enum Capability {
     ColorDiagnostics,
     VersionScriptPolicy,
     CortexA53Erratum,
+    ArchiveGroups,
+    NoStdlib,
+    SortCommon,
+    Stats,
 }
 
 impl Capability {
@@ -96,6 +100,10 @@ impl Capability {
             Capability::ColorDiagnostics => "diagnostic color policy",
             Capability::VersionScriptPolicy => "version-script undefined-symbol policy",
             Capability::CortexA53Erratum => "Cortex-A53 erratum 843419 fixups",
+            Capability::ArchiveGroups => "archive group (cycle) resolution",
+            Capability::NoStdlib => "suppressing built-in search paths",
+            Capability::SortCommon => "common-symbol ordering",
+            Capability::Stats => "linker statistics output",
         }
     }
 }
@@ -109,6 +117,10 @@ const LLD_CAPABILITIES: &[Capability] = &[
     Capability::ColorDiagnostics,
     Capability::VersionScriptPolicy,
     Capability::CortexA53Erratum,
+    Capability::ArchiveGroups,
+    Capability::NoStdlib,
+    Capability::SortCommon,
+    Capability::Stats,
 ];
 
 const NATIVE_RELD_ENGINE: Engine = Engine {
@@ -578,6 +590,32 @@ fn collect_requested_capabilities(
             Some(Requirement {
                 capability: Capability::CortexA53Erratum,
                 trigger: "flag:--fix-cortex-a53-843419",
+            })
+        } else if lower == "--start-group"
+            || lower == "-start-group"
+            || lower == "--end-group"
+            || lower == "-end-group"
+            || lower == "-("
+            || lower == "-)"
+        {
+            Some(Requirement {
+                capability: Capability::ArchiveGroups,
+                trigger: "flag:--start-group",
+            })
+        } else if lower == "--nostdlib" || lower == "-nostdlib" {
+            Some(Requirement {
+                capability: Capability::NoStdlib,
+                trigger: "flag:--nostdlib",
+            })
+        } else if lower == "--sort-common" || lower == "-sort-common" {
+            Some(Requirement {
+                capability: Capability::SortCommon,
+                trigger: "flag:--sort-common",
+            })
+        } else if lower == "--stats" || lower == "-stats" {
+            Some(Requirement {
+                capability: Capability::Stats,
+                trigger: "flag:--stats",
             })
         } else {
             None
@@ -1732,5 +1770,37 @@ mod tests {
     fn engine_override_from_argv_none_when_absent() {
         let argv = vec![OsString::from("reld"), OsString::from("/OUT:a.exe")];
         assert_eq!(engine_override_from_argv(&argv), None);
+    }
+
+    fn requested(argv: &[&str]) -> Vec<Capability> {
+        let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
+        requested_capabilities(&argv)
+            .unwrap()
+            .into_iter()
+            .map(|requirement| requirement.capability)
+            .collect()
+    }
+
+    #[test]
+    fn previously_silently_ignored_flags_now_route_to_lld() {
+        // These used to be in `SILENTLY_IGNORED_FLAGS` and were dropped without
+        // a hand-off; they must now escalate to lld via a capability.
+        assert_eq!(
+            requested(&["reld", "--start-group"]),
+            vec![Capability::ArchiveGroups]
+        );
+        assert_eq!(
+            requested(&["reld", "--end-group"]),
+            vec![Capability::ArchiveGroups]
+        );
+        assert_eq!(
+            requested(&["reld", "--nostdlib"]),
+            vec![Capability::NoStdlib]
+        );
+        assert_eq!(
+            requested(&["reld", "--sort-common"]),
+            vec![Capability::SortCommon]
+        );
+        assert_eq!(requested(&["reld", "--stats"]), vec![Capability::Stats]);
     }
 }
