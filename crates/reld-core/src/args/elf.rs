@@ -578,6 +578,28 @@ fn add_crt_objects(args: &mut ElfArgs) {
     if !args.should_output_executable || args.common().inputs.is_empty() {
         return;
     }
+    // A driver (clang/gcc via `-fuse-ld=reld`) already injects the CRT startup
+    // objects into the command line; adding them again yields duplicate symbols
+    // (`_IO_stdin_used`). Only inject when invoked directly as the linker.
+    if args.common().inputs.iter().any(|i| match &i.spec {
+        InputSpec::File(path) => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            matches!(
+                name,
+                "Scrt1.o"
+                    | "crt1.o"
+                    | "crti.o"
+                    | "crtn.o"
+                    | "crtbegin.o"
+                    | "crtbeginS.o"
+                    | "crtend.o"
+                    | "crtendS.o"
+            )
+        }
+        _ => false,
+    }) {
+        return;
+    }
     let find = |name: &str| -> Option<PathBuf> {
         let out = std::process::Command::new("cc")
             .arg(format!("-print-file-name={name}"))
