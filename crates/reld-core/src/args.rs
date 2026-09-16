@@ -94,6 +94,9 @@ pub struct CommonArgs {
     /// Whether warnings are promoted to errors (`--fatal-warnings`).
     pub(crate) fatal_warnings: bool,
 
+    /// Whether warnings are suppressed entirely (`--no-warnings` / `-w`).
+    pub(crate) no_warnings: bool,
+
     /// How many warnings have been emitted so far. Tracked so `--fatal-warnings` can turn any
     /// warning into a link error at the end.
     #[debug(skip)]
@@ -360,6 +363,7 @@ impl Default for CommonArgs {
             demangle: true,
             version_mode: VersionMode::None,
             fatal_warnings: false,
+            no_warnings: false,
             warning_count: AtomicUsize::new(0),
             validate_output: env::var(VALIDATE_ENV).is_ok_and(|v| v == "1"),
             verify_allocation_consistency: env::var(WRITE_VERIFY_ALLOCATIONS_ENV)

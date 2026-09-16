@@ -144,6 +144,12 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
         &[Emitter::Clang],
     ),
     rule(
+        &["--no-warnings", "-w"],
+        ValueMatch::None,
+        Disposition::Native,
+        &[Emitter::Clang, Emitter::Gcc],
+    ),
+    rule(
         &["--color-diagnostics", "--no-color-diagnostics"],
         ValueMatch::None,
         Disposition::Native,
