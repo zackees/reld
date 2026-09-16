@@ -184,7 +184,6 @@ tests = [
   "duplicate-error-gc-sections.sh", # Different message formats
   "duplicate-error.sh",             # Different message formats
   "empty-input.sh",                 # Different message formats
-  "gc-sections.sh",                 # Passes when `--no-gc-sections` is passed.
   "hash-style.sh",                  # Reld doesn't support `--hash-style=none`.
   "hidden-undef.sh",                # Reld correctly errors, but message format differs from mold's.
   "help.sh",
@@ -193,21 +192,16 @@ tests = [
   "many-output-sections.sh",        # Different message formats
   "mold-wrapper.sh",
   "mold-wrapper2.sh",
-  "nmagic.sh",                      # end is only emitted if .bss section exists. LLD also fails.
   "no-allow-shlib-undefined.sh",    # Different message formats
   "no-allow-shlib-undefined3.sh",   # Different message formats
   "no-allow-shlib-undefined4.sh",   # GNU ld and LLD also fail
   "plt-symbols.sh",                 # Reld currently doesn't create entries in the symbol table with the `$plt` suffix unless `--got-plt-syms` is specified
   "run-clang.sh",                   # This test checks the comment section to verify if it's linked with mold.
-  "start-lib.sh",                   # Passes when `--no-gc-sections` is passed.
   "stdout.sh",
-  "undefined.sh",                   # Passes when `--no-gc-sections` is passed.
-  "undefined2.sh",                  # Passes when `--no-gc-sections` is passed.
   "unresolved-symbols.sh",          # Different message formats
   "verbose.sh",
   "version.sh",                     # The message of `--version` is different from mold's one.
   "warn-unresolved-symbols.sh",     # Different message formats
-  "whole-archive.sh",               # Passes when `--no-gc-sections` is passed.
   "z-defs.sh",                      # Different message formats
 ]
 
@@ -266,16 +260,13 @@ tests = [
   "nocopyreloc.sh",
   "noinhibit-exec.sh",
   "rodata-name.sh",
-  "section-attributes.sh",
   "strip.sh",
   "stt-common.sh",
   "symbol-version-as-needed.sh",
   "symbol-version-multi.sh",
-  "symbol-version.sh",
   "symbol-version2.sh",
   "symtab-dso.sh",
   "symtab-section-symbols.sh",
-  "symtab.sh",
   "textrel2.sh",
   "unknown-section-type.sh",
   "versioned-undef.sh",
