@@ -547,10 +547,26 @@ fn collect_requested_capabilities(
                 capability: Capability::Icf,
                 trigger: "flag:--icf",
             })
-        } else if lower == "--discard-all" || lower == "-discard-all" || lower == "-x" {
+        } else if lower == "--discard-all"
+            || lower == "-discard-all"
+            // `-x` (lowercase) is `--discard-all`; `-X` (uppercase) is
+            // `--discard-locals`, a native default, so it must NOT match.
+            || arg == "-x"
+        {
             Some(Requirement {
                 capability: Capability::DiscardAll,
                 trigger: "flag:--discard-all",
+            })
+        } else if lower == "-plugin-opt"
+            || lower.starts_with("-plugin-opt=")
+            || lower == "--plugin-opt"
+            || lower.starts_with("--plugin-opt=")
+        {
+            // rustc `-C linker-plugin-lto` through clang emits `-plugin-opt=…`
+            // with no `-plugin`/`-flto`; bitcode needs lld's real LTO.
+            Some(Requirement {
+                capability: Capability::Lto,
+                trigger: "flag:-plugin-opt",
             })
         } else if lower == "--fatal-warnings" || lower == "-fatal-warnings" {
             Some(Requirement {
@@ -1732,5 +1748,36 @@ mod tests {
     fn engine_override_from_argv_none_when_absent() {
         let argv = vec![OsString::from("reld"), OsString::from("/OUT:a.exe")];
         assert_eq!(engine_override_from_argv(&argv), None);
+    }
+
+    fn requested(argv: &[&str]) -> Vec<Capability> {
+        let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
+        requested_capabilities(&argv)
+            .unwrap()
+            .into_iter()
+            .map(|requirement| requirement.capability)
+            .collect()
+    }
+
+    #[test]
+    fn discard_all_is_case_sensitive_x_not_X() {
+        // `-x` is `--discard-all` (routes to lld); `-X` is `--discard-locals`
+        // (a native default) and must not route.
+        assert_eq!(requested(&["reld", "-x"]), vec![Capability::DiscardAll]);
+        assert!(requested(&["reld", "-X"]).is_empty());
+    }
+
+    #[test]
+    fn plugin_opt_routes_to_lld_for_lto() {
+        // rustc `-C linker-plugin-lto` through clang emits `-plugin-opt=…`
+        // without `-plugin`/`-flto`, so bitcode must still route to lld.
+        assert_eq!(
+            requested(&["reld", "-plugin-opt=O0"]),
+            vec![Capability::Lto]
+        );
+        assert_eq!(
+            requested(&["reld", "-plugin-opt", "O0"]),
+            vec![Capability::Lto]
+        );
     }
 }
