@@ -1083,6 +1083,30 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         });
 
     parser
+        .declare_with_optional_param()
+        .long("color-diagnostics")
+        .help("Control diagnostic color output (always, never, or auto)")
+        .execute(|_args, _modifier_stack, value| {
+            match value {
+                Some("always") => colored::control::set_override(true),
+                Some("never") => colored::control::set_override(false),
+                Some("auto") => colored::control::unset_override(),
+                Some(other) => bail!("--color-diagnostics: invalid value `{other}`"),
+                None => colored::control::set_override(true),
+            }
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-color-diagnostics")
+        .help("Disable diagnostic color output")
+        .execute(|_args, _modifier_stack| {
+            colored::control::set_override(false);
+            Ok(())
+        });
+
+    parser
         .declare_with_param()
         .long("dynamic-linker")
         .help("Set dynamic linker path")

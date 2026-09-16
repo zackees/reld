@@ -146,7 +146,7 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
     rule(
         &["--color-diagnostics", "--no-color-diagnostics"],
         ValueMatch::None,
-        Disposition::Requires(Capability::ColorDiagnostics),
+        Disposition::Native,
         &[Emitter::Clang],
     ),
     rule(
