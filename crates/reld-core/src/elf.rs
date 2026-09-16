@@ -5803,6 +5803,13 @@ fn materialize_relocation_requirements<
                     );
                 }
             }
+        } else if symbol_db.output_kind.is_relocatable() {
+            // An absolute relocation to a non-writable section of a relocatable output (shared
+            // object or PIE) is a text relocation. reld emits it, but must set DF_TEXTREL so the
+            // loader marks the text segment writable.
+            resources
+                .has_text_relocations
+                .store(true, atomic::Ordering::Relaxed);
         }
     } else if flags.is_ifunc()
         && rel_kind == RelocationKind::Absolute

@@ -4983,6 +4983,7 @@ fn write_epilogue_dynamic_entries(
     let inputs = DynamicEntryInputs {
         args: layout.args(),
         has_static_tls: layout.has_static_tls,
+        has_text_relocations: layout.has_text_relocations,
         has_variant_pcs: layout.has_variant_pcs,
         section_layouts: &layout.merged_section_layouts,
         section_part_layouts: &layout.section_part_layouts,
@@ -6246,6 +6247,7 @@ struct DynamicEntryWriter {
 struct DynamicEntryInputs<'layout> {
     args: &'layout ElfArgs,
     has_static_tls: bool,
+    has_text_relocations: bool,
     has_variant_pcs: bool,
     section_layouts: &'layout OutputSectionMap<OutputRecordLayout>,
     section_part_layouts: &'layout OutputSectionPartMap<OutputRecordLayout>,
@@ -6260,6 +6262,10 @@ impl DynamicEntryInputs<'_> {
 
         if !self.output_kind.is_executable() && self.has_static_tls {
             flags |= object::elf::DF_STATIC_TLS;
+        }
+
+        if self.has_text_relocations {
+            flags |= object::elf::DF_TEXTREL;
         }
 
         if self.args.needs_origin_handling {
