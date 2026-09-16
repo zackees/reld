@@ -246,26 +246,26 @@ impl HashStyle {
     }
 }
 
-// These flags don't currently affect our behaviour. TODO: Assess whether we should error or warn if
-// these are given. This is tricky though. On the one hand we want to be a drop-in replacement for
-// other linkers. On the other, we should perhaps somehow let the user know that we don't support a
-// feature.
-const SILENTLY_IGNORED_FLAGS: &[&str] = &[
-    // Just like other modern linkers, we don't need groups in order to resolve cycles.
+// Flags whose semantics the native engine satisfies *by construction* — its
+// unconditional behavior already implies the flag's effect, so accepting them
+// as no-ops is correct, not a silent drop (reld#123 §A). The already-routed
+// flags (`--fatal-warnings`, `--color-diagnostics`, `--no-undefined-version`,
+// `--undefined-version`) are deliberately NOT here: they route to `lld`.
+const SATISFIED_BY_CONSTRUCTION_FLAGS: &[&str] = &[
+    // Archive cycles are resolved by demand-driven symbol lookup; grouping is
+    // unnecessary (same as lld/mold).
     "start-group",
     "end-group",
-    // TODO: This is supposed to suppress built-in search paths, but I don't think we have any
-    // built-in search paths. Perhaps we should?
+    // The native engine adds no built-in search paths, so `--nostdlib` (which
+    // suppresses them) is already implied.
     "nostdlib",
-    // TODO
-    "no-undefined-version",
-    "fatal-warnings",
-    "color-diagnostics",
-    "undefined-version",
+    // Common-symbol ordering has no effect on either engine.
     "sort-common",
+    // Neither engine prints statistics; `--stats` has nothing to show.
     "stats",
 ];
-const SILENTLY_IGNORED_SHORT_FLAGS: &[&str] = &[
+const SATISFIED_BY_CONSTRUCTION_SHORT_FLAGS: &[&str] = &[
+    // Short forms of `--start-group` / `--end-group`.
     "(",
     ")",
     // On Illumos, the Clang driver inserts a meaningless -C flag before calling any non-GNU ld
@@ -1948,19 +1948,19 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
 
     super::declare_common_args(&mut parser);
 
-    add_silently_ignored_flags(&mut parser);
+    add_satisfied_by_construction_flags(&mut parser);
     add_default_flags(&mut parser);
 
     parser
 }
 
-fn add_silently_ignored_flags(parser: &mut ArgumentParser<ElfArgs>) {
-    for flag in SILENTLY_IGNORED_FLAGS {
+fn add_satisfied_by_construction_flags(parser: &mut ArgumentParser<ElfArgs>) {
+    for flag in SATISFIED_BY_CONSTRUCTION_FLAGS {
         let mut declaration = parser.declare();
         declaration = declaration.long(flag);
         declaration.execute(|_args, _modifier_stack| Ok(()));
     }
-    for flag in SILENTLY_IGNORED_SHORT_FLAGS {
+    for flag in SATISFIED_BY_CONSTRUCTION_SHORT_FLAGS {
         let mut declaration = parser.declare();
         declaration = declaration.short(flag);
         declaration.execute(|_args, _modifier_stack| Ok(()));
@@ -2215,7 +2215,7 @@ impl platform::Args for ElfArgs {
 mod tests {
     use super::BuildIdOption;
     use super::ElfArgs;
-    use super::SILENTLY_IGNORED_FLAGS;
+    use super::SATISFIED_BY_CONSTRUCTION_FLAGS;
     use super::VersionMode;
     use crate::args::InputSpec;
     use crate::platform::Args as _;
@@ -2537,7 +2537,7 @@ mod tests {
 
     #[test]
     fn test_ignored_flags() {
-        for flag in SILENTLY_IGNORED_FLAGS {
+        for flag in SATISFIED_BY_CONSTRUCTION_FLAGS {
             assert!(!flag.starts_with('-'));
         }
     }
