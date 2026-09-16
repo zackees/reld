@@ -1083,6 +1083,16 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         });
 
     parser
+        .declare()
+        .long("no-warnings")
+        .short("w")
+        .help("Suppress all linker warnings")
+        .execute(|args, _modifier_stack| {
+            args.common_mut().no_warnings = true;
+            Ok(())
+        });
+
+    parser
         .declare_with_optional_param()
         .long("color-diagnostics")
         .help("Control diagnostic color output (always, never, or auto)")

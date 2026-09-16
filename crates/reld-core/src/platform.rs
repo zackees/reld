@@ -1545,6 +1545,9 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
     fn is_ignored_flag(&self, _flag: &str) -> bool;
 
     fn warning(&self, message: impl Into<String>) {
+        if self.common().no_warnings {
+            return;
+        }
         self.common().warning_count.fetch_add(1, Ordering::Relaxed);
         (self.common().warning_callback)(Warning::new(message.into()));
     }
