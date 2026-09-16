@@ -1,5 +1,4 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.rodata #13
 //#RequiresGlibc:true
 
 //#Config:pie:default

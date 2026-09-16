@@ -2,7 +2,6 @@
 //#CompArgs:-fPIC -g
 //#LinkerDriver:gcc
 //#LinkArgs:-pie -Wl,-z,now
-//#DiffIgnore:section.rodata #13
 // GNU ld emits an extra IRELATIVE relocation, while LLD and Reld instead point to the PLT entry. So
 // we need to diff against lld.
 //#ReferenceLinkers:bfd,lld

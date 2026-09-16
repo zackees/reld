@@ -1,6 +1,5 @@
 //#AbstractConfig:default
 //#LinkArgs:-Wl,-z,now
-//#DiffIgnore:section.rodata #13
 // TODO: Fix this. Note, it only shows up on openSUSE aarch64
 //#DiffIgnore:rel.missing-copy-relocation.R_AARCH64_ABS64 #13
 

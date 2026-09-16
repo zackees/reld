@@ -4,7 +4,6 @@
 //#LinkerDriver:gcc
 //#LinkArgs:-Wl,-znow -pie
 //#ReferenceLinkers:lld
-//#DiffIgnore:section.rodata #13
 //#DiffIgnore:section.got.plt.entsize #13
 //#DiffIgnore:section.gnu.version_r.alignment #13
 

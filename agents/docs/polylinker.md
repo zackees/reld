@@ -27,7 +27,7 @@ an LTO-capable link.
 |---|---|
 | Bundling more than one real linker engine per platform | **Shipped.** Native engine (Linux) + lld bridge (Windows, macOS). |
 | Routing by platform/format, decided once at dispatch | **Shipped.** |
-| Capability table | **Shipped, initial set.** ELF native-vs-lld capabilities cover LTO, ICF, discard-all, warning/color policy, version-script policy, and Cortex-A53 erratum 843419. Extend this table as new native gaps are routed. |
+| Capability table | **Shipped, initial set.** ELF native-vs-lld capabilities cover LTO, ICF, discard-all, warning/color policy, and Cortex-A53 erratum 843419. Extend this table as new native gaps are routed. |
 | Flag-aware router | **Shipped for ELF.** Direct argv and nested response-file flags are classified before native parsing. |
 | Fallback ordering when the default engine lacks a capability | **Shipped.** Native ELF is fastest/default; ELF `lld` is the capable fallback. |
 | `--engine=` / `RELD_ENGINE` explicit override | **Shipped.** A forced engine is still capability-validated. |
