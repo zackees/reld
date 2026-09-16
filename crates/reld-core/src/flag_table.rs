@@ -127,6 +127,17 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
     ),
     // --- Routed capabilities (native cannot honor them) ---
     rule(
+        &[
+            "--validate-output",
+            "--write-layout",
+            "--write-trace",
+            "--sym-info",
+        ],
+        ValueMatch::None,
+        Disposition::Requires(Capability::NativeControl),
+        &[Emitter::HandWritten],
+    ),
+    rule(
         &["--fatal-warnings"],
         ValueMatch::None,
         Disposition::Requires(Capability::FatalWarnings),
@@ -231,4 +242,35 @@ pub(crate) fn render_flag_table() -> String {
         out.push_str(&format!("{spellings} | {disposition} | {emitters}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flag_table_has_no_duplicate_spellings() {
+        let mut seen = std::collections::HashSet::new();
+        for flag in FLAG_TABLE {
+            for spelling in flag.spellings {
+                assert!(
+                    seen.insert(*spelling),
+                    "duplicate spelling `{spelling}` in the flag table"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flag_table_renders_every_row() {
+        let rendered = render_flag_table();
+        for flag in FLAG_TABLE {
+            for spelling in flag.spellings {
+                assert!(
+                    rendered.contains(spelling),
+                    "rendered table missing `{spelling}`"
+                );
+            }
+        }
+    }
 }
