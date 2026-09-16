@@ -24,7 +24,7 @@ from ci.linker_setup import (
 ENV = {
     "MOLD_VERSION": "2.41.0",
     "WILD_VERSION": "0.9.0",
-    "LIBTINFO5_VERSION": "6.3-2ubuntu0.2",
+    "LIBTINFO5_VERSION": "6.3-2ubuntu0.3",
 }
 
 
@@ -33,7 +33,7 @@ def test_resolve_artifacts_uses_env_versions() -> None:
     assert set(by_name) == {"mold", "wild", "libtinfo5"}
     assert "v2.41.0/mold-2.41.0-x86_64-linux.tar.gz" in by_name["mold"].url
     assert "wild/releases/download/0.9.0/" in by_name["wild"].url
-    assert "libtinfo5_6.3-2ubuntu0.2_amd64.deb" in by_name["libtinfo5"].url
+    assert "libtinfo5_6.3-2ubuntu0.3_amd64.deb" in by_name["libtinfo5"].url
     assert by_name["mold"].dest_name == "mold"
     assert by_name["wild"].dest_name == "ld.wild"
 
