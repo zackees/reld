@@ -2196,7 +2196,20 @@ impl platform::Args for ElfArgs {
     }
 
     fn dynamic_linker(&self) -> Option<&Path> {
-        self.dynamic_linker.as_deref()
+        self.dynamic_linker.as_deref().or_else(|| {
+            // Default PT_INTERP per architecture when the caller didn't pass
+            // `--dynamic-linker`. Without it a dynamically-linked binary has no
+            // interpreter and segfaults at startup.
+            let path = match self.arch {
+                Architecture::X86_64 => "/lib64/ld-linux-x86-64.so.2",
+                Architecture::AArch64 => "/lib/ld-linux-aarch64.so.1",
+                Architecture::RiscV64 => "/lib/ld-linux-riscv64-lp64d.so.1",
+                Architecture::Ppc64 => "/lib64/ld64.so.2",
+                Architecture::LoongArch64 => "/lib64/ld-linux-loongarch-lp64d.so.1",
+                Architecture::Unsupported => return None,
+            };
+            Some(Path::new(path))
+        })
     }
 
     fn should_allow_object_undefined(&self, output_kind: OutputKind) -> bool {
