@@ -2,8 +2,20 @@ name: Linker artifacts
 
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "agents/**"
+      - "docs/**"
+      - "LICENSE*"
+      - "NOTICE"
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "agents/**"
+      - "docs/**"
+      - "LICENSE*"
+      - "NOTICE"
   workflow_dispatch:
 
 # One live run per workflow per ref: a new push to a branch or PR cancels the
