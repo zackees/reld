@@ -24,6 +24,13 @@ Across every platform:
 - Intentional artifact changes must be declared and structurally tested.
 - Update the relevant platform guide when a platform's engine, reference linker, artifact format,
   or validation command changes.
+- Routing is part of every native-engine change. Enhancing, fixing, or removing a native
+  capability requires promoting or demoting its routing entry, flipping the routing tests and CI
+  route expectations, and regenerating the capability claims, in the same PR. Follow
+  [`agents/docs/routing-maintenance.md`](agents/docs/routing-maintenance.md); the model is in
+  [`agents/docs/polylinker.md`](agents/docs/polylinker.md) and the audit in
+  [#123](https://github.com/zackees/reld/issues/123). Never write to stderr on a successful link
+  without `RELD_LOG_ENGINE`.
 
 ## Dependency approval
 

@@ -37,6 +37,14 @@ an LTO-capable link.
 If you're extending B8/#19, keep the table and classifier centralized in `bridge.rs`; do not
 recreate capability decisions in individual drivers.
 
+**Changing the native engine changes routing.** Any PR that adds, fixes, or removes a native
+capability must also promote or demote the corresponding routing entry, flip the routing tests
+and the CI route expectations, and regenerate this table. The step-by-step procedure, the
+decision tree for classifying a new flag, and the rules for how a routing decision may be
+surfaced (why stderr on a successful link is not free) are in
+[`routing-maintenance.md`](routing-maintenance.md). The full gap audit, phased design, and
+testing criteria are [#123](https://github.com/zackees/reld/issues/123).
+
 ## The rule for new backends
 
 When a new bundled engine is added (a new bridge target, or eventually a new native format
@@ -62,6 +70,9 @@ Concretely, avoid:
   not a best-effort fallback that silently drops a correctness-affecting flag.
 - **LTO and the incremental daemon path are mutually exclusive** on a given link (same as gold
   and MSVC) — the router must not try to combine them.
-- **Routing decisions are observable.** Whatever engine actually ran, and why, should be visible
-  to the user (and, for the benchmark harness, recorded in the published data — see `DESIGN.md`
-  §6's `mode`/`engine` field).
+- **Routing decisions are observable, but not on stderr by default.** Whatever engine actually
+  ran, and why, is recorded in `RELD_INVOCATION_LOG`, in the output's `.comment` section, and on
+  stderr only under `RELD_LOG_ENGINE=1`. rustc's `linker_messages` lint turns any linker stderr
+  into a warning or, when denied, a build error, so an unconditional message is a hazard. Pin a
+  required route in CI with `RELD_REQUIRE_ENGINE` (#123) instead of relying on a human to read a
+  line. See `routing-maintenance.md`.
