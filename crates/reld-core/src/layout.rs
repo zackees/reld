@@ -476,6 +476,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         merged_strings,
         merged_string_start_addresses,
         has_static_tls: gc_outputs.has_static_tls,
+        has_text_relocations: gc_outputs.has_text_relocations,
         has_variant_pcs: gc_outputs.has_variant_pcs,
         relocation_statistics,
         per_symbol_flags,
@@ -742,6 +743,7 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) merged_string_start_addresses: MergedStringStartAddresses,
     pub(crate) relocation_statistics: OutputSectionMap<AtomicU64>,
     pub(crate) has_static_tls: bool,
+    pub(crate) has_text_relocations: bool,
     pub(crate) has_variant_pcs: bool,
     pub(crate) per_symbol_flags: PerSymbolFlags,
     pub(crate) dynamic_symbol_definitions: Vec<DynamicSymbolDefinition<'data, P>>,
@@ -1441,6 +1443,8 @@ pub(crate) struct GraphResources<'data, 'scope, P: Platform> {
     must_keep_sections: OutputSectionMap<AtomicBool>,
 
     pub(crate) has_static_tls: AtomicBool,
+
+    pub(crate) has_text_relocations: AtomicBool,
 
     has_variant_pcs: AtomicBool,
 
@@ -2245,6 +2249,7 @@ struct GcOutputs<'data, P: Platform> {
     group_states: Vec<GroupState<'data, P>>,
     must_keep_sections: OutputSectionMap<bool>,
     has_static_tls: bool,
+    has_text_relocations: bool,
     has_variant_pcs: bool,
     thunk_layout_builder: Option<ThunkLayoutBuilder>,
 }
@@ -2344,6 +2349,7 @@ fn find_required_sections<'data, A: Arch>(
         per_symbol_flags,
         must_keep_sections: output_sections.new_section_map(),
         has_static_tls: AtomicBool::new(false),
+        has_text_relocations: AtomicBool::new(false),
         has_variant_pcs: AtomicBool::new(false),
         thunk_layout_builder,
         start_stop_sections: output_sections.new_section_map(),
@@ -2386,6 +2392,9 @@ fn find_required_sections<'data, A: Arch>(
         group_states,
         must_keep_sections,
         has_static_tls: resources.has_static_tls.load(atomic::Ordering::Relaxed),
+        has_text_relocations: resources
+            .has_text_relocations
+            .load(atomic::Ordering::Relaxed),
         has_variant_pcs: resources.has_variant_pcs.load(atomic::Ordering::Relaxed),
         thunk_layout_builder: resources.thunk_layout_builder,
     })
