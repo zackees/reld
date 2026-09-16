@@ -1421,6 +1421,17 @@ fn declare_common_args<T: platform::Args>(parser: &mut ArgumentParser<T>) {
 
     parser
         .declare()
+        .long("print-flag-table")
+        .help("Print the declarative flag table and exit")
+        .execute(|_args, _modifier_stack| {
+            use std::io::Write as _;
+            let mut stdout = std::io::stdout().lock();
+            write!(stdout, "{}", crate::flag_table::render_flag_table())?;
+            std::process::exit(0);
+        });
+
+    parser
+        .declare()
         .long("update-in-place")
         .help("Update file in place")
         .execute(|args, _modifier_stack| {

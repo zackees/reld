@@ -26,6 +26,7 @@ pub(crate) mod export_list;
 pub(crate) mod expression_eval;
 pub(crate) mod file_kind;
 pub(crate) mod file_writer;
+pub(crate) mod flag_table;
 pub(crate) mod fs;
 pub(crate) mod gc_stats;
 pub(crate) mod gdb_index;
