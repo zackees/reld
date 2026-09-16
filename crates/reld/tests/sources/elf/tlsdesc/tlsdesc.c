@@ -1,6 +1,5 @@
 //#AbstractConfig:default
 //#DiffIgnore:section.data #13 arch=aarch64,loongarch64
-//#DiffIgnore:section.rodata #13
 
 //#Config:gcc-tls-desc:default
 //#CompArgs:-mtls-dialect=gnu2 -fPIC -O2

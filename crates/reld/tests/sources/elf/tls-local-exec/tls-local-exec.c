@@ -1,5 +1,4 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.rodata #13
 
 //#Config:pie:default
 //#SkipArch: ppc64le

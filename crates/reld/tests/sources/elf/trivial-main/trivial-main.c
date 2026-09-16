@@ -6,7 +6,6 @@
 //#Config:gcc:default
 //#SkipArch: ppc64le
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
-//#DiffIgnore:section.rodata #13
 
 //#Config:gcc-static:default
 //#SkipArch: ppc64le
@@ -42,12 +41,10 @@
 //#SkipArch: ppc64le
 //#Compiler: clang
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
-//#DiffIgnore:section.rodata #13
 
 //#Config:gcc-indirect-external:default
 //#CompArgs:-fPIE -mno-direct-extern-access
 //#RequiresCompilerFlags:-mno-direct-extern-access
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
-//#DiffIgnore:section.rodata #13
 
 int main() { return 42; }

@@ -1,6 +1,5 @@
 //#AbstractConfig:default
 //#LinkerDriver:gcc
-//#DiffIgnore:section.rodata #13
 //#DiffIgnore:section.rodata.alignment #13 arch=aarch64,riscv64,loongarch64
 //#DiffIgnore:rel.match_failed.R_AARCH64_TLSGD_ADR_PAGE21 #13
 

@@ -1,5 +1,4 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.rodata #13
 //#DiffIgnore:dynsym.foo.section #13 arch=riscv64
 
 //#Config:gcc:default
