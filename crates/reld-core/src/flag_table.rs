@@ -125,6 +125,12 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
         Disposition::SatisfiedByConstruction,
         &[Emitter::Rustc],
     ),
+    rule(
+        &["--error-limit"],
+        ValueMatch::Joined,
+        Disposition::SatisfiedByConstruction,
+        &[Emitter::Clang],
+    ),
     // --- Routed capabilities (native cannot honor them) ---
     rule(
         &[

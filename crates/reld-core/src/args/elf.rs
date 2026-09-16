@@ -1093,6 +1093,16 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         });
 
     parser
+        .declare_with_param()
+        .long("error-limit")
+        .help("Limit the number of reported errors")
+        .execute(|_args, _modifier_stack, _value| {
+            // reld reports at most one error before aborting, so any positive limit is satisfied
+            // by construction (reld#123 Phase 2).
+            Ok(())
+        });
+
+    parser
         .declare_with_optional_param()
         .long("color-diagnostics")
         .help("Control diagnostic color output (always, never, or auto)")
