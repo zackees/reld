@@ -4,6 +4,12 @@ name: Linux linker competition
 # the cross-platform trend chart: its report is the only source for competitive wall/RSS claims.
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "agents/**"
+      - "docs/**"
+      - "LICENSE*"
+      - "NOTICE"
   workflow_dispatch:
     inputs:
       baseline_sha:

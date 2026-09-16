@@ -2,8 +2,20 @@ name: Linker modes
 
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "agents/**"
+      - "docs/**"
+      - "LICENSE*"
+      - "NOTICE"
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "agents/**"
+      - "docs/**"
+      - "LICENSE*"
+      - "NOTICE"
   workflow_dispatch:
 
 permissions:
