@@ -1760,7 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn discard_all_is_case_sensitive_x_not_X() {
+    fn discard_all_flag_is_case_sensitive() {
         // `-x` is `--discard-all` (routes to lld); `-X` is `--discard-locals`
         // (a native default) and must not route.
         assert_eq!(requested(&["reld", "-x"]), vec![Capability::DiscardAll]);
