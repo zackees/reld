@@ -249,8 +249,8 @@ impl HashStyle {
 // Flags whose semantics the native engine satisfies *by construction* — its
 // unconditional behavior already implies the flag's effect, so accepting them
 // as no-ops is correct, not a silent drop (reld#123 §A). The already-routed
-// flags (`--fatal-warnings`, `--color-diagnostics`, `--no-undefined-version`,
-// `--undefined-version`) are deliberately NOT here: they route to `lld`.
+// flags (`--fatal-warnings`, `--color-diagnostics`) are deliberately NOT here:
+// they route to `lld` and must fail loudly if forced native.
 const SATISFIED_BY_CONSTRUCTION_FLAGS: &[&str] = &[
     // Archive cycles are resolved by demand-driven symbol lookup; grouping is
     // unnecessary (same as lld/mold).
@@ -263,6 +263,13 @@ const SATISFIED_BY_CONSTRUCTION_FLAGS: &[&str] = &[
     "sort-common",
     // Neither engine prints statistics; `--stats` has nothing to show.
     "stats",
+    // rustc emits `--no-undefined-version` on every cdylib, dylib, and
+    // proc-macro link, but the native engine has no version-script
+    // undefined-symbol tracking, so the check is trivially satisfied
+    // (reld#123 §B). Accepting it natively keeps proc-macro/cdylib links on
+    // the fast engine instead of routing them to lld.
+    "no-undefined-version",
+    "undefined-version",
 ];
 const SATISFIED_BY_CONSTRUCTION_SHORT_FLAGS: &[&str] = &[
     // Short forms of `--start-group` / `--end-group`.

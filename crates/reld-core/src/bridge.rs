@@ -81,7 +81,6 @@ enum Capability {
     DiscardAll,
     FatalWarnings,
     ColorDiagnostics,
-    VersionScriptPolicy,
     CortexA53Erratum,
 }
 
@@ -94,7 +93,6 @@ impl Capability {
             Capability::DiscardAll => "discarding local symbols",
             Capability::FatalWarnings => "fatal linker warnings",
             Capability::ColorDiagnostics => "diagnostic color policy",
-            Capability::VersionScriptPolicy => "version-script undefined-symbol policy",
             Capability::CortexA53Erratum => "Cortex-A53 erratum 843419 fixups",
         }
     }
@@ -107,7 +105,6 @@ const LLD_CAPABILITIES: &[Capability] = &[
     Capability::DiscardAll,
     Capability::FatalWarnings,
     Capability::ColorDiagnostics,
-    Capability::VersionScriptPolicy,
     Capability::CortexA53Erratum,
 ];
 
@@ -580,15 +577,6 @@ fn collect_requested_capabilities(
             Some(Requirement {
                 capability: Capability::ColorDiagnostics,
                 trigger: "flag:--color-diagnostics",
-            })
-        } else if lower == "--no-undefined-version"
-            || lower == "-no-undefined-version"
-            || lower == "--undefined-version"
-            || lower == "-undefined-version"
-        {
-            Some(Requirement {
-                capability: Capability::VersionScriptPolicy,
-                trigger: "flag:--no-undefined-version",
             })
         } else if lower == "--fix-cortex-a53-843419" || lower == "-fix-cortex-a53-843419" {
             Some(Requirement {
@@ -1520,8 +1508,6 @@ mod tests {
             "--fatal-warnings",
             "--color-diagnostics=always",
             "--no-color-diagnostics",
-            "--no-undefined-version",
-            "--undefined-version",
             "--fix-cortex-a53-843419",
         ] {
             let route = select_route_with_env(
@@ -1531,6 +1517,27 @@ mod tests {
             )
             .unwrap();
             assert_eq!(route.engine.name, "lld", "flag {flag}");
+        }
+    }
+
+    #[test]
+    fn no_undefined_version_stays_native() {
+        // rustc emits `--no-undefined-version` on every cdylib/dylib/proc-macro
+        // link; routing it to lld would push all of those off the fast engine
+        // (reld#123 §B). It must stay native.
+        for flag in [
+            "--no-undefined-version",
+            "-no-undefined-version",
+            "--undefined-version",
+            "-undefined-version",
+        ] {
+            let route = select_route_with_env(
+                &[OsString::from("ld.reld"), OsString::from(flag)],
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "reld", "flag {flag}");
         }
     }
 
