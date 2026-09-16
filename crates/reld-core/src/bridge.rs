@@ -79,7 +79,6 @@ pub(crate) enum Capability {
     Lto,
     Icf,
     DiscardAll,
-    FatalWarnings,
     ColorDiagnostics,
     CortexA53Erratum,
     TextRelocs,
@@ -92,7 +91,6 @@ impl Capability {
             Capability::Lto => "LTO",
             Capability::Icf => "identical code folding",
             Capability::DiscardAll => "discarding local symbols",
-            Capability::FatalWarnings => "fatal linker warnings",
             Capability::ColorDiagnostics => "diagnostic color policy",
             Capability::CortexA53Erratum => "Cortex-A53 erratum 843419 fixups",
             Capability::TextRelocs => "text-relocation policy",
@@ -105,7 +103,6 @@ const LLD_CAPABILITIES: &[Capability] = &[
     Capability::Lto,
     Capability::Icf,
     Capability::DiscardAll,
-    Capability::FatalWarnings,
     Capability::ColorDiagnostics,
     Capability::CortexA53Erratum,
     Capability::TextRelocs,
@@ -570,11 +567,6 @@ fn collect_requested_capabilities(
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "flag:-plugin-opt",
-            })
-        } else if lower == "--fatal-warnings" || lower == "-fatal-warnings" {
-            Some(Requirement {
-                capability: Capability::FatalWarnings,
-                trigger: "flag:--fatal-warnings",
             })
         } else if lower == "--color-diagnostics"
             || lower.starts_with("--color-diagnostics=")
@@ -1677,7 +1669,6 @@ mod tests {
         for flag in [
             "--discard-all",
             "-x",
-            "--fatal-warnings",
             "--color-diagnostics=always",
             "--no-color-diagnostics",
             "--fix-cortex-a53-843419",
@@ -1703,6 +1694,21 @@ mod tests {
             "--undefined-version",
             "-undefined-version",
         ] {
+            let route = select_route_with_env(
+                &[OsString::from("ld.reld"), OsString::from(flag)],
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "reld", "flag {flag}");
+        }
+    }
+
+    #[test]
+    fn fatal_warnings_stays_native() {
+        // `--fatal-warnings` is diagnostics plumbing implemented natively (reld#123 Phase 2);
+        // it must not route to lld.
+        for flag in ["--fatal-warnings", "--no-fatal-warnings"] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
                 BridgeTarget::Elf,

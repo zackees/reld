@@ -58,6 +58,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Configuration for range-extension thunks on architectures that need them.
 /// Returned by `Arch::thunk_config()`; `None` means the architecture never needs thunks.
@@ -1544,6 +1545,7 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
     fn is_ignored_flag(&self, _flag: &str) -> bool;
 
     fn warning(&self, message: impl Into<String>) {
+        self.common().warning_count.fetch_add(1, Ordering::Relaxed);
         (self.common().warning_callback)(Warning::new(message.into()));
     }
 

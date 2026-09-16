@@ -140,7 +140,7 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
     rule(
         &["--fatal-warnings"],
         ValueMatch::None,
-        Disposition::Requires(Capability::FatalWarnings),
+        Disposition::Native,
         &[Emitter::Clang],
     ),
     rule(

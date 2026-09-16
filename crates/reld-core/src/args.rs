@@ -42,6 +42,7 @@ use crate::platform;
 use crate::platform::Args as _;
 use crate::timing_phase;
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicUsize;
 
 pub(crate) const FILES_PER_GROUP_ENV: &str = "RELD_FILES_PER_GROUP";
 pub const REFERENCE_LINKER_ENV: &str = "RELD_REFERENCE_LINKER";
@@ -89,6 +90,14 @@ pub struct CommonArgs {
     pub(crate) sym_info: Option<String>,
     pub(crate) numeric_experiments: Vec<Option<u64>>,
     pub(crate) version_mode: VersionMode,
+
+    /// Whether warnings are promoted to errors (`--fatal-warnings`).
+    pub(crate) fatal_warnings: bool,
+
+    /// How many warnings have been emitted so far. Tracked so `--fatal-warnings` can turn any
+    /// warning into a link error at the end.
+    #[debug(skip)]
+    pub(crate) warning_count: AtomicUsize,
 
     /// If `Some`, then we'll time how long each phase takes. We'll also measure the specified
     /// counters, if any.
@@ -350,6 +359,8 @@ impl Default for CommonArgs {
             should_fork: true,
             demangle: true,
             version_mode: VersionMode::None,
+            fatal_warnings: false,
+            warning_count: AtomicUsize::new(0),
             validate_output: env::var(VALIDATE_ENV).is_ok_and(|v| v == "1"),
             verify_allocation_consistency: env::var(WRITE_VERIFY_ALLOCATIONS_ENV)
                 .is_ok_and(|v| v == "1"),
