@@ -151,7 +151,7 @@ Concretely (per [#30](https://github.com/zackees/reld/issues/30)):
 |---|---|
 | Bundling multiple real linkers per platform | **Shipped** — native ELF engine + lld bridge, see "Bridge status" above |
 | Routing by platform/format (dispatch to native vs. bridge) | **Shipped** |
-| Routing by requested *flags/config* | **Shipped for ELF** — LTO/plugin, ICF, discard-all, warning/color policy, and Cortex-A53 erratum 843419 route to `lld` |
+| Routing by requested *flags/config* | **Shipped for ELF** — LTO/plugin, ICF, discard-all, color policy, and Cortex-A53 erratum 843419 route to `lld` |
 | Capability table per bundled engine | **Shipped, initial set** — extended as more native gaps are identified |
 | Fallback ordering when the fast engine lacks a capability | **Shipped** — native ELF first, capable ELF `lld` fallback |
 | `--engine=` / `RELD_ENGINE` override | **Shipped** — `reld` or `lld` on ELF; format-specific lld drivers elsewhere |

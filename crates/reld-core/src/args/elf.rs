@@ -296,7 +296,6 @@ const DEFAULT_FLAGS: &[&str] = &[
     "no-copy-dt-needed-entries",
     "no-add-needed",
     "discard-locals",
-    "no-fatal-warnings",
 ];
 const DEFAULT_SHORT_FLAGS: &[&str] = &[
     "X", // alias for --discard-locals
@@ -1062,6 +1061,24 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .help("Disable symbol demangling")
         .execute(|args, _modifier_stack| {
             args.common_mut().demangle = false;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("fatal-warnings")
+        .help("Treat linker warnings as errors")
+        .execute(|args, _modifier_stack| {
+            args.common_mut().fatal_warnings = true;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-fatal-warnings")
+        .help("Do not treat linker warnings as errors (default)")
+        .execute(|args, _modifier_stack| {
+            args.common_mut().fatal_warnings = false;
             Ok(())
         });
 

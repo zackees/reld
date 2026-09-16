@@ -144,6 +144,16 @@ pub fn run(mut args: Args) -> error::Result {
         linker.run(&args)?;
         drop(linker);
         timing::finalise_perfetto_trace()?;
+        // `--fatal-warnings` promotes any warning to an error.
+        if args.common().fatal_warnings {
+            let count = args
+                .common()
+                .warning_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if count > 0 {
+                bail!("{count} warning(s) were promoted to errors by --fatal-warnings");
+            }
+        }
         Ok(())
     })?;
 
