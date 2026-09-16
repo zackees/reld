@@ -52,6 +52,10 @@ pub struct ElfArgs {
 
     pub(crate) arch: Architecture,
     pub(crate) lib_search_path: Vec<Box<Path>>,
+    /// Index into `lib_search_path` where the driver-default search dirs begin:
+    /// user `-L` dirs precede it, and the Nix RUNPATH derivation keys off `-L`
+    /// only (mirroring nixpkgs' ld-wrapper), so it must not see the defaults.
+    pub(crate) user_lib_search_path_len: usize,
     pub(crate) dynamic_linker: Option<Box<Path>>,
     pub(crate) strip: Strip,
     pub(crate) merge_sections: bool,
@@ -303,6 +307,7 @@ impl Default for ElfArgs {
             arch: default_target_arch(),
 
             lib_search_path: Vec::new(),
+            user_lib_search_path_len: 0,
             should_output_executable: true,
             should_output_partial_object: false,
             dynamic_linker: None,
@@ -467,9 +472,14 @@ impl ElfArgs {
         }
 
         // Candidate directories in command-line order: `-L` directories first, then the parent of
-        // any shared library passed by path.
+        // any shared library passed by path. Only the user `-L` dirs (up to
+        // `user_lib_search_path_len`) qualify — the driver-default search dirs appended after
+        // them must not seed RUNPATH (mirrors nixpkgs' ld-wrapper, which derives from `-L` only).
         let mut candidate_dirs: Vec<&Path> =
-            self.lib_search_path.iter().map(|p| p.as_ref()).collect();
+            self.lib_search_path[..self.user_lib_search_path_len]
+                .iter()
+                .map(|p| p.as_ref())
+                .collect();
         for input in &self.common.inputs {
             if let InputSpec::File(path) = &input.spec
                 && is_shared_library_path(path)
@@ -514,10 +524,34 @@ fn is_shared_library_path(path: &Path) -> bool {
 
 // Parse the supplied input arguments, which should not include the program name.
 fn add_default_library_search_paths(args: &mut ElfArgs) {
+    // Everything already in `lib_search_path` is a user `-L` dir. Record that
+    // boundary so the Nix RUNPATH derivation below can key off `-L` alone.
+    args.user_lib_search_path_len = args.lib_search_path.len();
+
     // LIBRARY_PATH mirrors the gcc driver's search dirs when set.
     if let Some(paths) = std::env::var_os("LIBRARY_PATH") {
         for dir in std::env::split_paths(&paths) {
             args.lib_search_path.push(dir.into());
+        }
+    }
+    // The gcc driver locates `libgcc_s.so`, `libc.so`, etc. via its own
+    // internal search dirs — which live in store/non-FHS locations that the
+    // hardcoded system dirs below cannot reach (e.g. Nix). Query the driver
+    // for the authoritative `libraries:` list and add each of those dirs.
+    if let Ok(out) = std::process::Command::new("cc").arg("-print-search-dirs").output() {
+        if out.status.success() {
+            if let Ok(text) = String::from_utf8(out.stdout) {
+                for line in text.lines() {
+                    let Some(rest) = line.strip_prefix("libraries: =") else {
+                        continue;
+                    };
+                    for dir in rest.split(':') {
+                        if !dir.is_empty() {
+                            args.lib_search_path.push(Path::new(dir).into());
+                        }
+                    }
+                }
+            }
         }
     }
     // Common multiarch + generic system directories.
