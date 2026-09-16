@@ -536,6 +536,58 @@ fn add_default_library_search_paths(args: &mut ElfArgs) {
     }
 }
 
+/// The gcc driver injects the CRT startup objects (`crt1.o`, `crti.o`, etc.)
+/// that provide `_start` and the init/fini machinery. A direct linker (reld)
+/// must supply them itself, or the output has no `_start` and the entry point
+/// falls back to the `.text` start. Locate them via `cc -print-file-name`.
+fn add_crt_objects(args: &mut ElfArgs) {
+    if !args.should_output_executable || args.common().inputs.is_empty() {
+        return;
+    }
+    let find = |name: &str| -> Option<PathBuf> {
+        let out = std::process::Command::new("cc")
+            .arg(format!("-print-file-name={name}"))
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+        if path.is_empty() || path == name {
+            return None;
+        }
+        Some(PathBuf::from(path))
+    };
+
+    let crt1 = find("Scrt1.o").or_else(|| find("crt1.o"));
+    let crti = find("crti.o");
+    let crtn = find("crtn.o");
+    let crtbegin = find("crtbeginS.o").or_else(|| find("crtbegin.o"));
+    let crtend = find("crtendS.o").or_else(|| find("crtend.o"));
+
+    let make_input = |path: PathBuf| Input {
+        spec: InputSpec::File(path.into_boxed_path()),
+        search_first: None,
+        modifiers: Modifiers::default(),
+    };
+
+    // crt1/crti/crtbegin go before the user's objects, crtend/crtn after.
+    let mut prefix: Vec<Input> = [crt1, crti, crtbegin]
+        .into_iter()
+        .flatten()
+        .map(make_input)
+        .collect();
+    let suffix: Vec<Input> = [crtend, crtn]
+        .into_iter()
+        .flatten()
+        .map(make_input)
+        .collect();
+
+    prefix.append(&mut args.common_mut().inputs);
+    args.common_mut().inputs = prefix;
+    args.common_mut().inputs.extend(suffix);
+}
+
 pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
     args: &mut ElfArgs,
     input: I,
@@ -570,6 +622,7 @@ pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
     // direct `CARGO_TARGET_*_LINKER` reld must provide them itself so `-lgcc_s`,
     // `-lc`, etc. resolve.
     add_default_library_search_paths(args);
+    add_crt_objects(args);
 
     // Copy relocations are only permitted when building executables.
     if !args.should_output_executable {
@@ -748,7 +801,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
             args.arch = Architecture::X86_64;
             Ok(())
         })
-        .sub_option("32", "x86-32 (GCC -m32)", |args, _| {
+        .sub_option("32", "x86-32 (GCC -m32)", |_args, _| {
             // reld has no 32-bit backend; reject clearly rather than the
             // generic "not yet supported" fall-through.
             bail!("-m32 (32-bit x86) is not supported; reld targets 64-bit only");
