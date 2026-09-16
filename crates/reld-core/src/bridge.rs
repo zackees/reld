@@ -508,10 +508,12 @@ fn collect_requested_capabilities(
         }
 
         let lower = arg.to_ascii_lowercase();
-        let requirement = if matches!(
-            lower.as_str(),
-            "--validate-output" | "--write-layout" | "--write-trace"
-        ) {
+        let requirement = if lower == "--validate-output"
+            || lower == "--write-layout"
+            || lower == "--write-trace"
+            || lower == "--sym-info"
+            || lower.starts_with("--sym-info=")
+        {
             Some(Requirement {
                 capability: Capability::NativeControl,
                 trigger: "flag:reld-only-control",
@@ -866,6 +868,56 @@ fn needs_flavor_prefix(linker: &Path) -> bool {
 /// Also strips any `--engine=<name>` token, wherever it appears: that's a reld-specific flag
 /// (see `select_engine`), not a linker flag, so it must never leak into the child linker's
 /// command line.
+/// reld-only performance/diagnostic knobs that must not reach a child linker. A link that routes
+/// to a bridge engine (lld) drops these from the forwarded argv rather than forwarding an option
+/// lld would reject (reld#123 D6 "Stripped").
+const STRIPPED_RELD_FLAGS: &[&str] = &[
+    "update-in-place",
+    "time",
+    "mmap-output-file",
+    "no-mmap-output-file",
+    "fallocate-output-file",
+    "no-fallocate-output-file",
+    "madvise-huge-pages",
+    "no-madvise-huge-pages",
+    "threads",
+    "no-threads",
+    "no-fork",
+    "fork",
+];
+
+/// Drops reld-only flags (and, for `--time`/`--threads`, a following value) from the forwarded
+/// argv so nothing reld-only reaches a child linker.
+fn strip_reld_only_flags(args: Vec<OsString>) -> Vec<OsString> {
+    let mut out = Vec::new();
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        let Some(s) = arg.to_str() else {
+            out.push(arg);
+            continue;
+        };
+        let Some(bare) = s.strip_prefix("--") else {
+            out.push(arg);
+            continue;
+        };
+        let name = bare.split('=').next().unwrap_or(bare);
+        if !STRIPPED_RELD_FLAGS.contains(&name) {
+            out.push(arg);
+            continue;
+        }
+        // `--time`/`--threads` take an optional value; when spelled `--flag value`, drop the
+        // value token too.
+        if !bare.contains('=')
+            && matches!(name, "time" | "threads")
+            && let Some(next) = iter.peek()
+            && !next.to_str().is_some_and(|v| v.starts_with('-'))
+        {
+            iter.next();
+        }
+    }
+    out
+}
+
 fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
     let mut rest: Vec<OsString> = argv.into_iter().skip(1).collect();
     if rest
@@ -880,7 +932,7 @@ fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
         arg.to_str()
             .is_none_or(|s| !s.starts_with(ENGINE_FLAG_PREFIX))
     });
-    rest
+    strip_reld_only_flags(rest)
 }
 
 /// Removes compiler-driver-only LTO switches after they have served their routing purpose. LLD
@@ -1733,6 +1785,63 @@ mod tests {
             OsString::from("-lfoo"),
         ];
         assert!(nix_rpath_flags_with(&argv, &store, true).is_empty());
+    }
+
+    #[test]
+    fn stripped_reld_only_flags_are_dropped() {
+        let argv = [
+            OsString::from("--time"),
+            OsString::from("--mmap-output-file"),
+            OsString::from("--threads=4"),
+            OsString::from("-L"),
+            OsString::from("/lib"),
+            OsString::from("-lfoo"),
+            OsString::from("foo.o"),
+        ];
+        let out = strip_reld_only_flags(argv.to_vec());
+        let out: Vec<&str> = out.iter().filter_map(|a| a.to_str()).collect();
+        assert_eq!(out, ["-L", "/lib", "-lfoo", "foo.o"]);
+    }
+
+    #[test]
+    fn stripped_time_drops_following_value() {
+        let argv = [
+            OsString::from("--time"),
+            OsString::from("parse"),
+            OsString::from("foo.o"),
+        ];
+        let out = strip_reld_only_flags(argv.to_vec());
+        let out: Vec<&str> = out.iter().filter_map(|a| a.to_str()).collect();
+        assert_eq!(out, ["foo.o"]);
+    }
+
+    #[test]
+    fn sym_info_forces_native_and_conflicts_with_lld_route() {
+        let native = select_route_with_env(
+            &[OsString::from("ld.reld"), OsString::from("--sym-info=x")],
+            BridgeTarget::Elf,
+            None,
+        )
+        .unwrap();
+        assert_eq!(native.engine.name, "reld");
+
+        // `--sym-info` is NativeControl (native-only); combined with a routed requirement it
+        // must be a loud conflict, not a silent drop.
+        let err = select_route_with_env(
+            &[
+                OsString::from("ld.reld"),
+                OsString::from("--sym-info=x"),
+                OsString::from("--icf=all"),
+            ],
+            BridgeTarget::Elf,
+            None,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("No bundled ELF engine supports"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]
