@@ -82,6 +82,7 @@ enum Capability {
     FatalWarnings,
     ColorDiagnostics,
     CortexA53Erratum,
+    TextRelocs,
 }
 
 impl Capability {
@@ -94,6 +95,7 @@ impl Capability {
             Capability::FatalWarnings => "fatal linker warnings",
             Capability::ColorDiagnostics => "diagnostic color policy",
             Capability::CortexA53Erratum => "Cortex-A53 erratum 843419 fixups",
+            Capability::TextRelocs => "text-relocation policy",
         }
     }
 }
@@ -106,6 +108,7 @@ const LLD_CAPABILITIES: &[Capability] = &[
     Capability::FatalWarnings,
     Capability::ColorDiagnostics,
     Capability::CortexA53Erratum,
+    Capability::TextRelocs,
 ];
 
 const NATIVE_RELD_ENGINE: Engine = Engine {
@@ -488,7 +491,8 @@ fn collect_requested_capabilities(
     requirements: &mut Vec<Requirement>,
     response_depth: usize,
 ) -> Result<()> {
-    for arg in args {
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
         let Some(arg) = arg.to_str() else {
             continue;
         };
@@ -582,6 +586,19 @@ fn collect_requested_capabilities(
             Some(Requirement {
                 capability: Capability::CortexA53Erratum,
                 trigger: "flag:--fix-cortex-a53-843419",
+            })
+        } else if lower == "-ztext"
+            || lower == "-z=text"
+            || (lower == "-z"
+                && args
+                    .peek()
+                    .is_some_and(|next| next.to_str() == Some("text")))
+        {
+            // `-z text` errors on DT_TEXTREL text relocations; the native engine
+            // never errors on them (it just sets DT_TEXTREL), so delegate to lld.
+            Some(Requirement {
+                capability: Capability::TextRelocs,
+                trigger: "flag:-z text",
             })
         } else {
             None
@@ -1538,6 +1555,39 @@ mod tests {
             )
             .unwrap();
             assert_eq!(route.engine.name, "reld", "flag {flag}");
+        }
+    }
+
+    #[test]
+    fn z_text_routes_to_lld_and_notext_stays_native() {
+        // `-z text` errors on DT_TEXTREL; the native engine never errors on text
+        // relocations, so it routes to lld. `-z notext` is reld's default
+        // behavior and stays native (reld#123 Phase 0).
+        for argv in [
+            &["ld.reld", "-z", "text"][..],
+            &["ld.reld", "-ztext"][..],
+            &["ld.reld", "-z=text"][..],
+        ] {
+            let route = select_route_with_env(
+                &argv.iter().map(OsString::from).collect::<Vec<_>>(),
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "lld", "argv {argv:?}");
+        }
+
+        for argv in [
+            &["ld.reld", "-z", "notext"][..],
+            &["ld.reld", "-znotext"][..],
+        ] {
+            let route = select_route_with_env(
+                &argv.iter().map(OsString::from).collect::<Vec<_>>(),
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "reld", "argv {argv:?}");
         }
     }
 
