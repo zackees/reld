@@ -475,11 +475,10 @@ impl ElfArgs {
         // any shared library passed by path. Only the user `-L` dirs (up to
         // `user_lib_search_path_len`) qualify — the driver-default search dirs appended after
         // them must not seed RUNPATH (mirrors nixpkgs' ld-wrapper, which derives from `-L` only).
-        let mut candidate_dirs: Vec<&Path> =
-            self.lib_search_path[..self.user_lib_search_path_len]
-                .iter()
-                .map(|p| p.as_ref())
-                .collect();
+        let mut candidate_dirs: Vec<&Path> = self.lib_search_path[..self.user_lib_search_path_len]
+            .iter()
+            .map(|p| p.as_ref())
+            .collect();
         for input in &self.common.inputs {
             if let InputSpec::File(path) = &input.spec
                 && is_shared_library_path(path)
@@ -538,18 +537,19 @@ fn add_default_library_search_paths(args: &mut ElfArgs) {
     // internal search dirs — which live in store/non-FHS locations that the
     // hardcoded system dirs below cannot reach (e.g. Nix). Query the driver
     // for the authoritative `libraries:` list and add each of those dirs.
-    if let Ok(out) = std::process::Command::new("cc").arg("-print-search-dirs").output() {
-        if out.status.success() {
-            if let Ok(text) = String::from_utf8(out.stdout) {
-                for line in text.lines() {
-                    let Some(rest) = line.strip_prefix("libraries: =") else {
-                        continue;
-                    };
-                    for dir in rest.split(':') {
-                        if !dir.is_empty() {
-                            args.lib_search_path.push(Path::new(dir).into());
-                        }
-                    }
+    if let Ok(out) = std::process::Command::new("cc")
+        .arg("-print-search-dirs")
+        .output()
+        && out.status.success()
+        && let Ok(text) = String::from_utf8(out.stdout)
+    {
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("libraries: =") else {
+                continue;
+            };
+            for dir in rest.split(':') {
+                if !dir.is_empty() {
+                    args.lib_search_path.push(Path::new(dir).into());
                 }
             }
         }
@@ -622,10 +622,7 @@ fn add_crt_objects(args: &mut ElfArgs) {
     args.common_mut().inputs.extend(suffix);
 }
 
-pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
-    args: &mut ElfArgs,
-    input: I,
-) -> Result {
+pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(args: &mut ElfArgs, input: I) -> Result {
     let mut modifier_stack = vec![Modifiers::default()];
 
     let arg_parser = setup_argument_parser();
