@@ -183,17 +183,31 @@ jobs:
           name: ${{ matrix.artifact }}
           path: package
 
-      - name: Run deployed linker on host
+      - name: Run deployed linker on host (linux)
         shell: bash
-        if: runner.os != 'Windows'
+        if: matrix.name == 'linux'
         run: |
           set -euo pipefail
           chmod +x "package/${{ matrix.executable }}"
           "package/${{ matrix.executable }}" --version
 
-      - name: Run deployed linker on host
+      # On macOS reld bridges every invocation (incl. --version) to ld64.lld,
+      # which exits non-zero, so it can't self-report a version (see the macOS
+      # self-host note in ci.yml). Confirm the shipped binary is a well-formed
+      # arm64 Mach-O executable instead.
+      - name: Smoke deployed linker on host (macos)
+        shell: bash
+        if: matrix.name == 'macos'
+        run: |
+          set -euo pipefail
+          chmod +x "package/${{ matrix.executable }}"
+          file "package/${{ matrix.executable }}"
+          file "package/${{ matrix.executable }}" | grep -q 'Mach-O'
+          file "package/${{ matrix.executable }}" | grep -q 'arm64'
+
+      - name: Run deployed linker on host (windows)
         shell: pwsh
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows'
         run: |
           & ".\package\${{ matrix.executable }}" --version
           if ($LASTEXITCODE -ne 0) { throw "deployed linker exited with $LASTEXITCODE" }
