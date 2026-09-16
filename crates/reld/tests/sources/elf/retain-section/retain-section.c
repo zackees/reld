@@ -1,7 +1,8 @@
 // `__attribute__((used))` sets SHF_GNU_RETAIN, which must keep the section alive through
 // --gc-sections even with no references to it.
+//#LinkerDriver:gcc
 //#CompArgs:-ffunction-sections -fdata-sections
-//#LinkArgs:--gc-sections
+//#LinkArgs:-Wl,--gc-sections
 //#RunEnabled:false
 //#ExpectSym:retained_data section=".custom.retained"
 
