@@ -118,6 +118,13 @@ platforms today. It is not reld's own codegen; see
 [issue #17](https://github.com/zackees/reld/issues/17) for the full BR-1…BR-4 phase history and
 [DESIGN.md](DESIGN.md) for the architecture.
 
+**Windows GNU (`x86_64-pc-windows-gnu`) is compile-only, not a consumer link route.** The Phase 1
+CI matrix builds it, but reld does not yet drive the MinGW ABI (GNU `ld` dialect via `-m i386pep`,
+auto-import, `.rsrc`, `.CRT$X*`); there is no consumer-acceptance lane for it. That is the Phase 5
+MinGW work (`docs/plan/07-PHASE-5-WINGNU.md`), and the no-gaps gate (reld#123) routes it through a
+bundled `ld.lld -m i386pep` engine in Phase 3. Windows MSVC remains the advertised, consumer-tested
+Windows route until then.
+
 ## Polylinker: runs everywhere, supports everything, by routing
 
 `reld` bundles more than one real linker per platform — today, its own native engine (Linux/ELF)
