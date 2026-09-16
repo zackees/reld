@@ -79,7 +79,6 @@ pub(crate) enum Capability {
     Lto,
     Icf,
     DiscardAll,
-    ColorDiagnostics,
     CortexA53Erratum,
     TextRelocs,
 }
@@ -91,7 +90,6 @@ impl Capability {
             Capability::Lto => "LTO",
             Capability::Icf => "identical code folding",
             Capability::DiscardAll => "discarding local symbols",
-            Capability::ColorDiagnostics => "diagnostic color policy",
             Capability::CortexA53Erratum => "Cortex-A53 erratum 843419 fixups",
             Capability::TextRelocs => "text-relocation policy",
         }
@@ -103,7 +101,6 @@ const LLD_CAPABILITIES: &[Capability] = &[
     Capability::Lto,
     Capability::Icf,
     Capability::DiscardAll,
-    Capability::ColorDiagnostics,
     Capability::CortexA53Erratum,
     Capability::TextRelocs,
 ];
@@ -567,14 +564,6 @@ fn collect_requested_capabilities(
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "flag:-plugin-opt",
-            })
-        } else if lower == "--color-diagnostics"
-            || lower.starts_with("--color-diagnostics=")
-            || lower == "--no-color-diagnostics"
-        {
-            Some(Requirement {
-                capability: Capability::ColorDiagnostics,
-                trigger: "flag:--color-diagnostics",
             })
         } else if lower == "--fix-cortex-a53-843419" || lower == "-fix-cortex-a53-843419" {
             Some(Requirement {
@@ -1666,13 +1655,7 @@ mod tests {
 
     #[test]
     fn unsupported_native_semantics_route_to_lld() {
-        for flag in [
-            "--discard-all",
-            "-x",
-            "--color-diagnostics=always",
-            "--no-color-diagnostics",
-            "--fix-cortex-a53-843419",
-        ] {
+        for flag in ["--discard-all", "-x", "--fix-cortex-a53-843419"] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
                 BridgeTarget::Elf,
@@ -1708,7 +1691,12 @@ mod tests {
     fn fatal_warnings_stays_native() {
         // `--fatal-warnings` is diagnostics plumbing implemented natively (reld#123 Phase 2);
         // it must not route to lld.
-        for flag in ["--fatal-warnings", "--no-fatal-warnings"] {
+        for flag in [
+            "--fatal-warnings",
+            "--no-fatal-warnings",
+            "--color-diagnostics",
+            "--no-color-diagnostics",
+        ] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
                 BridgeTarget::Elf,
