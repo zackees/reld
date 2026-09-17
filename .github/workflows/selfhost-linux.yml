@@ -1,0 +1,68 @@
+name: Self-host (Linux)
+
+# Link reld with reld, twice, and require the two generations to agree (reld#6, P2-T2).
+#
+# Windows and macOS already self-host inside ci.yml; Linux, the platform Phase 2 is about, did
+# not. This is the strongest single correctness signal available for one job: a linker that
+# mis-resolves a symbol produces a binary that links cleanly and then behaves wrong, and the only
+# way to see that is to use its output as the linker.
+#
+# It is its own workflow because it pays for three release builds, and that cost should be
+# visible rather than buried in a job that is also doing something else.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "ci/selfhost.py"
+      - "ci/tests/test_selfhost.py"
+      - ".github/workflows/selfhost-linux.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  selfhost:
+    name: reld links reld, two generations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - name: Sync Python tooling
+        run: uv sync --extra dev
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Free runner disk
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: >-
+          sudo env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+          "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT"
+          uv run --no-sync python -m ci.free_runner_disk
+
+      - name: Install clang
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      # The comparison logic, so an exemption that silently widens fails here rather than by
+      # quietly passing the gate below.
+      - name: Test the gate
+        run: uv run --no-sync python -m pytest ci/tests/test_selfhost.py -q
+
+      - name: Bootstrap
+        run: uv run --no-sync python -m ci.selfhost --root target/selfhost
