@@ -390,6 +390,7 @@ pub(crate) fn main() -> Result<std::process::ExitCode> {
     let conclusion = libtest_mimic::run(&args, tests);
     if enforce_aggregate_coverage {
         verify_aggregate_oracle_coverage()?;
+        report_unobserved_default_ignores()?;
     }
     Ok(conclusion.exit_code())
 }
@@ -5879,6 +5880,29 @@ fn record_oracle_coverage(platform: PlatformKind, report: &reld_diff::Report) {
         .record(format, diffed, total);
 }
 
+static AGGREGATE_DEFAULT_IGNORES: LazyLock<Mutex<acceptance_policy::AggregateDefaultIgnores>> =
+    LazyLock::new(|| Mutex::new(acceptance_policy::AggregateDefaultIgnores::default()));
+
+/// Set this to turn an unobserved inherited ignore into a failure. Off by default because which
+/// defaults are exercised depends on which fixtures the host can run (reld#13).
+const RATCHET_DEFAULT_IGNORES_ENV: &str = "RELD_RATCHET_DEFAULT_IGNORES";
+
+fn record_default_ignore_use(report: &reld_diff::Report) {
+    AGGREGATE_DEFAULT_IGNORES
+        .lock()
+        .unwrap()
+        .record(report.declared_default_ignores(), &report.used_ignores());
+}
+
+fn report_unobserved_default_ignores() -> Result {
+    let aggregate = AGGREGATE_DEFAULT_IGNORES.lock().unwrap();
+    println!("{}", aggregate.summary());
+    if std::env::var(RATCHET_DEFAULT_IGNORES_ENV).is_ok() {
+        aggregate.verify()?;
+    }
+    Ok(())
+}
+
 fn verify_aggregate_oracle_coverage() -> Result {
     let aggregate = AGGREGATE_ORACLE_COVERAGE.lock().unwrap();
     for summary in aggregate.summaries(ORACLE_COVERAGE_FLOOR) {
@@ -6038,6 +6062,7 @@ fn diff_files(
 ) -> Result {
     let report = produce_diff_report(diff_config)?;
     record_oracle_coverage(config.platform, &report);
+    record_default_ignore_use(&report);
     validation.record_used_ignores(report.used_ignores());
 
     if let Some(malfunction) = config.active_malfunction.as_ref() {
