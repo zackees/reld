@@ -241,26 +241,16 @@ jobs:
           path: benchmark-input
           merge-multiple: false
 
+      # Target list, artifact layout, history carry-forward, per-target rendering, the combined
+      # stacked page, and the check that each target produced all four artifacts all live in
+      # Python, so the same aggregation runs locally against downloaded logs (reld#48).
       - name: Carry forward history and render each target
         shell: bash
-        env:
-          RELD_BENCHMARK_RAW_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats
-        run: |
-          set -euo pipefail
-          mapfile -t targets < <(uv run --no-sync python -m ci.benchmark_stats --print-targets)
-          for target in "${targets[@]}"; do
-            mkdir -p "benchmark-stats/$target"
-            curl --fail --silent --location --max-time 30 \
-              -o "benchmark-stats/$target/history.jsonl" \
-              "$RELD_BENCHMARK_RAW_BASE_URL/$target/history.jsonl" \
-              || : > "benchmark-stats/$target/history.jsonl"
-            uv run --no-sync python -m ci.benchmark_stats \
-              --input-log "benchmark-input/benchmark-log-$target/benchmark.log" \
-              --metadata-path "benchmark-input/benchmark-log-$target/metadata.json" \
-              --output-dir "benchmark-stats/$target"
-          done
-          # One combined page above the per-target directories, charts stacked (reld#54).
-          uv run --no-sync python -m ci.benchmark_stats --write-combined-index benchmark-stats
+        run: >-
+          uv run --no-sync python -m ci.benchmark_pipeline
+          --input-root benchmark-input
+          --output-root benchmark-stats
+          --history-base-url "https://raw.githubusercontent.com/${{ github.repository }}/benchmark-stats"
 
       - name: Assert generated README block and artifact freshness
         shell: bash

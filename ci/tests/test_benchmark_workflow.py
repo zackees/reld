@@ -16,7 +16,9 @@ def test_benchmark_workflow_publishes_one_directory_per_target():
     assert "x86_64-pc-windows-msvc" in text
     assert "aarch64-apple-darwin" in text
     assert "needs: benchmark" in text
-    assert "benchmark-stats/$target" in text
+    # The per-target layout is the pipeline's, not the YAML's: the workflow only names the roots.
+    assert "--input-root benchmark-input" in text
+    assert "--output-root benchmark-stats" in text
     assert "github.event.repository.default_branch" in text
     assert not OBSOLETE_ASSET_WORKFLOW.exists()
 
@@ -81,9 +83,8 @@ def test_benchmark_workflow_reports_and_guards_generated_artifacts():
 
     assert "Report per-target timings and metadata" in text
     assert "--metadata-output benchmark-output/metadata.json" in text
-    assert '--metadata-path "benchmark-input/benchmark-log-$target/metadata.json"' in text
+    assert "python -m ci.benchmark_pipeline" in text
     assert "--summary-only" in text
-    assert "--print-targets" in text
     assert "--check-readme README.md" in text
     assert "--verify-current-outputs benchmark-stats" in text
     assert "Report benchmark publication outcome" in text
