@@ -2,11 +2,13 @@
 //!
 //! These tests link a real shared object against a library in a fake Nix store directory and
 //! assert that reld derives the matching `DT_RUNPATH`. They are skipped when no C compiler is
-//! available, and only run on Linux, where `cc` produces ELF objects.
-#![cfg(target_os = "linux")]
+//! available or when the host is not Linux, the only host where `cc` is known to produce ELF
+//! objects.
 
 use object::Object as _;
 use object::ObjectSection as _;
+use reld_core::platforms::host;
+use reld_core::platforms::host::HostOs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,6 +17,9 @@ fn reld() -> &'static Path {
 }
 
 fn find_cc() -> Option<&'static str> {
+    if host::os() != HostOs::Linux {
+        return None;
+    }
     ["cc", "gcc", "clang"]
         .into_iter()
         .find(|cc| Command::new(cc).arg("--version").output().is_ok())
@@ -107,7 +112,7 @@ fn read_runpath(bin: &Path) -> Option<String> {
 #[test]
 fn store_lib_dir_yields_runpath() {
     let Some(_cc) = find_cc() else {
-        eprintln!("skipping: no C compiler");
+        eprintln!("skipping: host is not Linux or no C compiler");
         return;
     };
     let (_dir, store, lib) = build_fixture();
@@ -119,7 +124,7 @@ fn store_lib_dir_yields_runpath() {
 #[test]
 fn dont_set_rpath_disables_derivation() {
     let Some(_cc) = find_cc() else {
-        eprintln!("skipping: no C compiler");
+        eprintln!("skipping: host is not Linux or no C compiler");
         return;
     };
     let (_dir, store, _lib) = build_fixture();
@@ -136,7 +141,7 @@ fn dont_set_rpath_disables_derivation() {
 #[test]
 fn non_store_dir_yields_no_runpath() {
     let Some(_cc) = find_cc() else {
-        eprintln!("skipping: no C compiler");
+        eprintln!("skipping: host is not Linux or no C compiler");
         return;
     };
     let (_dir, store, _lib) = build_fixture();

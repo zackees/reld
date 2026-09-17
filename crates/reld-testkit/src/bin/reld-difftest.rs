@@ -1,11 +1,12 @@
 //! Seeded differential execution oracle.
 
+use std::env::consts::EXE_SUFFIX;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use reld_testkit::{WorkloadSpec, generate};
+use reld_testkit::{CompilerTarget, WorkloadSpec, generate};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -47,11 +48,12 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&root)?;
     let env_reld = std::env::var_os("RELD_DIFFTEST_RELD").map(PathBuf::from);
     let reld = resolve_reld(args.reld.as_deref().or(env_reld.as_deref()))?;
+    let target = CompilerTarget::detect(&args.cc)?;
 
     for seed in &seeds {
         let dir = root.join(format!("seed-{seed:020}"));
         let _ = std::fs::remove_dir_all(&dir);
-        if let Err(error) = run_seed(&args, &reld, *seed, &dir) {
+        if let Err(error) = run_seed(&args, &reld, target, *seed, &dir) {
             eprintln!("differential failure; reproducing seed: {seed}");
             eprintln!("tree kept at {}", dir.display());
             eprintln!("reproduce: reld-difftest --seed {seed} --keep");
@@ -70,17 +72,17 @@ fn resolve_reld(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_owned());
     }
-    let name = if cfg!(windows) { "reld.exe" } else { "reld" };
-    let sibling = std::env::current_exe()?.with_file_name(name);
+    let name = format!("reld{EXE_SUFFIX}");
+    let sibling = std::env::current_exe()?.with_file_name(&name);
     if sibling.exists() {
         return Ok(sibling);
     }
-    which::which(name).with_context(|| {
+    which::which(&name).with_context(|| {
         format!("could not find {name}; build `reld` first or pass --reld / RELD_DIFFTEST_RELD")
     })
 }
 
-fn run_seed(args: &Args, reld: &Path, seed: u64, dir: &Path) -> Result<()> {
+fn run_seed(args: &Args, reld: &Path, target: CompilerTarget, seed: u64, dir: &Path) -> Result<()> {
     // Four translation units keep 100-seed PR runs inexpensive while still exercising a seeded
     // cross-object graph, weak definitions, TLS, and COMDAT/section-group inputs.
     let spec = WorkloadSpec {
@@ -93,7 +95,7 @@ fn run_seed(args: &Args, reld: &Path, seed: u64, dir: &Path) -> Result<()> {
         comdat_fns: 4,
     };
     let workload = generate(&spec, dir).context("generating differential workload")?;
-    let objects = compile_all(&args.cc, dir, &workload.sources)?;
+    let objects = compile_all(&args.cc, target, dir, &workload.sources)?;
 
     let reld_exe = link(&args.cc, dir, &objects, &reld.display().to_string(), "reld")?;
     let reference_exe = link(&args.cc, dir, &objects, &args.reference_linker, "reference")?;
@@ -106,10 +108,15 @@ fn run_seed(args: &Args, reld: &Path, seed: u64, dir: &Path) -> Result<()> {
     compare_outputs(seed, &reld_out, &reference_out)
 }
 
-fn compile_all(cc: &str, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn compile_all(
+    cc: &str,
+    target: CompilerTarget,
+    dir: &Path,
+    sources: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
     let mut objects = Vec::with_capacity(sources.len());
     for source in sources {
-        let object = source.with_extension(if cfg!(windows) { "obj" } else { "o" });
+        let object = source.with_extension(if target.is_windows() { "obj" } else { "o" });
         let mut command = Command::new(cc);
         command
             .arg("-c")
@@ -119,7 +126,7 @@ fn compile_all(cc: &str, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathBuf>
             .arg("-I")
             .arg(dir)
             .arg("-O0");
-        if !cfg!(windows) {
+        if !target.is_windows() {
             command.arg("-fPIC");
         }
         let output = command.output().with_context(|| format!("spawning {cc}"))?;
@@ -135,8 +142,7 @@ fn compile_all(cc: &str, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathBuf>
 }
 
 fn link(cc: &str, dir: &Path, objects: &[PathBuf], linker: &str, name: &str) -> Result<PathBuf> {
-    let extension = if cfg!(windows) { ".exe" } else { "" };
-    let executable = dir.join(format!("{name}{extension}"));
+    let executable = dir.join(format!("{name}{EXE_SUFFIX}"));
     let mut command = Command::new(cc);
     command.args(objects).arg("-o").arg(&executable);
     if !linker.is_empty() {
@@ -179,24 +185,14 @@ mod tests {
 
     #[test]
     fn mutation_is_detected_and_reports_seed() {
-        let success = if cfg!(windows) {
-            Command::new("cmd")
-                .args(["/C", "exit", "0"])
-                .output()
-                .unwrap()
-        } else {
-            Command::new("sh").args(["-c", "exit 0"]).output().unwrap()
+        let success = || Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
         };
-        let mut mutated = success;
+        let mut mutated = success();
         mutated.stdout.extend_from_slice(b"mutation");
-        let reference = if cfg!(windows) {
-            Command::new("cmd")
-                .args(["/C", "exit", "0"])
-                .output()
-                .unwrap()
-        } else {
-            Command::new("sh").args(["-c", "exit 0"]).output().unwrap()
-        };
+        let reference = success();
         let error = compare_outputs(0x5eed, &mutated, &reference).unwrap_err();
         assert!(error.to_string().contains("24301"));
     }

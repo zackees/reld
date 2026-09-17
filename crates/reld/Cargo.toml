@@ -75,9 +75,6 @@ which.workspace = true
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
 wait-timeout.workspace = true
 
-[target.'cfg(unix)'.dev-dependencies]
-libc.workspace = true
-
 [features]
 default = ["fork", "plugins", "zstd"]
 

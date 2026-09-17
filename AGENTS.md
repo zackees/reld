@@ -31,6 +31,13 @@ Across every platform:
   [`agents/docs/polylinker.md`](agents/docs/polylinker.md) and the audit in
   [#123](https://github.com/zackees/reld/issues/123). Never write to stderr on a successful link
   without `RELD_LOG_ENGINE`.
+- Host-platform selection (`windows`, `unix`, `target_os`, `target_env`, ... in `cfg`/`cfg!`/
+  `cfg_select!`) and native OS APIs (`std::os::*`, `libc`, `windows_sys`) belong only in
+  `crates/reld-core/src/platforms/mod.rs` and its `platform_<tree>` concrete trees. Everything else,
+  tests included, uses `reld_core::platforms::{fs,host,linker_plugin,path,process}`; `target_arch`
+  and `target_endian` stay allowed. `crate::platform` is the unrelated linker-format trait. The
+  `ban_platform_cfg_outside_boundary` Dylint enforces this with no baseline; see
+  [`dylints/README.md`](dylints/README.md).
 
 ## Dependency approval
 

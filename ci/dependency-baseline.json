@@ -185,8 +185,7 @@
     "crates/reld/Cargo.toml:dev-dependencies:tempfile",
     "crates/reld/Cargo.toml:dev-dependencies:toml",
     "crates/reld/Cargo.toml:dev-dependencies:which",
-    "crates/reld/Cargo.toml:target.cfg(not(target_os = \"wasi\")).dev-dependencies:wait-timeout",
-    "crates/reld/Cargo.toml:target.cfg(unix).dev-dependencies:libc"
+    "crates/reld/Cargo.toml:target.cfg(not(target_os = \"wasi\")).dev-dependencies:wait-timeout"
   ],
   "resolved_crates": [
     "adler2|2.0.1|registry+https://github.com/rust-lang/crates.io-index|320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa",

@@ -5,6 +5,7 @@
 
 use crate::error::Context as _;
 use crate::error::Result;
+use crate::platforms::fs::FilesystemKind;
 use memmap2::Mmap;
 use memmap2::MmapOptions;
 use std::fs::File;
@@ -15,20 +16,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
-const LARGE_EXT4_BUFFERED_OUTPUT_MIN: u64 = 256 * 1024 * 1024;
-#[cfg(target_os = "linux")]
-const LARGE_EXT4_BUFFERED_OUTPUT_MAX: u64 = 512 * 1024 * 1024;
-#[cfg(target_os = "linux")]
-const PARALLEL_OUTPUT_WRITE_MIN: usize = 64 * 1024 * 1024;
-#[cfg(target_os = "linux")]
-const PARALLEL_OUTPUT_WRITE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+pub(crate) use crate::platforms::path::path_from_bytes;
 
-// nix does not expose this Linux filesystem magic on musl targets.
-#[cfg(all(target_os = "linux", target_env = "musl"))]
-const XFS_SUPER_MAGIC: nix::sys::statfs::FsType = nix::sys::statfs::FsType(0x5846_5342);
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
-const XFS_SUPER_MAGIC: nix::sys::statfs::FsType = nix::sys::statfs::XFS_SUPER_MAGIC;
+const LARGE_EXT4_BUFFERED_OUTPUT_MIN: u64 = 256 * 1024 * 1024;
+const LARGE_EXT4_BUFFERED_OUTPUT_MAX: u64 = 512 * 1024 * 1024;
+const PARALLEL_OUTPUT_WRITE_MIN: usize = 64 * 1024 * 1024;
+const PARALLEL_OUTPUT_WRITE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileReplacementMode {
@@ -389,31 +382,21 @@ impl OutputFileData for OsOutputFile {
     }
 
     fn invalidate(&mut self, len: usize) {
-        #[cfg(target_os = "macos")]
         if let OsOutputBuffer::Mmap(output) = &mut self.buffer {
-            unsafe {
-                libc::msync(output.as_mut_ptr().cast(), len, libc::MS_INVALIDATE);
-            }
+            crate::platforms::fs::invalidate_mapped_output(output, len);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = len;
     }
 }
 
 fn write_output_buffer(file: &File, bytes: &[u8], parallel: bool) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
     if parallel && bytes.len() >= PARALLEL_OUTPUT_WRITE_MIN && file.metadata()?.is_file() {
         return write_output_buffer_parallel(file, bytes, PARALLEL_OUTPUT_WRITE_CHUNK_SIZE);
     }
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = parallel;
 
     let mut file = file;
     file.write_all(bytes)
 }
 
-#[cfg(target_os = "linux")]
 fn write_output_buffer_parallel(
     file: &File,
     bytes: &[u8],
@@ -422,14 +405,13 @@ fn write_output_buffer_parallel(
     use rayon::iter::IndexedParallelIterator as _;
     use rayon::iter::ParallelIterator as _;
     use rayon::slice::ParallelSlice as _;
-    use std::os::unix::fs::FileExt as _;
 
     debug_assert!(chunk_size > 0);
     bytes
         .par_chunks(chunk_size)
         .enumerate()
         .try_for_each(|(chunk_index, chunk)| {
-            file.write_all_at(chunk, (chunk_index * chunk_size) as u64)
+            crate::platforms::fs::write_all_at(file, chunk, (chunk_index * chunk_size) as u64)
         })
 }
 
@@ -635,36 +617,14 @@ impl FileSystem for OsFileSystem {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn preallocate_output_file(file: &File, size: u64) -> Result {
-    if size > 0 {
-        nix::fcntl::fallocate(
-            file,
-            nix::fcntl::FallocateFlags::empty(),
-            0,
-            i64::try_from(size).context("Output file is too large for fallocate")?,
-        )?;
-    }
+    crate::platforms::fs::preallocate(file, size)?;
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-fn preallocate_output_file(_file: &File, _size: u64) -> Result {
-    Err(crate::error!("fallocate is only supported on Linux"))
-}
-
-#[cfg(target_os = "linux")]
 fn advise_huge_pages_if_requested(mmap: &memmap2::MmapMut, requested: bool) -> Result {
     if requested {
-        mmap.advise(memmap2::Advice::HugePage)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn advise_huge_pages_if_requested(_mmap: &memmap2::MmapMut, requested: bool) -> Result {
-    if requested {
-        return Err(crate::error!("MADV_HUGEPAGE is only supported on Linux"));
+        crate::platforms::fs::advise_huge_pages(mmap)?;
     }
     Ok(())
 }
@@ -674,23 +634,13 @@ fn default_mmap_setup_for_file(
     write_mode: FileWriteMode,
     file_replacement_mode: FileReplacementMode,
 ) -> (bool, bool) {
-    #[cfg(target_os = "linux")]
-    {
-        if write_mode != FileWriteMode::Mmap {
-            return (false, false);
-        }
-        default_mmap_setup_for_filesystem_type(
-            nix::sys::statfs::fstatfs(file)
-                .map(|stat| stat.filesystem_type())
-                .ok(),
-            file_replacement_mode,
-        )
+    if write_mode != FileWriteMode::Mmap {
+        return (false, false);
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, write_mode, file_replacement_mode);
-        (false, false)
-    }
+    default_mmap_setup_for_filesystem_type(
+        crate::platforms::fs::filesystem_kind(file),
+        file_replacement_mode,
+    )
 }
 
 fn resolve_mmap_setup(
@@ -704,78 +654,53 @@ fn resolve_mmap_setup(
     )
 }
 
-#[cfg(target_os = "linux")]
 fn default_mmap_setup_for_filesystem_type(
-    filesystem_type: Option<nix::sys::statfs::FsType>,
+    filesystem_kind: Option<FilesystemKind>,
     file_replacement_mode: FileReplacementMode,
 ) -> (bool, bool) {
     if file_replacement_mode != FileReplacementMode::UnlinkAndReplace {
         return (false, false);
     }
 
-    let is_ext4_or_xfs = filesystem_type.is_some_and(|filesystem_type| {
-        filesystem_type == nix::sys::statfs::EXT4_SUPER_MAGIC || filesystem_type == XFS_SUPER_MAGIC
-    });
+    let is_ext4_or_xfs = matches!(
+        filesystem_kind,
+        Some(FilesystemKind::Ext4 | FilesystemKind::Xfs)
+    );
     (is_ext4_or_xfs, false)
 }
 
 fn should_parallel_buffer_write(file: &File, output_size: u64) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        should_parallel_buffer_write_for_filesystem_type(
-            nix::sys::statfs::fstatfs(file)
-                .map(|stat| stat.filesystem_type())
-                .ok(),
-            output_size,
-        )
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, output_size);
-        false
-    }
+    should_parallel_buffer_write_for_filesystem_type(
+        crate::platforms::fs::filesystem_kind(file),
+        output_size,
+    )
 }
 
-#[cfg(target_os = "linux")]
 fn should_parallel_buffer_write_for_filesystem_type(
-    filesystem_type: Option<nix::sys::statfs::FsType>,
+    filesystem_kind: Option<FilesystemKind>,
     output_size: u64,
 ) -> bool {
-    filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+    filesystem_kind == Some(FilesystemKind::Ext4)
         && (LARGE_EXT4_BUFFERED_OUTPUT_MIN..=LARGE_EXT4_BUFFERED_OUTPUT_MAX).contains(&output_size)
 }
 
 fn default_file_write_mode_for_file(file: &std::fs::File, output_size: u64) -> FileWriteMode {
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    {
-        default_file_write_mode_for_filesystem_type(
-            nix::sys::statfs::fstatfs(file)
-                .map(|stat| stat.filesystem_type())
-                .ok(),
-            output_size,
-        )
-    }
-    #[cfg(not(any(target_os = "android", target_os = "linux")))]
-    {
-        let _ = (file, output_size);
-        FileWriteMode::Mmap
-    }
+    default_file_write_mode_for_filesystem_type(
+        crate::platforms::fs::filesystem_kind(file),
+        output_size,
+    )
 }
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
 fn default_file_write_mode_for_filesystem_type(
-    filesystem_type: Option<nix::sys::statfs::FsType>,
+    filesystem_kind: Option<FilesystemKind>,
     output_size: u64,
 ) -> FileWriteMode {
     // Preserve the existing Btrfs/vfat policy at every size.
-    if let Some(nix::sys::statfs::BTRFS_SUPER_MAGIC | nix::sys::statfs::MSDOS_SUPER_MAGIC) =
-        filesystem_type
-    {
+    if let Some(FilesystemKind::Btrfs | FilesystemKind::Vfat) = filesystem_kind {
         return FileWriteMode::BufferThenWrite;
     }
 
-    #[cfg(target_os = "linux")]
-    if filesystem_type == Some(nix::sys::statfs::EXT4_SUPER_MAGIC)
+    if filesystem_kind == Some(FilesystemKind::Ext4)
         && (LARGE_EXT4_BUFFERED_OUTPUT_MIN..=LARGE_EXT4_BUFFERED_OUTPUT_MAX).contains(&output_size)
     {
         // Exact captured-link trials consistently show that writing one completed buffer is
@@ -784,18 +709,28 @@ fn default_file_write_mode_for_filesystem_type(
         return FileWriteMode::BufferThenWrite;
     }
 
-    let _ = output_size;
     FileWriteMode::Mmap
 }
 
-#[cfg(all(test, unix))]
+/// Make the the supplied file executable by adding execute permissions for all users that have read
+/// permissions. On non-Unix platforms, this is a no-op.
+pub fn make_executable(file: &File) -> Result {
+    crate::platforms::fs::make_executable(file)?;
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn parallel_output_write_preserves_chunk_boundaries_and_tail() {
         use std::io::Read as _;
+
+        if !crate::platforms::host::HAS_TEMP_DIR {
+            eprintln!("skipping: host has no temp dir");
+            return;
+        }
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("parallel-output");
@@ -811,45 +746,44 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn large_linux_ext4_outputs_use_the_measured_buffered_policy() {
+    fn large_ext4_outputs_use_the_measured_buffered_policy() {
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
-                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                Some(FilesystemKind::Ext4),
                 LARGE_EXT4_BUFFERED_OUTPUT_MIN,
             ),
             FileWriteMode::BufferThenWrite
         );
         assert!(should_parallel_buffer_write_for_filesystem_type(
-            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            Some(FilesystemKind::Ext4),
             LARGE_EXT4_BUFFERED_OUTPUT_MIN,
         ));
         assert!(!should_parallel_buffer_write_for_filesystem_type(
-            Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+            Some(FilesystemKind::Btrfs),
             LARGE_EXT4_BUFFERED_OUTPUT_MIN,
         ));
         assert!(!should_parallel_buffer_write_for_filesystem_type(
-            Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+            Some(FilesystemKind::Ext4),
             LARGE_EXT4_BUFFERED_OUTPUT_MAX + 1,
         ));
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
-                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                Some(FilesystemKind::Ext4),
                 LARGE_EXT4_BUFFERED_OUTPUT_MAX,
             ),
             FileWriteMode::BufferThenWrite
         );
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
-                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                Some(FilesystemKind::Ext4),
                 LARGE_EXT4_BUFFERED_OUTPUT_MAX + 1,
             ),
             FileWriteMode::Mmap
         );
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
-                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                Some(FilesystemKind::Ext4),
                 64 * 1024 * 1024,
             ),
             FileWriteMode::Mmap
@@ -860,33 +794,46 @@ mod tests {
         );
         assert_eq!(
             default_file_write_mode_for_filesystem_type(
-                Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+                Some(FilesystemKind::Btrfs),
                 64 * 1024 * 1024,
             ),
             FileWriteMode::BufferThenWrite
         );
+        assert_eq!(
+            default_file_write_mode_for_filesystem_type(Some(FilesystemKind::Vfat), 1),
+            FileWriteMode::BufferThenWrite
+        );
+        for kind in [Some(FilesystemKind::Xfs), Some(FilesystemKind::Other), None] {
+            assert_eq!(
+                default_file_write_mode_for_filesystem_type(kind, LARGE_EXT4_BUFFERED_OUTPUT_MIN),
+                FileWriteMode::Mmap
+            );
+            assert!(!should_parallel_buffer_write_for_filesystem_type(
+                kind,
+                LARGE_EXT4_BUFFERED_OUTPUT_MIN,
+            ));
+        }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn fresh_ext4_mmap_outputs_default_to_preallocation_but_not_huge_pages() {
         assert_eq!(
             default_mmap_setup_for_filesystem_type(
-                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                Some(FilesystemKind::Ext4),
                 FileReplacementMode::UnlinkAndReplace,
             ),
             (true, false)
         );
         assert_eq!(
             default_mmap_setup_for_filesystem_type(
-                Some(XFS_SUPER_MAGIC),
+                Some(FilesystemKind::Xfs),
                 FileReplacementMode::UnlinkAndReplace,
             ),
             (true, false)
         );
         assert_eq!(
             default_mmap_setup_for_filesystem_type(
-                Some(nix::sys::statfs::EXT4_SUPER_MAGIC),
+                Some(FilesystemKind::Ext4),
                 FileReplacementMode::UpdateInPlaceWithFallback,
             ),
             (false, false)
@@ -899,15 +846,30 @@ mod tests {
         );
         assert_eq!(
             default_mmap_setup_for_filesystem_type(
-                Some(nix::sys::statfs::BTRFS_SUPER_MAGIC),
+                Some(FilesystemKind::Btrfs),
                 FileReplacementMode::UnlinkAndReplace,
             ),
             (false, false)
         );
+        for kind in [
+            Some(FilesystemKind::Vfat),
+            Some(FilesystemKind::Other),
+            None,
+        ] {
+            assert_eq!(
+                default_mmap_setup_for_filesystem_type(kind, FileReplacementMode::UnlinkAndReplace),
+                (false, false)
+            );
+        }
     }
 
     #[test]
     fn explicitly_requested_huge_pages_reject_buffered_output() {
+        if !crate::platforms::host::HAS_TEMP_DIR {
+            eprintln!("skipping: host has no temp dir");
+            return;
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let path = Arc::<Path>::from(directory.path().join("output"));
         let Err(error) = OsFileSystem.create_output(
@@ -927,43 +889,5 @@ mod tests {
             error.to_string(),
             "--madvise-huge-pages requires mmapped output file"
         );
-    }
-}
-
-/// Make the the supplied file executable by adding execute permissions for all users that have read
-/// permissions. On non-Unix platforms, this is a no-op.
-pub fn make_executable(_file: &File) -> Result {
-    #[cfg(unix)]
-    {
-        use std::os::unix::prelude::PermissionsExt;
-        let mut permissions = _file.metadata()?.permissions();
-        let mut mode = PermissionsExt::mode(&permissions);
-        // Set execute permission wherever we currently have read permission.
-        mode = mode | ((mode & 0o444) >> 2);
-        PermissionsExt::set_mode(&mut permissions, mode);
-        _file.set_permissions(permissions)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn path_from_bytes(bytes: &[u8]) -> PathBuf {
-    #[cfg(unix)]
-    {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt as _;
-        std::path::Path::new(OsStr::from_bytes(bytes)).to_path_buf()
-    }
-
-    #[cfg(target_os = "wasi")]
-    {
-        use std::ffi::OsStr;
-        use std::os::wasi::ffi::OsStrExt as _;
-        std::path::Path::new(OsStr::from_bytes(bytes)).to_path_buf()
-    }
-
-    #[cfg(not(any(unix, target_os = "wasi")))]
-    {
-        let path = std::str::from_utf8(bytes).expect("Invalid UTF-8 in archive path name");
-        PathBuf::from(path)
     }
 }

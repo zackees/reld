@@ -12,6 +12,7 @@
 //! missing competitor is visible in the published chart instead of quietly improving our
 //! numbers.
 
+use std::env::consts::EXE_SUFFIX;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use reld_testkit::{WorkloadSpec, generate};
+use reld_testkit::{CompilerTarget, WorkloadSpec, generate};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -115,23 +116,46 @@ fn scenarios() -> Vec<(String, WorkloadSpec)> {
     ]
 }
 
-/// `-fuse-ld=` values. `""` means the compiler default.
-fn default_linkers() -> Vec<&'static str> {
-    cfg_select! {
-        target_os = "windows" => vec!["", "lld"],
-        target_os = "macos" => vec!["", "ld64.lld"],
-        target_os = "linux" => vec!["bfd", "lld", "mold", "wild"],
+/// The benchmark routes that exist. Each is explicit: a compiler targeting anything else is an
+/// error rather than being silently measured with Linux's linker set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchPlatform {
+    Windows,
+    Apple,
+    Linux,
+}
+
+impl BenchPlatform {
+    fn for_compiler(cc: &str, target: CompilerTarget) -> Result<Self> {
+        match target {
+            CompilerTarget::Windows => Ok(Self::Windows),
+            CompilerTarget::Apple => Ok(Self::Apple),
+            CompilerTarget::Linux => Ok(Self::Linux),
+            CompilerTarget::Other => bail!(
+                "reld-bench has linker routes only for Windows, Apple, and Linux compiler \
+                 targets; `{cc}` targets something else"
+            ),
+        }
     }
 }
 
-fn display_linker(linker: &str) -> &str {
+/// `-fuse-ld=` values for the benchmark platform. `""` means the compiler default.
+fn default_linkers(platform: BenchPlatform) -> Vec<&'static str> {
+    match platform {
+        BenchPlatform::Windows => vec!["", "lld"],
+        BenchPlatform::Apple => vec!["", "ld64.lld"],
+        BenchPlatform::Linux => vec!["bfd", "lld", "mold", "wild"],
+    }
+}
+
+fn display_linker(linker: &str, platform: BenchPlatform) -> &str {
     if !linker.is_empty() {
         return linker;
     }
-    cfg_select! {
-        target_os = "windows" => "link.exe",
-        target_os = "macos" => "ld",
-        target_os = "linux" => "default",
+    match platform {
+        BenchPlatform::Windows => "link.exe",
+        BenchPlatform::Apple => "ld",
+        BenchPlatform::Linux => "default",
     }
 }
 
@@ -158,7 +182,8 @@ fn fuse_ld_value(token: &str) -> String {
 /// Select the `-fuse-ld` token clang can actually execute, plus an optional directory to prepend
 /// to the child PATH. Windows clang treats an absolute `-fuse-ld=C:\...\reld-link.exe` as a
 /// linker *name* and prefixes it with the target triple, producing a nonexistent executable.
-/// A basename on PATH is the supported form there. Unix clang accepts absolute linker paths.
+/// A basename on PATH is the supported form there. Other clang targets accept absolute linker
+/// paths.
 fn compiler_driver_linker(linker: &str, windows: bool) -> Result<(String, Option<PathBuf>)> {
     let path = Path::new(linker);
     if windows && path.is_absolute() {
@@ -174,11 +199,11 @@ fn compiler_driver_linker(linker: &str, windows: bool) -> Result<(String, Option
     Ok((fuse_ld_value(linker), None))
 }
 
-fn select_compiler_driver_linker(cmd: &mut Command, linker: &str) -> Result<()> {
+fn select_compiler_driver_linker(cmd: &mut Command, linker: &str, windows: bool) -> Result<()> {
     if linker.is_empty() {
         return Ok(());
     }
-    let (value, search_dir) = compiler_driver_linker(linker, cfg!(windows))?;
+    let (value, search_dir) = compiler_driver_linker(linker, windows)?;
     if let Some(search_dir) = search_dir {
         let mut paths = vec![search_dir];
         if let Some(current_path) = std::env::var_os("PATH") {
@@ -207,7 +232,7 @@ fn resolve_fuse_ld(token: &str, lookup: impl Fn(&str) -> Option<PathBuf>) -> Str
 ///
 /// Resolution order:
 /// 1. `explicit`, if given and it exists on disk.
-/// 2. `ld.reld` (or `ld.reld.exe` on Windows) next to the running bench binary.
+/// 2. `ld.reld` (plus the host executable suffix) next to the running bench binary.
 ///
 /// Returns `None` if neither location has a file, so the caller can report reld as `n/a`
 /// honestly rather than pass a bogus path to `-fuse-ld=`.
@@ -227,12 +252,7 @@ fn discover_reld_in(explicit: &Option<PathBuf>, sibling_dir: Option<&Path>) -> O
     }
 
     let dir = sibling_dir?;
-    let name = if cfg!(windows) {
-        "ld.reld.exe"
-    } else {
-        "ld.reld"
-    };
-    let candidate = dir.join(name);
+    let candidate = dir.join(format!("ld.reld{EXE_SUFFIX}"));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -251,9 +271,14 @@ fn main() -> Result<()> {
         None => std::env::temp_dir().join("reld-bench"),
     };
     std::fs::create_dir_all(&root)?;
+    let target = CompilerTarget::detect(&args.cc)?;
+    let platform = BenchPlatform::for_compiler(&args.cc, target)?;
 
     let requested: Vec<String> = if args.linkers.is_empty() {
-        default_linkers().into_iter().map(String::from).collect()
+        default_linkers(platform)
+            .into_iter()
+            .map(String::from)
+            .collect()
     } else {
         args.linkers.clone()
     };
@@ -261,7 +286,10 @@ fn main() -> Result<()> {
     // Probe once, up front, so the table header is stable and missing tools are explicit.
     let mut available = Vec::new();
     for l in &requested {
-        available.push((l.clone(), probe_linker(&args.cc, l, &root).unwrap_or(false)));
+        available.push((
+            l.clone(),
+            probe_linker(&args.cc, target, l, &root).unwrap_or(false),
+        ));
     }
 
     // reld is measured through its `ld.reld` driver shim, invoked via `-fuse-ld=<abs-path>`.
@@ -275,7 +303,7 @@ fn main() -> Result<()> {
         None
     };
     let reld_ok = match &reld_shim_str {
-        Some(linker) => probe_linker(&args.cc, linker, &root).unwrap_or(false),
+        Some(linker) => probe_linker(&args.cc, target, linker, &root).unwrap_or(false),
         None => false,
     };
     let reld_unavailable_reason = if reld_shim_str.is_some() && !reld_ok {
@@ -293,12 +321,12 @@ fn main() -> Result<()> {
         args.reld_pending.clone()
     };
 
-    let target = args.target.clone().unwrap_or_else(target_triple);
-    println!("## Link Benchmark: {target}");
+    let heading = args.target.clone().unwrap_or_else(target_triple);
+    println!("## Link Benchmark: {heading}");
     println!();
     print!("| Scenario |");
     for (l, _) in &available {
-        print!(" {} |", display_linker(l));
+        print!(" {} |", display_linker(l, platform));
     }
     println!(" reld |");
     print!("|:---------|");
@@ -315,7 +343,7 @@ fn main() -> Result<()> {
         let dir = root.join(name.split_whitespace().next().unwrap_or("s"));
         let _ = std::fs::remove_dir_all(&dir);
         let workload = generate(&spec, &dir)?;
-        let objects = compile_all(&args, &dir, &workload.sources)?;
+        let objects = compile_all(&args, target, &dir, &workload.sources)?;
 
         print!("| {name} |");
         for (linker, ok) in &available {
@@ -323,7 +351,7 @@ fn main() -> Result<()> {
                 print!(" n/a |");
                 continue;
             }
-            match time_link(&args, &dir, &objects, linker).and_then(|d| {
+            match time_link(&args, target, &dir, &objects, linker).and_then(|d| {
                 validate_generated_output(
                     &bench_output_path(&dir, linker),
                     workload.expected_exit_code(),
@@ -341,7 +369,7 @@ fn main() -> Result<()> {
             let linker = reld_shim_str
                 .as_ref()
                 .expect("measured implies a shim path");
-            match time_link(&args, &dir, &objects, linker).and_then(|d| {
+            match time_link(&args, target, &dir, &objects, linker).and_then(|d| {
                 validate_generated_output(
                     &bench_output_path(&dir, linker),
                     workload.expected_exit_code(),
@@ -366,7 +394,7 @@ fn main() -> Result<()> {
         if !ok {
             println!(
                 "<!-- linker {} not available on this runner -->",
-                display_linker(l)
+                display_linker(l, platform)
             );
         }
     }
@@ -436,7 +464,12 @@ fn target_triple() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
 
-fn compile_all(args: &Args, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn compile_all(
+    args: &Args,
+    target: CompilerTarget,
+    dir: &Path,
+    sources: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
     let mut objects = Vec::with_capacity(sources.len());
     for src in sources {
         let obj = src.with_extension("o");
@@ -448,7 +481,7 @@ fn compile_all(args: &Args, dir: &Path, sources: &[PathBuf]) -> Result<Vec<PathB
             .arg("-I")
             .arg(dir)
             .arg("-O0");
-        if !cfg!(windows) {
+        if !target.is_windows() {
             cmd.arg("-fPIC");
         }
         let out = cmd
@@ -541,9 +574,9 @@ fn write_compiler_driver_response_file(path: &Path, args: &[String], cc: &str) -
         .with_context(|| format!("writing compiler-driver response file {}", path.display()))
 }
 
-/// Add all linker inputs to `cmd`. Windows receives them through an `@response-file`, avoiding
-/// the CreateProcess command-line limit for the large generated and frozen-corpus benchmarks.
-/// Other platforms retain the existing direct-argument invocation.
+/// Add all linker inputs to `cmd`. Windows targets receive them through an `@response-file`,
+/// avoiding the CreateProcess command-line limit for the large generated and frozen-corpus
+/// benchmarks. Other targets retain the existing direct-argument invocation.
 enum PreparedLinkInputs<'a> {
     Direct {
         objects: &'a [PathBuf],
@@ -559,8 +592,9 @@ fn prepare_link_inputs<'a>(
     extra: &'a [String],
     response_file: &Path,
     cc: &str,
+    windows: bool,
 ) -> Result<PreparedLinkInputs<'a>> {
-    if cfg!(windows) {
+    if windows {
         let mut inputs = Vec::with_capacity(objects.len() + extra.len());
         inputs.extend(
             objects
@@ -603,11 +637,17 @@ fn add_prepared_link_inputs(cmd: &mut Command, inputs: &PreparedLinkInputs<'_>) 
     }
 }
 
-fn link_once(args: &Args, inputs: &PreparedLinkInputs<'_>, linker: &str, out: &Path) -> Result<()> {
+fn link_once(
+    args: &Args,
+    target: CompilerTarget,
+    inputs: &PreparedLinkInputs<'_>,
+    linker: &str,
+    out: &Path,
+) -> Result<()> {
     let mut cmd = Command::new(&args.cc);
     add_prepared_link_inputs(&mut cmd, inputs);
     cmd.arg("-o").arg(out);
-    select_compiler_driver_linker(&mut cmd, linker)?;
+    select_compiler_driver_linker(&mut cmd, linker, target.is_windows())?;
     let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -620,7 +660,7 @@ fn link_once(args: &Args, inputs: &PreparedLinkInputs<'_>, linker: &str, out: &P
 }
 
 /// Cheap availability check: link a one-object program.
-fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
+fn probe_linker(cc: &str, target: CompilerTarget, linker: &str, root: &Path) -> Result<bool> {
     let dir = root.join("probe");
     std::fs::create_dir_all(&dir)?;
     let src = dir.join("p.c");
@@ -637,10 +677,10 @@ fn probe_linker(cc: &str, linker: &str, root: &Path) -> Result<bool> {
     if !ok {
         return Ok(false);
     }
-    let exe = dir.join(if cfg!(windows) { "p.exe" } else { "p.out" });
+    let exe = dir.join(format!("p{EXE_SUFFIX}"));
     let mut cmd = Command::new(cc);
     cmd.arg(&obj).arg("-o").arg(&exe);
-    select_compiler_driver_linker(&mut cmd, linker)?;
+    select_compiler_driver_linker(&mut cmd, linker, target.is_windows())?;
     Ok(cmd.output().map(|o| o.status.success()).unwrap_or(false))
 }
 
@@ -725,12 +765,24 @@ fn validate_replay_output(out: &Path, expected_exit_code: Option<i32>) -> Result
     }
 }
 
-fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Result<Duration> {
+fn time_link(
+    args: &Args,
+    target: CompilerTarget,
+    dir: &Path,
+    objects: &[PathBuf],
+    linker: &str,
+) -> Result<Duration> {
     let out = bench_output_path(dir, linker);
-    let inputs = prepare_link_inputs(objects, &[], &out.with_extension("rsp"), &args.cc)?;
+    let inputs = prepare_link_inputs(
+        objects,
+        &[],
+        &out.with_extension("rsp"),
+        &args.cc,
+        target.is_windows(),
+    )?;
 
     for _ in 0..args.warmup {
-        link_once(args, &inputs, linker, &out)?;
+        link_once(args, target, &inputs, linker, &out)?;
     }
 
     let mut samples = Vec::with_capacity(args.trials);
@@ -739,7 +791,7 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
         // up-to-date target.
         let _ = std::fs::remove_file(&out);
         let t = Instant::now();
-        link_once(args, &inputs, linker, &out)?;
+        link_once(args, target, &inputs, linker, &out)?;
         samples.push(t.elapsed());
     }
     samples.sort();
@@ -751,6 +803,7 @@ fn time_link(args: &Args, dir: &Path, objects: &[PathBuf], linker: &str) -> Resu
 /// explicitly so the corpus can carry its own toolchain, independent of `--cc`.
 fn link_once_replay(
     cc: &str,
+    target: CompilerTarget,
     inputs: &PreparedLinkInputs<'_>,
     linker: &str,
     out: &Path,
@@ -758,7 +811,7 @@ fn link_once_replay(
     let mut cmd = Command::new(cc);
     add_prepared_link_inputs(&mut cmd, inputs);
     cmd.arg("-o").arg(out);
-    select_compiler_driver_linker(&mut cmd, linker)?;
+    select_compiler_driver_linker(&mut cmd, linker, target.is_windows())?;
     let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -772,8 +825,10 @@ fn link_once_replay(
 
 /// Warmup + timed median link of a frozen corpus. Compilation never happens here — the objects
 /// are already on disk — so this measures only the link step.
+#[allow(clippy::too_many_arguments)]
 fn time_link_replay(
     cc: &str,
+    target: CompilerTarget,
     objects: &[PathBuf],
     extra: &[String],
     linker: &str,
@@ -782,15 +837,21 @@ fn time_link_replay(
     trials: usize,
 ) -> Result<Duration> {
     let out = bench_output_path(out_dir, linker);
-    let inputs = prepare_link_inputs(objects, extra, &out.with_extension("rsp"), cc)?;
+    let inputs = prepare_link_inputs(
+        objects,
+        extra,
+        &out.with_extension("rsp"),
+        cc,
+        target.is_windows(),
+    )?;
     for _ in 0..warmup {
-        link_once_replay(cc, &inputs, linker, &out)?;
+        link_once_replay(cc, target, &inputs, linker, &out)?;
     }
     let mut samples = Vec::with_capacity(trials);
     for _ in 0..trials {
         let _ = std::fs::remove_file(&out);
         let t = Instant::now();
-        link_once_replay(cc, &inputs, linker, &out)?;
+        link_once_replay(cc, target, &inputs, linker, &out)?;
         samples.push(t.elapsed());
     }
     samples.sort();
@@ -820,21 +881,29 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join("reld-bench-replay"));
     std::fs::create_dir_all(&root)?;
+    let target = CompilerTarget::detect(&cc)?;
+    let platform = BenchPlatform::for_compiler(&cc, target)?;
 
     let requested: Vec<String> = if args.linkers.is_empty() {
-        default_linkers().into_iter().map(String::from).collect()
+        default_linkers(platform)
+            .into_iter()
+            .map(String::from)
+            .collect()
     } else {
         args.linkers.clone()
     };
     let mut available = Vec::new();
     for l in &requested {
-        available.push((l.clone(), probe_linker(&cc, l, &root).unwrap_or(false)));
+        available.push((
+            l.clone(),
+            probe_linker(&cc, target, l, &root).unwrap_or(false),
+        ));
     }
 
     let reld_shim = discover_reld(&args.reld).and_then(|p| std::fs::canonicalize(&p).ok());
     let reld_shim_str = reld_shim.as_ref().map(|p| p.to_string_lossy().into_owned());
     let reld_ok = match &reld_shim_str {
-        Some(linker) => probe_linker(&cc, linker, &root).unwrap_or(false),
+        Some(linker) => probe_linker(&cc, target, linker, &root).unwrap_or(false),
         None => false,
     };
     let reld_measured = reld_shim_str.is_some() && reld_ok;
@@ -844,16 +913,16 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
         args.reld_pending.clone()
     };
 
-    let target = args.target.clone().unwrap_or_else(target_triple);
+    let heading = args.target.clone().unwrap_or_else(target_triple);
     let scenario = corpus
         .configuration
         .clone()
         .unwrap_or_else(|| "corpus".to_string());
-    println!("## Link Benchmark: {target}");
+    println!("## Link Benchmark: {heading}");
     println!();
     print!("| Scenario |");
     for (l, _) in &available {
-        print!(" {} |", display_linker(l));
+        print!(" {} |", display_linker(l, platform));
     }
     println!(" reld |");
     print!("|:---------|");
@@ -871,6 +940,7 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
         }
         match time_link_replay(
             &cc,
+            target,
             &objects,
             &corpus.extra_link_args,
             linker,
@@ -895,6 +965,7 @@ fn run_replay(args: &Args, corpus_dir: &Path) -> Result<()> {
             .expect("measured implies a shim path");
         match time_link_replay(
             &cc,
+            target,
             &objects,
             &corpus.extra_link_args,
             linker,
@@ -998,11 +1069,11 @@ mod tests {
 
     #[test]
     fn windows_absolute_custom_linker_uses_basename_and_parent_path() {
-        let absolute = if cfg!(windows) {
-            r"C:\bench tools\reld-link.exe"
-        } else {
-            "/bench tools/reld-link.exe"
-        };
+        let absolute = std::env::temp_dir()
+            .join("bench tools")
+            .join("reld-link.exe");
+        assert!(absolute.is_absolute(), "{}", absolute.display());
+        let absolute = absolute.to_str().unwrap();
         let (value, search_dir) = compiler_driver_linker(absolute, true).unwrap();
         assert_eq!(value, "reld-link.exe");
         assert_eq!(search_dir.unwrap(), Path::new(absolute).parent().unwrap());
@@ -1014,6 +1085,28 @@ mod tests {
         let (value, search_dir) = compiler_driver_linker(absolute, false).unwrap();
         assert_eq!(value, absolute);
         assert!(search_dir.is_none());
+    }
+
+    #[test]
+    fn default_linkers_follow_compiler_target() {
+        let platform = |target| BenchPlatform::for_compiler("cc", target).unwrap();
+        assert_eq!(
+            default_linkers(platform(CompilerTarget::Windows)),
+            vec!["", "lld"]
+        );
+        assert_eq!(
+            default_linkers(platform(CompilerTarget::Apple)),
+            vec!["", "ld64.lld"]
+        );
+        assert_eq!(
+            default_linkers(platform(CompilerTarget::Linux)),
+            vec!["bfd", "lld", "mold", "wild"]
+        );
+        assert_eq!(display_linker("", BenchPlatform::Windows), "link.exe");
+        assert_eq!(display_linker("", BenchPlatform::Apple), "ld");
+        assert_eq!(display_linker("", BenchPlatform::Linux), "default");
+        assert_eq!(display_linker("lld", BenchPlatform::Windows), "lld");
+        assert!(BenchPlatform::for_compiler("cc", CompilerTarget::Other).is_err());
     }
 
     #[test]
@@ -1097,12 +1190,13 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn response_file_path_argument_rejects_non_utf8_paths() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'o', b'.', 0xFF]));
+        // SAFETY: `ED A0 80` is the WTF-8 encoding of the unpaired surrogate U+D800, so these
+        // bytes are valid encoded bytes on Windows; on every other host an `OsString` may hold
+        // arbitrary bytes. The sequence is never valid UTF-8, which is what this test needs.
+        let name = unsafe { OsString::from_encoded_bytes_unchecked(b"o.\xED\xA0\x80".to_vec()) };
+        let path = PathBuf::from(name);
         let error = response_file_path_argument(&path).unwrap_err().to_string();
         assert!(error.contains("non-UTF-8"), "{error}");
     }
@@ -1122,12 +1216,8 @@ mod tests {
         dir
     }
 
-    fn shim_name() -> &'static str {
-        if cfg!(windows) {
-            "ld.reld.exe"
-        } else {
-            "ld.reld"
-        }
+    fn shim_name() -> String {
+        format!("ld.reld{EXE_SUFFIX}")
     }
 
     #[test]
@@ -1300,25 +1390,27 @@ mod tests {
         ];
         let extra = vec!["-lcustom library".to_string()];
         let response_file = dir.join("bench.rsp");
-        let prepared = prepare_link_inputs(&objects, &extra, &response_file, "clang.exe").unwrap();
 
-        if cfg!(windows) {
-            assert_eq!(
-                std::fs::read_to_string(&response_file).unwrap(),
-                compiler_driver_response_file_contents(
-                    &[
-                        objects[0].to_string_lossy().into_owned(),
-                        objects[1].to_string_lossy().into_owned(),
-                        extra[0].clone(),
-                    ],
-                    ResponseFileSyntax::Gnu,
-                )
-            );
-            assert!(matches!(&prepared, PreparedLinkInputs::ResponseFile(_)));
-        } else {
-            assert!(matches!(&prepared, PreparedLinkInputs::Direct { .. }));
-            assert!(!response_file.exists());
-        }
+        let direct =
+            prepare_link_inputs(&objects, &extra, &response_file, "clang.exe", false).unwrap();
+        assert!(matches!(&direct, PreparedLinkInputs::Direct { .. }));
+        assert!(!response_file.exists());
+        drop(direct);
+
+        let prepared =
+            prepare_link_inputs(&objects, &extra, &response_file, "clang.exe", true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&response_file).unwrap(),
+            compiler_driver_response_file_contents(
+                &[
+                    objects[0].to_string_lossy().into_owned(),
+                    objects[1].to_string_lossy().into_owned(),
+                    extra[0].clone(),
+                ],
+                ResponseFileSyntax::Gnu,
+            )
+        );
+        assert!(matches!(&prepared, PreparedLinkInputs::ResponseFile(_)));
 
         drop(prepared);
         let _ = std::fs::remove_dir_all(&dir);

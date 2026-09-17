@@ -63,6 +63,62 @@ jobs:
       - run: $CARGO_COMMAND clippy --workspace --all-targets -- -D warnings
       - run: $CARGO_COMMAND deny check licenses
 
+  # Host-platform boundary (reld#137): host cfg and native OS APIs live only in the
+  # `platforms/mod.rs` selector and the `platforms/platform_<tree>` concrete trees. The lint scans
+  # every physical source file pre-expansion, so code cfg'd away on this Linux host is still
+  # checked and one host suffices. Whole files reached through a feature-gated `mod`/`path`
+  # (e.g. `linker_plugins_disabled.rs`) are only loaded when that feature state is active, hence
+  # the default and `--no-default-features` passes.
+  dylint:
+    name: Dylint host-platform boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DYLINT_DIR: dylints/ban_platform_cfg_outside_boundary
+      DYLINT_VERSION: 6.0.3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Install Dylint nightly toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "${DYLINT_DIR}/rust-toolchain.toml")"
+          test -n "${channel}"
+          rustup toolchain install "${channel}" \
+            --profile minimal \
+            --component rustc-dev \
+            --component llvm-tools-preview \
+            --component rust-src \
+            --component rustfmt
+
+      - name: Install cargo-dylint and dylint-link
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo install cargo-dylint --version "${DYLINT_VERSION}" --locked
+          cargo install dylint-link --version "${DYLINT_VERSION}" --locked
+
+      - name: Check lint formatting
+        shell: bash
+        working-directory: ${{ env.DYLINT_DIR }}
+        run: cargo fmt --check
+
+      - name: Test lint (unit + UI)
+        shell: bash
+        working-directory: ${{ env.DYLINT_DIR }}
+        run: cargo test
+
+      - name: Lint workspace (default features)
+        shell: bash
+        run: cargo dylint --path "${DYLINT_DIR}" --workspace -- --all-targets
+
+      - name: Lint workspace (no default features)
+        shell: bash
+        run: cargo dylint --path "${DYLINT_DIR}" --workspace -- --all-targets --no-default-features
+
   phase1-native:
     name: Phase 1 / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}

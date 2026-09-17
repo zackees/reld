@@ -337,6 +337,11 @@ use reld_core::ensure;
 use reld_core::error;
 use reld_core::error::Context as _;
 use reld_core::error::Error;
+use reld_core::platforms::fs::create_symlink;
+use reld_core::platforms::host;
+use reld_core::platforms::host::HostLibc;
+use reld_core::platforms::host::HostOs;
+use reld_core::platforms::linker_plugin;
 use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Cow;
@@ -420,7 +425,7 @@ fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter) -> Result {
 
     for platform in [PlatformKind::Elf, PlatformKind::MachO] {
         // Right now, the Mach-O provided Clang and the ld linker do not support the ELF format.
-        if platform == PlatformKind::Elf && !cfg!(target_os = "linux") {
+        if platform == PlatformKind::Elf && host::os() != HostOs::Linux {
             continue;
         }
 
@@ -863,7 +868,7 @@ impl Architecture {
     fn default_target_triple(&self, platform: PlatformKind) -> String {
         match platform {
             PlatformKind::Elf => {
-                if cfg!(target_os = "freebsd") {
+                if host::os() == HostOs::FreeBsd {
                     format!("{}-unknown-freebsd", self.triple_arch())
                 } else {
                     format!("{}-unknown-linux-gnu", self.triple_arch())
@@ -1394,7 +1399,7 @@ int main(void) {
 impl Config {
     fn should_skip(&self, arch: Architecture) -> bool {
         !self.support_architectures.contains(&arch)
-            || self.requires_glibc && !cfg!(target_env = "gnu")
+            || self.requires_glibc && host::libc() != HostLibc::Gnu
             || (arch != get_host_architecture()
                 && self.platform == PlatformKind::Elf
                 && (self.compiler == "clang" || !self.cross_enabled))
@@ -1408,7 +1413,8 @@ impl Config {
                 get_glibc_version().is_some_and(|current_version| req_version > current_version)
             })
             || (self.requires_sframe_backtrace && !is_sframe_backtrace_supported(arch))
-            || (self.requires_linker_plugin && !cfg!(all(feature = "plugins", unix)))
+            || (self.requires_linker_plugin
+                && !(cfg!(feature = "plugins") && linker_plugin::SUPPORTED))
     }
 
     fn is_linker_enabled(&self, linker: &Linker) -> bool {
@@ -2777,7 +2783,7 @@ fn spawn_with_retry(command: &mut Command, timeout: Duration) -> Result<std::pro
                 let retryable = error.kind() == ErrorKind::ExecutableFileBusy
                     // Win32 ERROR_SHARING_VIOLATION: the loader can briefly retain the freshly
                     // written .exe just as Linux can return ETXTBSY.
-                    || (cfg!(windows) && error.raw_os_error() == Some(32));
+                    || (host::os() == HostOs::Windows && error.raw_os_error() == Some(32));
                 if start.elapsed() >= timeout || !retryable {
                     return Err(error.into());
                 }
@@ -6127,16 +6133,6 @@ fn setup_reld_ld_symlink() -> Result {
     Ok(())
 }
 
-#[cfg(unix)]
-fn create_symlink(target: &Path, dest_path: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, dest_path)
-}
-
-#[cfg(windows)]
-fn create_symlink(target: &Path, dest_path: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(target, dest_path)
-}
-
 fn find_bin(names: &[&str]) -> Result<PathBuf> {
     names
         .iter()
@@ -6529,7 +6525,7 @@ fn run_integration_test(
         ));
     }
 
-    if cfg!(target_os = "freebsd")
+    if host::os() == HostOs::FreeBsd
         && matches!(
             config.linker_driver,
             LinkerDriver::Compiler(Compiler::Gcc(..))
@@ -6655,7 +6651,7 @@ fn verify_linker_plugin_requirements(
     cross_arch: Option<Architecture>,
     src: &Path,
 ) -> Result {
-    if !cfg!(all(feature = "plugins", unix)) {
+    if !(cfg!(feature = "plugins") && linker_plugin::SUPPORTED) {
         bail!("The `plugins` feature is disabled");
     }
 
@@ -6816,12 +6812,10 @@ fn read_test_config() -> Result<TestConfig> {
 
 impl PlatformKind {
     fn host() -> Option<Self> {
-        if cfg!(target_os = "linux") {
-            Some(PlatformKind::Elf)
-        } else if cfg!(target_os = "macos") {
-            Some(PlatformKind::MachO)
-        } else {
-            None
+        match host::os() {
+            HostOs::Linux => Some(PlatformKind::Elf),
+            HostOs::MacOs => Some(PlatformKind::MachO),
+            _ => None,
         }
     }
 

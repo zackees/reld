@@ -17,6 +17,8 @@ use crate::value_flags::PerSymbolFlags;
 use rayon::Scope;
 use std::marker::PhantomData;
 
+pub(crate) const ENABLED: bool = false;
+
 pub(crate) struct LoadedPlugin {}
 
 pub(crate) struct LinkerPlugin<'data> {

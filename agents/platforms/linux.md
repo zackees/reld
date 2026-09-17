@@ -48,6 +48,10 @@ Every produced executable must also run natively with exact exit status, stdout,
 the randomized `reld-difftest` execution comparison as a supplemental oracle; it does not replace
 artifact comparison.
 
+Linux-only mechanics (`nix`, `libc`, `std::os::unix`, `target_os = "linux"`) go in
+`crates/reld-core/src/platforms/platform_linux` or the shared `platform_unix` tree; the
+`dylint` CI job ([`../../dylints/README.md`](../../dylints/README.md)) rejects them elsewhere.
+
 ### Immutable Clang final-link corpus
 
 The long-form Linux workload is a captured LLVM/Clang final link, separate from the published
