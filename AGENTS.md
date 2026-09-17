@@ -87,3 +87,32 @@ enable in passing.
 
 `ci/tests/test_crate_layout.py` pins both the member list and `publish = false`, so a new crate
 cannot arrive without a reviewed change that says so.
+
+## Test layout
+
+The number of test files and test targets is itself a budget, for the same reason the crate
+count is: every `[[test]]` target is a separate link, every new `ci/tests/test_*.py` is another
+place a future reader has to look, and a suite nobody can hold in their head stops being read
+and starts being skipped.
+
+Put a new case in the file that already covers its subject. A new file is warranted when the
+subject genuinely has no home, not when the existing file is long. Before adding a new
+`[[test]]` target in a `Cargo.toml` or a new top-level suite, ask the developer in the issue that
+motivates it and say which existing target you considered and why it does not fit.
+
+A test earns its place by pinning a property that can actually regress:
+
+1. It can fail. If no plausible change makes it red, it is documentation written in an expensive
+   format — delete it or turn it into a comment.
+2. It states the property, not the implementation. Asserting that a generator's output matches
+   the generator is a tautology: both sides move together and the test passes through the
+   regression it was meant to catch.
+3. It fails with the cause, not just the fact. Name the target, the offset, the flag — whatever
+   the next person needs in order to start.
+4. It is not a near-duplicate of its neighbours. Three cases that differ only in a constant are
+   one table-driven case.
+5. Its cost matches its evidence. A gate that takes gigabytes or minutes runs on a schedule and
+   keeps its own logic unit tested per PR, rather than slowing every push.
+
+Deleting a test that no longer pins anything is maintenance, not a gap. Say so in the PR, and
+name what still covers the property if anything does.
