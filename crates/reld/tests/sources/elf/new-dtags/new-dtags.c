@@ -30,7 +30,6 @@
 //#ExpectDynamic:DT_FLAGS_1
 //#NoDynamic:DT_RUNPATH
 //#NoDynamic:DT_FLAGS
-//#DiffIgnore:.dynamic.DT_FLAGS_1.NOW #13
 //#DiffIgnore:.dynamic.DT_RPATH #13
 
 int foo(void);
