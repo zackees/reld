@@ -88,6 +88,10 @@ pub struct ElfArgs {
     /// Symbol definitions from `--defsym` options. Each entry is (symbol_name, value_or_symbol).
     pub(crate) defsym: Vec<(String, String)>,
 
+    /// The base address of the output image, from `--image-base`. `None` keeps the
+    /// architecture's default.
+    pub(crate) image_base: Option<u64>,
+
     /// Section start addresses from `--section-start` options. Maps section name to address.
     pub(crate) section_start: HashMap<Vec<u8>, u64>,
 
@@ -341,6 +345,7 @@ impl Default for ElfArgs {
             export_list: Vec::new(),
             export_list_path: None,
             defsym: Vec::new(),
+            image_base: None,
             section_start: HashMap::new(),
             ttext: None,
             tdata: None,
@@ -1615,6 +1620,18 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
 
     parser
         .declare_with_param()
+        .long("image-base")
+        .help("Set the base address of the output image")
+        .execute(|args, _modifier_stack, value| {
+            args.image_base = Some(
+                parse_number(value)
+                    .with_context(|| format!("Invalid address `{value}` in --image-base"))?,
+            );
+            Ok(())
+        });
+
+    parser
+        .declare_with_param()
         .long("section-start")
         .help("Set start address for a section: --section-start=.section=address")
         .execute(|args, _modifier_stack, value| {
@@ -2071,6 +2088,10 @@ impl platform::Args for ElfArgs {
 
     fn rosegment(&self) -> bool {
         self.rosegment
+    }
+
+    fn image_base(&self) -> Option<u64> {
+        self.image_base
     }
 
     fn common(&self) -> &crate::args::CommonArgs {
@@ -2675,6 +2696,27 @@ mod tests {
             parse_args(["--library=:libfoo.a"]).common().inputs[0].spec,
             InputSpec::Search(_)
         ));
+    }
+
+    #[test]
+    fn image_base_overrides_the_architecture_default() {
+        // None means "leave the architecture's default", which is what every link that does not
+        // pass the flag must keep getting.
+        assert_eq!(parse_args([]).image_base, None);
+        assert_eq!(
+            parse_args(["--image-base=0x8000000"]).image_base,
+            Some(0x800_0000)
+        );
+        assert_eq!(
+            parse_args(["--image-base", "0x8000000"]).image_base,
+            Some(0x800_0000)
+        );
+        // A kernel-style high base must survive as an unsigned 64-bit value.
+        assert_eq!(
+            parse_args(["--image-base=0xffffffff80000000"]).image_base,
+            Some(0xffff_ffff_8000_0000)
+        );
+        parse_args_err(["--image-base=not-a-number"]);
     }
 
     #[test]
