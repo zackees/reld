@@ -2,6 +2,8 @@
 name = "reld-trace"
 description = "Data structures for storing trace outputs from the Reld linker"
 version.workspace = true
+# Nothing here is published: reld ships as binaries (reld#148). See reld#152.
+publish = false
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
