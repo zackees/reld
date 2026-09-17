@@ -2,6 +2,8 @@
 name = "reld-diff"
 description = "Diffs and validates ELF binaries"
 version.workspace = true
+# Nothing here is published: reld ships as binaries (reld#148). See reld#152.
+publish = false
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true

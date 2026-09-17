@@ -54,3 +54,36 @@ When a dependency check fails, preserve this actionable guidance in its diagnost
 > dependency, or obtain developer approval and update the baseline in the same reviewed change.
 
 Automated enforcement is tracked by [issue #88](https://github.com/zackees/reld/issues/88).
+
+## Crate layout
+
+The workspace is a fixed set of crates, like the dependency graph above. Add a module, not a
+crate. `reld-core` being large is not a reason to split it: it is one program, and the crate
+boundary is not what its compile time is made of.
+
+A new workspace member needs explicit developer approval, requested in the issue that motivates
+it, before the work starts. State which of these it meets, all of which must hold:
+
+1. More than one crate depends on it, or something outside this repository consumes it. A single
+   consumer is a module.
+2. It removes a dependency edge that would otherwise be wrong, e.g. two crates needing shared
+   types without depending on each other. `reld-reloc`, `reld-layout-schema` and `reld-trace`
+   exist for exactly this.
+3. Its public surface is narrow and stable enough to describe in a sentence.
+4. It creates no cycle and no diamond that forces a lockstep bump across the workspace.
+5. It is not test-only scaffolding, unless several test targets share it, in which case it is
+   `publish = false` like `reld-testkit`.
+
+A long file, a feeling that something is its own concern, an unmeasured hope of faster
+incremental builds, and mirroring another project's layout are all insufficient on their own.
+Never work around a missing crate by duplicating code across crates: say the boundary hurts and
+ask.
+
+Every crate is `publish = false`. reld ships as per-platform binaries from GitHub Releases
+([#148](https://github.com/zackees/reld/issues/148)), and none of these crates is optional
+functionality for an outside consumer. Publishing to crates.io is a product decision for the
+owner, tracked in [issue #152](https://github.com/zackees/reld/issues/152), not something to
+enable in passing.
+
+`ci/tests/test_crate_layout.py` pins both the member list and `publish = false`, so a new crate
+cannot arrive without a reviewed change that says so.
