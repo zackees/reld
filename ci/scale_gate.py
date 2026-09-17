@@ -6,8 +6,8 @@ pay for it: the inputs alone are gigabytes. So this runs on a schedule, from
 `.github/workflows/scale-gate-linux.yml`.
 
 The payload is assembly rather than C: `.fill` emits real bytes into `.rodata` without asking a
-compiler to chew through a multi-gigabyte initializer, and each chunk is referenced from `main`
-so nothing is free to drop it.
+compiler to chew through a multi-gigabyte initializer, and every chunk is referenced from the
+entry point so nothing is free to drop it.
 
 Structural validation is done here rather than by shelling out to `readelf`, both so a truncated
 or overflowed output is reported as the specific field that is wrong and so the checks are
@@ -20,7 +20,6 @@ import argparse
 import json
 import os
 import platform
-import resource
 import shutil
 import struct
 import subprocess
@@ -161,16 +160,43 @@ def build_inputs(workdir: Path, chunk_count: int, chunk_bytes: int, cc: str) -> 
     return [driver_obj, *objects]
 
 
+def run_measured(command: list[str], workdir: Path) -> tuple[subprocess.CompletedProcess[str], float, int]:
+    """Run a command and return its result, wall seconds, and *its own* peak RSS.
+
+    `getrusage(RUSAGE_CHILDREN)` would not do: it is a high-water mark across every child this
+    process has ever reaped, so after assembling dozens of 64 MiB objects it reports whichever of
+    them peaked highest, not the link. `os.wait4` gives the rusage of one specific child, which is
+    the number reld#16 asks to record.
+    """
+    out_path = workdir / "link.stdout"
+    err_path = workdir / "link.stderr"
+    started = time.monotonic()
+    with out_path.open("wb") as out, err_path.open("wb") as err:
+        process = subprocess.Popen(command, stdout=out, stderr=err)
+        _, status, usage = os.wait4(process.pid, 0)
+    elapsed = time.monotonic() - started
+    # Popen must not try to reap a child that no longer exists.
+    process.returncode = os.waitstatus_to_exitcode(status)
+
+    result = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        out_path.read_text(encoding="utf-8", errors="replace"),
+        err_path.read_text(encoding="utf-8", errors="replace"),
+    )
+    out_path.unlink()
+    err_path.unlink()
+    # ru_maxrss is KiB on Linux.
+    return result, elapsed, usage.ru_maxrss * 1024
+
+
 def link(reld: Path, cc: str, objects: list[Path], output: Path) -> tuple[float, int]:
     """Link through the driver with `--ld-path`, and return wall seconds and peak RSS.
 
     reld is a pure linker, so it is always driven by the compiler driver rather than invoked with
-    `-C linker=`. Peak RSS comes from `getrusage(RUSAGE_CHILDREN)`, which needs no external
-    `time` binary and is not perturbed by the shell.
+    `-C linker=`.
     """
-    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    started = time.monotonic()
-    result = subprocess.run(
+    result, elapsed, peak_rss = run_measured(
         [
             cc,
             f"--ld-path={reld}",
@@ -181,12 +207,8 @@ def link(reld: Path, cc: str, objects: list[Path], output: Path) -> tuple[float,
             "-static",
             "-no-pie",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        output.parent,
     )
-    elapsed = time.monotonic() - started
-    after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 
     combined = f"{result.stdout}\n{result.stderr}"
     if "panicked at" in combined or "RUST_BACKTRACE" in combined:
@@ -196,10 +218,7 @@ def link(reld: Path, cc: str, objects: list[Path], output: Path) -> tuple[float,
     if not output.exists():
         raise ScaleGateError("link reported success but wrote no output")
 
-    # ru_maxrss is KiB on Linux. It is a high-water mark across all children, so take the delta
-    # only as a floor: a smaller `after` means an earlier child peaked higher.
-    peak_kib = max(after, before)
-    return elapsed, peak_kib * 1024
+    return elapsed, peak_rss
 
 
 @dataclass
