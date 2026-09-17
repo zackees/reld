@@ -10,6 +10,7 @@ pub use bridge::run_bridge;
 pub use bridge::select_route;
 pub(crate) mod compression;
 pub(crate) mod debug_trace;
+pub mod diagnostic;
 pub(crate) mod diagnostics;
 pub(crate) mod diff;
 pub(crate) mod dwarf_address_info;

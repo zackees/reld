@@ -131,6 +131,10 @@ impl Args {
         S: AsRef<str>,
         I: Iterator<Item = S>,
     {
+        // Apply any color flag before the first diagnostic can be raised, so even an argument
+        // error is colored as asked.
+        crate::diagnostic::apply_color_flags_from_argv(input());
+
         let mut input = input();
 
         let prog_name = input.next().context("Missing argument 0 (program name)")?;

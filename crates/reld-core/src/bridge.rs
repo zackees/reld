@@ -1118,9 +1118,9 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
         // crashed bridge (ld.lld, lld-link, ld64.lld) is diagnosable rather than collapsing to a
         // bare exit 1 (reld#123 D6).
         if let Some(signal) = crate::platforms::process::exit_signal(&status) {
-            eprintln!(
-                "reld: {} bridge terminated by signal {}",
-                engine.name, signal
+            crate::diagnostic::emit(
+                crate::diagnostic::Severity::Error,
+                &format_args!("{} bridge terminated by signal {signal}", engine.name),
             );
             std::process::exit(128 + signal);
         }

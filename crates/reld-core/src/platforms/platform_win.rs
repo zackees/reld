@@ -214,3 +214,51 @@ pub mod process {
         }
     }
 }
+
+pub mod term {
+    use crate::platforms::term::StderrTerminal;
+    use std::io::IsTerminal as _;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+    use windows_sys::Win32::System::Console::GetStdHandle;
+    use windows_sys::Win32::System::Console::STD_ERROR_HANDLE;
+    use windows_sys::Win32::System::Console::SetConsoleMode;
+
+    /// Reports whether stderr renders ANSI, switching virtual-terminal processing on first if
+    /// this is a console that supports it.
+    ///
+    /// Three cases matter here. A Windows console needs `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+    /// before it renders escape sequences, and a console too old to accept that flag must be
+    /// reported as plain so reld never writes raw escapes to it. An MSYS2/Cygwin/mintty terminal
+    /// is a named pipe rather than a console, so `GetConsoleMode` fails on it even though it
+    /// renders ANSI itself. Everything else is a file or a pipe.
+    #[must_use]
+    pub fn prepare_stderr_for_ansi() -> StderrTerminal {
+        if !std::io::stderr().is_terminal() {
+            return StderrTerminal::NotATerminal;
+        }
+
+        // SAFETY: each call takes a handle owned by the process and, for `GetConsoleMode`, a
+        // pointer to a live local that outlives the call.
+        unsafe {
+            let handle = GetStdHandle(STD_ERROR_HANDLE);
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return StderrTerminal::NotATerminal;
+            }
+
+            let mut mode = 0;
+            if GetConsoleMode(handle, &raw mut mode) == 0 {
+                // A terminal that is not a console: an MSYS2/Cygwin/mintty pty.
+                return StderrTerminal::Ansi;
+            }
+            if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+                return StderrTerminal::Ansi;
+            }
+            if SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) == 0 {
+                return StderrTerminal::NotATerminal;
+            }
+            StderrTerminal::Ansi
+        }
+    }
+}

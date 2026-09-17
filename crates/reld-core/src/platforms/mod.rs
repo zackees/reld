@@ -16,6 +16,7 @@ pub mod host;
 pub mod linker_plugin;
 pub mod path;
 pub mod process;
+pub mod term;
 
 cfg_select! {
     windows => {

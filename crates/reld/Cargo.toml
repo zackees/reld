@@ -34,6 +34,10 @@ name = "external-runner"
 path = "tests/external_runner.rs"
 
 [[test]]
+name = "color-diagnostics"
+path = "tests/color_diagnostics.rs"
+
+[[test]]
 name = "acceptance-policy"
 path = "tests/acceptance_policy_tests.rs"
 

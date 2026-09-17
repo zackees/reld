@@ -1102,13 +1102,13 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .long("color-diagnostics")
         .help("Control diagnostic color output (always, never, or auto)")
         .execute(|_args, _modifier_stack, value| {
-            match value {
-                Some("always") => colored::control::set_override(true),
-                Some("never") => colored::control::set_override(false),
-                Some("auto") => colored::control::unset_override(),
-                Some(other) => bail!("--color-diagnostics: invalid value `{other}`"),
-                None => colored::control::set_override(true),
-            }
+            let Some(choice) = crate::diagnostic::color_choice_from_value(value) else {
+                bail!(
+                    "--color-diagnostics: invalid value `{}`",
+                    value.unwrap_or_default()
+                );
+            };
+            crate::diagnostic::set_color_choice(choice);
             Ok(())
         });
 
@@ -1117,7 +1117,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .long("no-color-diagnostics")
         .help("Disable diagnostic color output")
         .execute(|_args, _modifier_stack| {
-            colored::control::set_override(false);
+            crate::diagnostic::set_color_choice(crate::diagnostic::ColorChoice::Never);
             Ok(())
         });
 

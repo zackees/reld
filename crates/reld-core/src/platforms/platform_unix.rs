@@ -196,3 +196,18 @@ pub mod process {
         }
     }
 }
+
+pub mod term {
+    use crate::platforms::term::StderrTerminal;
+    use std::io::IsTerminal as _;
+
+    /// Reports whether stderr renders ANSI. Terminals here need no preparation.
+    #[must_use]
+    pub fn prepare_stderr_for_ansi() -> StderrTerminal {
+        if std::io::stderr().is_terminal() {
+            StderrTerminal::Ansi
+        } else {
+            StderrTerminal::NotATerminal
+        }
+    }
+}

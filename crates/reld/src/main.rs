@@ -26,9 +26,9 @@ impl Drop for DhatGuard {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("dhat-heap.json"));
         if let Err(error) = mimalloc_pprof::dhat::dump_file(&output) {
-            eprintln!(
-                "reld: failed to write DHAT profile {}: {error}",
-                output.display()
+            reld_core::diagnostic::emit(
+                reld_core::diagnostic::Severity::Warning,
+                &format_args!("failed to write DHAT profile {}: {error}", output.display()),
             );
         }
     }
