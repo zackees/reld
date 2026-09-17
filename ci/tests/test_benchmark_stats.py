@@ -20,6 +20,7 @@ from ci.benchmark_stats import (  # noqa: E402
     EXPECTED_SERIES,
     check_readme_block,
     collect_metadata,
+    main as benchmark_stats_main,
     parse_benchmark_log,
     read_metadata,
     render_readme_block,
@@ -412,3 +413,12 @@ def test_html_marks_pending_distinctly():
     html = render_html(report, collect_metadata(report))
     assert 'class="pending">pending<' in html
     assert "n/a" not in html  # every reld cell is pending here, no failed cells
+
+
+def test_print_targets_reports_the_manifest(capsys):
+    # The aggregation pipeline reads BENCHMARK_TARGETS directly, so this flag is now purely a
+    # diagnostic. It stays because a shell caller asking "which targets" should not have to
+    # import Python, but it has to keep answering correctly.
+    assert benchmark_stats_main(["--print-targets"]) == 0
+    printed = capsys.readouterr().out.split()
+    assert printed == [target for target, _ in BENCHMARK_TARGETS]
