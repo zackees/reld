@@ -125,6 +125,58 @@ MinGW work (`docs/plan/07-PHASE-5-WINGNU.md`), and the no-gaps gate (reld#123) r
 bundled `ld.lld -m i386pep` engine in Phase 3. Windows MSVC remains the advertised, consumer-tested
 Windows route until then.
 
+## Installing
+
+Versioned, per-platform binaries are published on the
+[GitHub Releases page](https://github.com/zackees/reld/releases) by
+[`release.yml`](.github/workflows/release.yml) whenever a `vX.Y.Z` tag is pushed to `main`.
+`releases/latest` always resolves to the newest binary release — benchmark/corpus evidence
+releases (`linux-linker-competition-*`, `linux-linker-comparators-*`, `clang-link-corpus-*`) are
+kept as separate, non-`latest` prereleases so they can never be mistaken for a binary release.
+
+### Asset contract
+
+This layout is depended on by downstream tooling (see
+[soldr#3276](https://github.com/zackees/soldr/issues/3276)) and is kept stable across releases:
+
+- **Asset name:** `reld-vX.Y.Z-<target-triple>.<tar.gz|zip>` (`.zip` on Windows, `.tar.gz`
+  elsewhere).
+- **Archive layout:** a single top-level `reld-vX.Y.Z-<triple>/` directory containing
+  `reld[.exe]`, `reld-link[.exe]`, `LICENSE-MIT`, `LICENSE-APACHE`, and `NOTICE`.
+- **Checksums:** every release also carries a `SHA256SUMS` asset with one
+  `<sha256>  <asset-name>` line per archive.
+- **Target triples:** `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `x86_64-unknown-linux-musl`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`,
+  `x86_64-apple-darwin`, `aarch64-apple-darwin`.
+- **Production build:** system allocator, no `mimalloc-pprof` feature (see #97).
+
+### `reld --version` and the lld bridge
+
+On Linux, `reld --version` runs reld's own native ELF path and prints `Reld X.Y.Z (compatible
+with GNU linkers)`, where `X.Y.Z` is the release tag's version and changes on every release. On
+Windows and macOS, every invocation of `reld` — including `--version` — is delegated whole to the
+`lld` bridge (see "Bridge status" below), so `--version` there reports the bridged `lld-link` /
+`ld64.lld` version rather than reld's own. This is a known, deliberate consequence of the
+bridge architecture (see [DESIGN.md](DESIGN.md) and [issue #17](https://github.com/zackees/reld/issues/17)),
+not a bug in the release process; the release archive name and `SHA256SUMS` entry are the
+authoritative version identifiers on those platforms.
+
+### Bridge dependency
+
+The Windows and macOS bridge resolves the concrete linker to delegate to in this order:
+
+1. **`RELD_BRIDGE_LINKER`** environment variable, if set — used verbatim, and it is an error if
+   the path doesn't exist.
+2. **`rust-lld`** next to the active Rust toolchain, found via `rustc --print sysroot`. This is
+   the normal case for a `rustup`-managed toolchain and requires `rustc` to be on `PATH`.
+3. The engine's concrete linker driver (`lld-link` / `ld64.lld`) under that same toolchain's
+   `gcc-ld` directory, then on `PATH`.
+4. Otherwise, reld exits with an error naming `RELD_BRIDGE_LINKER` and what to install.
+
+A downloaded release binary used outside a Rust/rustup install (step 1 or 3 above) works
+predictably; without either, reld fails fast with a message naming exactly what's missing rather
+than silently misbehaving.
+
 ## Polylinker: runs everywhere, supports everything, by routing
 
 `reld` bundles more than one real linker per platform — today, its own native engine (Linux/ELF)

@@ -1,0 +1,398 @@
+name: Release
+
+# reld#148: publish versioned, per-platform reld binaries + SHA256SUMS on GitHub
+# Releases so downstream tools (soldr, see soldr#3276) can fetch a pinned,
+# checksum-verified linker instead of requiring reld to already be on PATH.
+#
+# Triggered by a `vX.Y.Z` tag pushed to the repo. `workflow_dispatch` reruns the
+# same pipeline without publishing (dry-run by default) so the build/package/
+# smoke path can be validated before a real tag is pushed.
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.1.0. Leave empty to use the current workspace version."
+        required: false
+        type: string
+      dry-run:
+        description: "Build, smoke-test, and package every target without publishing to GitHub Releases."
+        required: false
+        default: true
+        type: boolean
+
+# Never cancelled and never coalesced: a release run either finishes or fails
+# outright, it never loses to a superseding push the way PR CI does.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version, tag, and dry-run mode
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs['dry-run'] }}
+        run: |
+          set -euo pipefail
+
+          VERSION="$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          print(tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']['version'])
+          ")"
+
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+            CHECKOUT_REF="$TAG"
+            DRY_RUN="false"
+          else
+            TAG="${INPUT_TAG:-v$VERSION}"
+            DRY_RUN="${INPUT_DRY_RUN:-true}"
+            CHECKOUT_REF="$GITHUB_SHA"
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+              CHECKOUT_REF="$TAG"
+            fi
+          fi
+
+          NORMALIZED="${TAG#v}"
+          if [ "$NORMALIZED" != "$VERSION" ]; then
+            echo "::error::Tag $TAG does not match [workspace.package].version ($VERSION) in Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [ "$DRY_RUN" != "true" ] && gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists — bump the version to publish again" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
+
+  # Native ELF targets: build, smoke-test, and package on the same runner —
+  # no cross toolchain needed.
+  build-native:
+    name: Build (${{ matrix.target }})
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install musl target tooling
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          # reld's default features pull in C deps (e.g. zstd-sys); point cc-rs
+          # at the musl-tools wrapper so those compile against musl, not glibc.
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: |
+          set -euxo pipefail
+          cargo build --locked --release --target "${{ matrix.target }}" \
+            --package reld --bin reld --bin reld-link
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/reld" staging/
+          cp "target/${{ matrix.target }}/release/reld-link" staging/
+          strip staging/reld staging/reld-link
+
+      - name: Smoke test packaged binary
+        env:
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euxo pipefail
+          chmod +x staging/reld staging/reld-link
+          out="$(staging/reld --version)"
+          echo "$out"
+          echo "$out" | grep -Eq '^Reld '
+          if [ "$DRY_RUN" != "true" ]; then
+            echo "$out" | grep -Eq "^Reld ${VERSION} "
+          fi
+
+      - name: Package release archive
+        run: |
+          python3 ci/package_release.py \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --triple "${{ matrix.target }}" \
+            --input-dir staging \
+            --output-dir dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Windows/macOS targets: cross-build on cheap ubuntu-24.04 runners through the
+  # blessed soldr front door (reld#59 / cross-ship.yml), rather than scarce
+  # native macOS/Windows runners for the *build*. macOS packaging happens right
+  # here since no GitHub Actions job in this org runs on a macos-* runner
+  # (soldr#3071, soldr#3116) — the shipped binary's format is verified but it
+  # is never executed in CI. Windows artifacts are handed to
+  # `smoke-and-package-windows` for a native `--version` gate before packaging.
+  build-cross:
+    name: Cross build (${{ matrix.name }})
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            target: x86_64-pc-windows-msvc
+            executable: reld.exe
+            link_executable: reld-link.exe
+          - name: windows-arm64
+            target: aarch64-pc-windows-msvc
+            executable: reld.exe
+            link_executable: reld-link.exe
+          - name: macos-x64
+            target: x86_64-apple-darwin
+            executable: reld
+            link_executable: reld-link
+          - name: macos-arm64
+            target: aarch64-apple-darwin
+            executable: reld
+            link_executable: reld-link
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Soldr (prepare cross toolchain)
+        id: setup
+        uses: zackees/setup-soldr@main
+        with:
+          version: 0.9.18
+          cross-targets: ${{ matrix.target }}
+          linker: fast
+          cache: true
+          cache-preset: full
+          prebuild-deps: soldr-cook
+
+      - name: Cross-compile reld + reld-link (release) via blessed front door
+        run: |
+          set -euxo pipefail
+          soldr build --package reld --bin reld --bin reld-link --release --locked \
+            --target "${{ matrix.target }}"
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" staging/
+          cp "target/${{ matrix.target }}/release/${{ matrix.link_executable }}" staging/
+
+      - name: Verify cross artifact format
+        run: |
+          set -euxo pipefail
+          file "staging/${{ matrix.executable }}"
+          case "${{ matrix.target }}" in
+            x86_64-pc-windows-msvc|aarch64-pc-windows-msvc)
+              file "staging/${{ matrix.executable }}" | grep -q 'PE32' ;;
+            x86_64-apple-darwin|aarch64-apple-darwin)
+              file "staging/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
+          esac
+
+      - name: Package release archive (macOS)
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          python3 ci/package_release.py \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --triple "${{ matrix.target }}" \
+            --input-dir staging \
+            --output-dir dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: contains(matrix.target, 'apple-darwin')
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: contains(matrix.target, 'windows-msvc')
+        with:
+          name: cross-raw-${{ matrix.name }}
+          path: staging/*
+          if-no-files-found: error
+
+  # Native smoke gate for the two Windows legs (reld#148 AC #3), then package.
+  # No macOS equivalent exists: see the build-cross comment above.
+  smoke-and-package-windows:
+    name: Smoke + package (${{ matrix.name }})
+    needs: [preflight, build-cross]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cross-raw-${{ matrix.name }}
+          path: staging
+
+      # On Windows, reld bridges `--version` (like every invocation) to
+      # `lld-link`, so it reports lld's version, not its own — see the README
+      # "reld --version and the lld bridge" note.
+      - name: Smoke deployed reld (windows)
+        shell: pwsh
+        run: |
+          $out = & ".\staging\reld.exe" --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
+          Write-Output $out
+          if ($out -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python ci/package_release.py \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --triple "${{ matrix.target }}" \
+            --binary-ext ".exe" \
+            --input-dir staging \
+            --output-dir dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [preflight, build-native, build-cross, smoke-and-package-windows]
+    if: |
+      always()
+      && needs.preflight.result == 'success'
+      && needs.build-native.result == 'success'
+      && needs.build-cross.result == 'success'
+      && needs.smoke-and-package-windows.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify every expected archive is present
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          ls -la
+          missing=0
+          for triple in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            x86_64-pc-windows-msvc \
+            aarch64-pc-windows-msvc \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin; do
+            ext="tar.gz"
+            case "$triple" in *windows*) ext="zip" ;; esac
+            name="reld-v${VERSION}-${triple}.${ext}"
+            if [ ! -f "$name" ]; then
+              echo "::error::missing expected release archive: $name" >&2
+              missing=1
+            fi
+          done
+          extra=$(find . -maxdepth 1 -type f ! -name '*.tar.gz' ! -name '*.zip' | wc -l)
+          if [ "$extra" -ne 0 ]; then
+            echo "::error::unexpected non-archive files in release-assets/" >&2
+            find . -maxdepth 1 -type f ! -name '*.tar.gz' ! -name '*.zip'
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        if: needs.preflight.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          NOTES="reld ${VERSION}
+
+          See README.md ('Installing') for the asset naming/layout contract."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* --title "reld ${VERSION}" --notes "$NOTES"
+          fi
+          gh release edit "$TAG" --latest --draft=false --prerelease=false

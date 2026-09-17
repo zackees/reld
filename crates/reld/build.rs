@@ -27,10 +27,10 @@ fn main() {
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn version_string() -> String {
-    if let Some(version) = get_version_tag().or_else(main_hash)
-        && !has_changes_relative_to(&version)
+    if let Some(tag) = get_version_tag()
+        && !has_changes_relative_to(&tag)
     {
-        return version;
+        return PKG_VERSION.to_owned();
     }
 
     if let Some(version) = main_hash() {
@@ -80,9 +80,10 @@ fn get_version_tag() -> Option<String> {
         .output()
         .ok()?;
     let stdout = String::from_utf8(output.stdout).ok()?;
-    if stdout.lines().any(|line| line == PKG_VERSION) {
-        Some(PKG_VERSION.to_owned())
-    } else {
-        None
-    }
+    // Release tags are `vX.Y.Z` (reld#148); also accept a bare `X.Y.Z` tag. Return the
+    // matched tag itself (not `PKG_VERSION`) so callers have a valid git ref to diff against.
+    stdout
+        .lines()
+        .find(|line| *line == PKG_VERSION || line.strip_prefix('v') == Some(PKG_VERSION))
+        .map(str::to_owned)
 }
