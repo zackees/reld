@@ -12,6 +12,13 @@ on:
   push:
     tags:
       - "v[0-9]*.[0-9]*.[0-9]*"
+  # Validate the pipeline itself (build/smoke/package, no publish) whenever this
+  # workflow or its packaging script changes, the same way cross-ship.yml
+  # validates its DRAFT cross-build legs from a PR before they're relied on.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - ci/package_release.py
   workflow_dispatch:
     inputs:
       tag:
