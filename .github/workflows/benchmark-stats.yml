@@ -259,6 +259,8 @@ jobs:
               --metadata-path "benchmark-input/benchmark-log-$target/metadata.json" \
               --output-dir "benchmark-stats/$target"
           done
+          # One combined page above the per-target directories, charts stacked (reld#54).
+          uv run --no-sync python -m ci.benchmark_stats --write-combined-index benchmark-stats
 
       - name: Assert generated README block and artifact freshness
         shell: bash

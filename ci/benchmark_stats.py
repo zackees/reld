@@ -420,6 +420,48 @@ def render_readme_block() -> str:
     return "\n\n".join([*panels, prose]) + "\n"
 
 
+def render_combined_index(generated_at: str, repository: str = "zackees/reld") -> str:
+    """The published branch's root page: every OS chart, stacked, at full width (reld#54).
+
+    Same rule as the README block. A chart shrunk into a column of thumbnails is a chart nobody
+    reads, and the per-target pages already exist for the detail — this page is the comparison,
+    so each OS gets the full width and its own row, in the manifest's order.
+    """
+    panels = "\n".join(
+        f'<section class="chart">\n'
+        f"<h2>{target}</h2>\n"
+        f'<a href="./{target}/"><img src="./{target}/{IMAGE_NAME}" alt="{title} reld link benchmark"></a>\n'
+        f'<p><a href="./{target}/">{title} detail, latest.json and history.jsonl</a></p>\n'
+        f"</section>"
+        for target, title in BENCHMARK_TARGETS
+    )
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>reld benchmarks</title>
+<style>
+body{{background:#0d1117;color:#e6edf3;font:14px system-ui,sans-serif;margin:2rem auto;max-width:1100px;padding:0 1rem}}
+a{{color:#58a6ff}}
+/* One chart per row, full width: never a multi-column thumbnail grid. See reld#54. */
+section.chart{{display:block;width:100%;margin:0 0 2.5rem}}
+section.chart img{{display:block;width:100%;height:auto}}
+h2{{font-size:1.1rem;margin:0 0 .5rem}}
+</style></head><body>
+<h1>reld &mdash; link benchmark</h1>
+<p>Generated {generated_at}. Each chart links the same workload; per-OS detail is one click away.</p>
+{panels}
+<p><a href="https://github.com/{repository}">{repository}</a></p>
+</body></html>
+"""
+
+
+def write_combined_index(root: Path, generated_at: str | None = None, repository: str = "zackees/reld") -> Path:
+    """Write the combined page at the root of the per-target directories."""
+    stamp = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "index.html"
+    path.write_text(render_combined_index(stamp, repository), encoding="utf-8")
+    return path
+
+
 def check_readme_block(path: Path) -> bool:
     """Return whether README's generated benchmark section exactly matches the manifest."""
     text = path.read_text(encoding="utf-8")
@@ -875,6 +917,12 @@ def main(argv: list[str] | None = None) -> int:
         help="replace README's marker-delimited BENCHMARK block with canonical generated contents",
     )
     p.add_argument(
+        "--write-combined-index",
+        type=Path,
+        metavar="ROOT",
+        help="write the combined, vertically stacked index.html above the per-target directories",
+    )
+    p.add_argument(
         "--verify-current-outputs",
         type=Path,
         metavar="ROOT",
@@ -918,6 +966,10 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"{args.write_readme}: {error}\n")
             return 1
         print(f"{args.write_readme}: wrote canonical generated BENCHMARK block")
+        return 0
+    if args.write_combined_index:
+        path = write_combined_index(args.write_combined_index, repository=os.environ.get("GITHUB_REPOSITORY", "zackees/reld"))
+        print(f"{path}: wrote combined benchmark index")
         return 0
     if args.verify_current_outputs:
         errors = verify_current_outputs(args.verify_current_outputs, args.expected_sha, args.max_age_seconds)
