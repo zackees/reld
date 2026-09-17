@@ -1,0 +1,84 @@
+name: Scale gate (Linux)
+
+# Link an ELF output larger than 2 GiB and prove it is well formed (reld#16).
+#
+# The Phase 2 Linux gate covers >64K sections and >64K relocations on every PR. A >2 GiB output
+# cannot join them: the inputs alone are gigabytes, so this runs weekly instead. The deferral is
+# recorded in docs/plan/08-ACCEPTANCE.md section 4b rather than left as prose.
+#
+# The gate's own logic — sizing and the ELF structural checks — is unit tested in
+# ci/tests/test_scale_gate.py on every PR, so a validator that stops catching truncation is not
+# discovered a week later.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, offset off the hour to avoid the Actions rush.
+    - cron: "17 5 * * 1"
+  pull_request:
+    paths:
+      - "ci/scale_gate.py"
+      - "ci/tests/test_scale_gate.py"
+      - ".github/workflows/scale-gate-linux.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scale-gate:
+    name: ELF output > 2 GiB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - name: Sync Python tooling
+        run: uv sync --extra dev
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Free runner disk
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: >-
+          sudo env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+          "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT"
+          uv run --no-sync python -m ci.free_runner_disk
+
+      - name: Install clang
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build reld
+        run: cargo build --release -p reld
+
+      # The gate's own checks, so a broken validator fails here and not silently in the run below.
+      - name: Test the gate
+        run: uv run --no-sync python -m pytest ci/tests/test_scale_gate.py -q
+
+      - name: Report available disk
+        run: df -h /
+
+      - name: Link an output larger than 2 GiB
+        run: >-
+          uv run --no-sync python ci/scale_gate.py
+          --reld target/release/reld
+          --json-out target/scale-gate-metrics.json
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scale-gate-metrics
+          path: target/scale-gate-metrics.json
+          if-no-files-found: ignore
