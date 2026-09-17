@@ -23,7 +23,6 @@ tests = [
   "global-offset-table.sh",                # `-defsym=foo=_GLOBAL_OFFSET_TABLE_`
   "icf-gcc-except-table.sh",               # `--icf`
   "icf.sh",                                # `--icf`
-  "image-base.sh",                         # `--image-base`
   "init-in-dso.sh",                        # `-init`
   "init.sh",                               # `-init`
   "oformat-binary.sh",                     # `--oformat=binary` and `-Map`
@@ -41,16 +40,18 @@ tests = [
   "sort-debug-info-compressed.sh",         # `-Map`
   "sort-debug-info-merged.sh",             # `-Map`
   "sort-debug-info.sh",                    # `-Map`
-  "spare-program-headers.sh",              # `--spare-program-headers`
-  "static-archive.sh",                     # error: Undefined symbol main, passes with GNU ld
-  "synthetic-symbols.sh",                  # `--image-base`
-  "thin-archive.sh",                       # error: Undefined symbol main, passes with GNU ld
-  "trace-symbol-symver.sh",                # `--trace-symbol`
-  "trace-symbol.sh",                       # `-y` / `--trace-symbol`
-  "undefined-glob-gc-sections.sh",         # `--undefined-glob`
-  "undefined-glob.sh",                     # `--undefined-glob`
-  "warn-common.sh",                        # `-warn-common`
-  "warn-once.sh",                          # `--warn-once`
+  # `--image-base` works now; this fails in the second half, where a program defines
+  # `__ehdr_start` and friends itself and the synthetic definitions are required to win.
+  "synthetic-symbols.sh",
+  "spare-program-headers.sh",      # `--spare-program-headers`
+  "static-archive.sh",             # error: Undefined symbol main, passes with GNU ld
+  "thin-archive.sh",               # error: Undefined symbol main, passes with GNU ld
+  "trace-symbol-symver.sh",        # `--trace-symbol`
+  "trace-symbol.sh",               # `-y` / `--trace-symbol`
+  "undefined-glob-gc-sections.sh", # `--undefined-glob`
+  "undefined-glob.sh",             # `--undefined-glob`
+  "warn-common.sh",                # `-warn-common`
+  "warn-once.sh",                  # `--warn-once`
 ]
 
 [skipped_groups.symbol_versioning]

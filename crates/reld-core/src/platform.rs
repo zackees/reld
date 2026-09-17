@@ -1457,6 +1457,12 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
         true
     }
 
+    /// The base address `--image-base` asked for, if any. `None` leaves the architecture's
+    /// default, which is what every caller that does not pass the flag gets.
+    fn image_base(&self) -> Option<u64> {
+        None
+    }
+
     fn should_emit_got_plt_syms(&self) -> bool {
         false
     }

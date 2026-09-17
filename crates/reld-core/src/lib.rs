@@ -324,8 +324,10 @@ impl<F: FileSystem> Linker<F> {
 
         let mut output = file_writer::Output::new(args, output_kind, self.file_system.clone());
 
-        let mut output_sections =
-            OutputSections::with_base_address(A::start_memory_address(output_kind), output_kind);
+        let base_address = args
+            .image_base()
+            .unwrap_or_else(|| A::start_memory_address(output_kind));
+        let mut output_sections = OutputSections::with_base_address(base_address, output_kind);
         output_sections.set_rosegment(args.rosegment());
 
         let mut layout_rules_builder = LayoutRulesBuilder::default();
