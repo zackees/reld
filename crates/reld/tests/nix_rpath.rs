@@ -59,9 +59,15 @@ fn build_fixture() -> (tempfile::TempDir, String, String) {
     (dir, store, lib)
 }
 
-/// Links `main.o` into a shared object against `-lfoo` with the given store and environment, and
-/// returns the linked output path.
-fn link(fixture: &Path, out: &Path, store: &str, env: &[(&str, &str)]) {
+/// The engines a routed link can land on. A routed link must derive the same Nix RUNPATH the
+/// native engine would have (reld#123), so every test runs on both. `lld` is skipped when no
+/// bridge linker is discoverable on this host.
+const ENGINES: [&str; 2] = ["reld", "lld"];
+
+/// Links `main.o` into a shared object against `-lfoo` with the given store and environment.
+/// Returns `false` when the engine is unavailable, so the caller can skip.
+#[must_use]
+fn link(fixture: &Path, out: &Path, store: &str, env: &[(&str, &str)], engine: &str) -> bool {
     let mut cmd = Command::new(reld());
     cmd.args(["-shared", "-o"])
         .arg(out)
@@ -69,16 +75,21 @@ fn link(fixture: &Path, out: &Path, store: &str, env: &[(&str, &str)]) {
         .arg("-L")
         .arg(fixture.join("lib"))
         .arg("-lfoo")
+        .arg(format!("--engine={engine}"))
         .env("NIX_STORE", store);
     for (key, value) in env {
         cmd.env(key, value);
     }
     let output = cmd.output().expect("failed to run reld");
-    assert!(
-        output.status.success(),
-        "reld failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Could not find") {
+            eprintln!("skipping engine `{engine}`: no bridge linker on this host");
+            return false;
+        }
+        panic!("reld failed with engine `{engine}`: {stderr}");
+    }
+    true
 }
 
 /// Reads the `DT_RUNPATH`/`DT_RPATH` string from a linked ELF binary, if present.
@@ -116,9 +127,17 @@ fn store_lib_dir_yields_runpath() {
         return;
     };
     let (_dir, store, lib) = build_fixture();
-    let out = PathBuf::from(format!("{store}/out.so"));
-    link(Path::new(&store), &out, &store, &[]);
-    assert_eq!(read_runpath(&out).as_deref(), Some(lib.as_str()));
+    for engine in ENGINES {
+        let out = PathBuf::from(format!("{store}/out-{engine}.so"));
+        if !link(Path::new(&store), &out, &store, &[], engine) {
+            continue;
+        }
+        assert_eq!(
+            read_runpath(&out).as_deref(),
+            Some(lib.as_str()),
+            "engine {engine}"
+        );
+    }
 }
 
 #[test]
@@ -128,14 +147,19 @@ fn dont_set_rpath_disables_derivation() {
         return;
     };
     let (_dir, store, _lib) = build_fixture();
-    let out = PathBuf::from(format!("{store}/out.so"));
-    link(
-        Path::new(&store),
-        &out,
-        &store,
-        &[("NIX_DONT_SET_RPATH", "1")],
-    );
-    assert_eq!(read_runpath(&out), None);
+    for engine in ENGINES {
+        let out = PathBuf::from(format!("{store}/out-{engine}.so"));
+        if !link(
+            Path::new(&store),
+            &out,
+            &store,
+            &[("NIX_DONT_SET_RPATH", "1")],
+            engine,
+        ) {
+            continue;
+        }
+        assert_eq!(read_runpath(&out), None, "engine {engine}");
+    }
 }
 
 #[test]
@@ -145,8 +169,12 @@ fn non_store_dir_yields_no_runpath() {
         return;
     };
     let (_dir, store, _lib) = build_fixture();
-    let out = PathBuf::from(format!("{store}/out.so"));
-    // The fixture's lib dir is not under the real store, so nothing is derived.
-    link(Path::new(&store), &out, "/nix/store", &[]);
-    assert_eq!(read_runpath(&out), None);
+    for engine in ENGINES {
+        let out = PathBuf::from(format!("{store}/out-{engine}.so"));
+        // The fixture's lib dir is not under the real store, so nothing is derived.
+        if !link(Path::new(&store), &out, "/nix/store", &[], engine) {
+            continue;
+        }
+        assert_eq!(read_runpath(&out), None, "engine {engine}");
+    }
 }
