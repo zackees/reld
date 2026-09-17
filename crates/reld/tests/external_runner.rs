@@ -1,17 +1,30 @@
-#![cfg(unix)]
-
 mod external_process;
 
 use external_process::TimedOutput;
 use external_process::output_with_timeout;
+use reld_core::platforms::process::KILLS_PROCESS_TREES;
 use std::fs;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+fn skip_reason(kills_descendants: bool) -> Option<&'static str> {
+    if which::which("bash").is_err() {
+        Some("bash is not available")
+    } else if kills_descendants && !KILLS_PROCESS_TREES {
+        Some("this host cannot kill process trees")
+    } else {
+        None
+    }
+}
+
 #[test]
 fn completed_command_captures_output() {
+    if let Some(reason) = skip_reason(false) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
     let mut command = Command::new("bash");
     command.arg("-c").arg("printf stdout; printf stderr >&2");
 
@@ -28,6 +41,10 @@ fn completed_command_captures_output() {
 
 #[test]
 fn timeout_kills_descendants() {
+    if let Some(reason) = skip_reason(true) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let survivor_marker = temp.path().join("descendant-survived");
     let script = format!(
@@ -51,6 +68,10 @@ fn timeout_kills_descendants() {
 
 #[test]
 fn completed_shell_does_not_leave_pipe_holding_descendants() {
+    if let Some(reason) = skip_reason(true) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let survivor_marker = temp.path().join("descendant-survived");
     let script = format!(

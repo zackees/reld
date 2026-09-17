@@ -273,12 +273,7 @@ const SATISFIED_BY_CONSTRUCTION_FLAGS: &[&str] = &[
 ];
 const SATISFIED_BY_CONSTRUCTION_SHORT_FLAGS: &[&str] = &[
     // Short forms of `--start-group` / `--end-group`.
-    "(",
-    ")",
-    // On Illumos, the Clang driver inserts a meaningless -C flag before calling any non-GNU ld
-    // linker.
-    #[cfg(target_os = "illumos")]
-    "C",
+    "(", ")",
 ];
 
 const IGNORED_FLAGS: &[&str] = &[
@@ -2028,7 +2023,10 @@ fn add_satisfied_by_construction_flags(parser: &mut ArgumentParser<ElfArgs>) {
         declaration = declaration.long(flag);
         declaration.execute(|_args, _modifier_stack| Ok(()));
     }
-    for flag in SATISFIED_BY_CONSTRUCTION_SHORT_FLAGS {
+    for flag in SATISFIED_BY_CONSTRUCTION_SHORT_FLAGS
+        .iter()
+        .chain(crate::platforms::host::DRIVER_INSERTED_NOOP_SHORT_FLAGS)
+    {
         let mut declaration = parser.declare();
         declaration = declaration.short(flag);
         declaration.execute(|_args, _modifier_stack| Ok(()));
@@ -2484,8 +2482,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_file_only_options() {
+        if !crate::platforms::host::HAS_TEMP_DIR {
+            eprintln!("skipping: host has no temp dir");
+            return;
+        }
         // Create a temporary file containing the same options (one per line) as INPUT1
         let file = NamedTempFile::new().expect("Could not create temp file");
         write_options_to_file(file.as_file(), INPUT1);
@@ -2498,8 +2499,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_mixed_file_and_inline_options() {
+        if !crate::platforms::host::HAS_TEMP_DIR {
+            eprintln!("skipping: host has no temp dir");
+            return;
+        }
         // Create a temporary file containing some options
         let file = NamedTempFile::new().expect("Could not create temp file");
         write_options_to_file(file.as_file(), FILE_OPTIONS);
@@ -2518,8 +2522,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_overlapping_file_and_inline_options() {
+        if !crate::platforms::host::HAS_TEMP_DIR {
+            eprintln!("skipping: host has no temp dir");
+            return;
+        }
         // Create a set of file options that has a duplicate of an inline option
         let mut file_options = FILE_OPTIONS.to_vec();
         file_options.append(&mut INLINE_OPTIONS.to_vec());
@@ -2541,8 +2548,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "wasi", ignore = "wasi doesn't have a temp dir")]
     fn test_parse_recursive_file_option() {
+        if !crate::platforms::host::HAS_TEMP_DIR {
+            eprintln!("skipping: host has no temp dir");
+            return;
+        }
         // Create a temporary file containing a @file option
         let file1 = NamedTempFile::new().expect("Could not create temp file");
         let file2 = NamedTempFile::new().expect("Could not create temp file");

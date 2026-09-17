@@ -16,11 +16,72 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
+
+/// Object-format family of the binaries a C compiler produces. Detected from the compiler rather
+/// than the host so cross-compiling drivers get the conventions of the target they emit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerTarget {
+    /// PE/COFF: MSVC, MinGW, and Cygwin triples.
+    Windows,
+    /// Mach-O: Apple triples.
+    Apple,
+    /// ELF: Linux (including Android) triples.
+    Linux,
+    /// Any other target (other ELF systems, WebAssembly, ...).
+    Other,
+}
+
+impl CompilerTarget {
+    /// Classify a target triple such as `x86_64-pc-windows-msvc` or `arm64-apple-darwin23.0.0`.
+    pub fn from_triple(triple: &str) -> Self {
+        let triple = triple.to_ascii_lowercase();
+        if ["windows", "mingw", "cygwin"]
+            .iter()
+            .any(|marker| triple.contains(marker))
+        {
+            Self::Windows
+        } else if ["apple", "darwin", "macos"]
+            .iter()
+            .any(|marker| triple.contains(marker))
+        {
+            Self::Apple
+        } else if triple.contains("linux") {
+            Self::Linux
+        } else {
+            Self::Other
+        }
+    }
+
+    /// Ask `cc` for its default target via `-dumpmachine`.
+    pub fn detect(cc: &str) -> Result<Self> {
+        let output = Command::new(cc)
+            .arg("-dumpmachine")
+            .output()
+            .with_context(|| format!("spawning `{cc} -dumpmachine` (is it on PATH?)"))?;
+        if !output.status.success() {
+            bail!(
+                "`{cc} -dumpmachine` failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let triple = String::from_utf8_lossy(&output.stdout);
+        let triple = triple.trim();
+        if triple.is_empty() {
+            bail!("`{cc} -dumpmachine` printed no target triple");
+        }
+        Ok(Self::from_triple(triple))
+    }
+
+    pub fn is_windows(self) -> bool {
+        self == Self::Windows
+    }
+}
 
 /// Shape of a generated workload. Every field is a linker stressor, not just a size knob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,6 +374,48 @@ mod tests {
         let d = tmpdir("degenerate");
         let w = generate(&spec, &d).unwrap();
         assert_eq!(w.sources.len(), 2);
+    }
+
+    #[test]
+    fn compiler_target_classifies_triples() {
+        for triple in [
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-gnullvm",
+            "x86_64-w64-mingw32",
+            "x86_64-pc-cygwin",
+            "X86_64-PC-WINDOWS-MSVC",
+        ] {
+            assert_eq!(
+                CompilerTarget::from_triple(triple),
+                CompilerTarget::Windows,
+                "{triple}"
+            );
+        }
+        for triple in ["arm64-apple-darwin23.0.0", "x86_64-apple-macosx14.0"] {
+            assert_eq!(
+                CompilerTarget::from_triple(triple),
+                CompilerTarget::Apple,
+                "{triple}"
+            );
+        }
+        for triple in ["x86_64-unknown-linux-gnu", "aarch64-linux-musl"] {
+            assert_eq!(
+                CompilerTarget::from_triple(triple),
+                CompilerTarget::Linux,
+                "{triple}"
+            );
+        }
+        for triple in ["x86_64-unknown-freebsd14.0", "wasm32-wasip1"] {
+            assert_eq!(
+                CompilerTarget::from_triple(triple),
+                CompilerTarget::Other,
+                "{triple}"
+            );
+        }
+        assert!(CompilerTarget::Windows.is_windows());
+        assert!(!CompilerTarget::Apple.is_windows());
+        assert!(!CompilerTarget::Linux.is_windows());
+        assert!(!CompilerTarget::Other.is_windows());
     }
 
     #[test]

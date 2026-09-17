@@ -4,7 +4,7 @@ use crate::args::CounterKind;
 use crate::env;
 use crate::error::AlreadyInitialised;
 use crate::error::Result;
-use crate::perf::CounterList;
+use crate::platforms::process::CounterList;
 use anyhow::Context;
 use anyhow::anyhow;
 use crossbeam_queue::ArrayQueue;

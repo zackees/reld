@@ -37,6 +37,10 @@ Every executable must run on a native Windows runner with exact exit status, std
 Test DLL loading or imported functionality when the change touches imports, exports, delay loading,
 TLS, or runtime metadata. Cross-compilation alone is not acceptance evidence.
 
+Windows-only host mechanics (`windows`, `std::os::windows`, `windows_sys`) go in
+`crates/reld-core/src/platforms/platform_win`; the `dylint` CI job
+([`../../dylints/README.md`](../../dylints/README.md)) rejects them elsewhere.
+
 ## Consumer acceptance
 
 The three-platform consumer job builds `reld-link.exe` through `setup-soldr`, then links the pinned

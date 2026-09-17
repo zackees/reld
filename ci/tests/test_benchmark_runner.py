@@ -414,12 +414,13 @@ def test_compiled_policy_is_target_calibrated_for_significant_final_links():
 def test_benchmark_platform_routes_are_exhaustive():
     source = (Path(__file__).parents[2] / "crates" / "reld-testkit" / "src" / "bin" / "reld-bench.rs").read_text(encoding="utf-8")
 
-    # Rust 1.95's cfg_select! emits a compile error when no arm matches. Keep the
-    # three supported host routes explicit rather than treating every other target as Linux.
-    assert source.count("cfg_select! {") >= 2
-    assert source.count('target_os = "windows"') >= 2
-    assert source.count('target_os = "macos"') >= 2
-    assert source.count('target_os = "linux"') >= 2
+    # Routes follow the compiler's target (reld#137 keeps host cfg out of the testkit). Keep
+    # the three supported routes explicit rather than treating every other target as Linux:
+    # an unrecognized compiler target is an error, and no match falls through with `_`.
+    assert "cfg_select!" not in source
+    assert "CompilerTarget::Other => bail!(" in source
+    for route in ("Windows", "Apple", "Linux"):
+        assert source.count(f"BenchPlatform::{route} =>") >= 2
     assert "_ =>" not in source
 
 

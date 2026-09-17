@@ -1290,7 +1290,6 @@ dependencies = [
  "gimli",
  "hex",
  "itertools 0.15.0",
- "libc",
  "libloading",
  "libtest-mimic",
  "mimalloc-pprof",

@@ -1,0 +1,36 @@
+error: host-platform selection outside the reld-core platforms boundary: host cfg `cfg(target_os=)`; only crates/reld-core/src/platforms/mod.rs and the platform_<tree> concrete trees may select the host, everything else uses reld_core::platforms
+  --> $DIR/disallowed_host_cfg.rs:1:1
+   |
+LL | / fn host_cfg_macro() -> u8 {
+LL | |     if cfg!(unix) { 1 } else { 2 }
+LL | | }
+   | |_^
+   |
+   = note: `#[deny(ban_platform_cfg_outside_boundary)]` on by default
+
+error: host-platform selection outside the reld-core platforms boundary: host cfg `cfg_attr(windows,allow(dead_code))`; only crates/reld-core/src/platforms/mod.rs and the platform_<tree> concrete trees may select the host, everything else uses reld_core::platforms
+  --> $DIR/disallowed_host_cfg.rs:1:1
+   |
+LL | / fn host_cfg_macro() -> u8 {
+LL | |     if cfg!(unix) { 1 } else { 2 }
+LL | | }
+   | |_^
+
+error: host-platform selection outside the reld-core platforms boundary: host cfg `cfg!(unix)`; only crates/reld-core/src/platforms/mod.rs and the platform_<tree> concrete trees may select the host, everything else uses reld_core::platforms
+  --> $DIR/disallowed_host_cfg.rs:1:1
+   |
+LL | / fn host_cfg_macro() -> u8 {
+LL | |     if cfg!(unix) { 1 } else { 2 }
+LL | | }
+   | |_^
+
+error: host-platform selection outside the reld-core platforms boundary: host cfg `cfg_select!`; only crates/reld-core/src/platforms/mod.rs and the platform_<tree> concrete trees may select the host, everything else uses reld_core::platforms
+  --> $DIR/disallowed_host_cfg.rs:1:1
+   |
+LL | / fn host_cfg_macro() -> u8 {
+LL | |     if cfg!(unix) { 1 } else { 2 }
+LL | | }
+   | |_^
+
+error: aborting due to 4 previous errors
+

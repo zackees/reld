@@ -14,12 +14,13 @@
 //! reld-stress --seed 1234 --keep      # reproduce one failure, keep the tree
 //! ```
 
+use std::env::consts::EXE_SUFFIX;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use reld_testkit::{WorkloadSpec, generate};
+use reld_testkit::{CompilerTarget, WorkloadSpec, generate};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,13 +70,14 @@ fn main() -> Result<()> {
 
     let root = std::env::temp_dir().join("reld-stress");
     std::fs::create_dir_all(&root)?;
+    let target = CompilerTarget::detect(&args.cc)?;
 
     let mut failures = Vec::new();
     for seed in &seeds {
         let dir = root.join(format!("seed-{seed:08}"));
         let _ = std::fs::remove_dir_all(&dir);
 
-        match run_seed(&args, *seed, &dir) {
+        match run_seed(&args, target, *seed, &dir) {
             Ok(()) => {
                 if !args.keep {
                     let _ = std::fs::remove_dir_all(&dir);
@@ -105,7 +107,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_seed(args: &Args, seed: u64, dir: &Path) -> Result<()> {
+fn run_seed(args: &Args, target: CompilerTarget, seed: u64, dir: &Path) -> Result<()> {
     let spec = WorkloadSpec::random(seed);
     let workload = generate(&spec, dir).context("generating workload")?;
 
@@ -123,7 +125,7 @@ fn run_seed(args: &Args, seed: u64, dir: &Path) -> Result<()> {
             .arg(dir)
             .arg("-O0");
         // PIC is the default and the flag is rejected outright on Windows targets.
-        if !cfg!(windows) {
+        if !target.is_windows() {
             cmd.arg("-fPIC");
         }
         let out = cmd
@@ -163,7 +165,7 @@ fn run_seed(args: &Args, seed: u64, dir: &Path) -> Result<()> {
 }
 
 fn link(args: &Args, dir: &Path, objects: &[PathBuf]) -> Result<PathBuf> {
-    let exe = dir.join(if cfg!(windows) { "a.exe" } else { "a.out" });
+    let exe = dir.join(format!("a{EXE_SUFFIX}"));
     let mut cmd = Command::new(&args.cc);
     cmd.args(objects).arg("-o").arg(&exe);
     if let Some(l) = &args.linker {

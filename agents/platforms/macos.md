@@ -36,6 +36,10 @@ Every executable must run on a native macOS runner with exact exit status, stdou
 dynamic-library loading when the change touches dylibs, rpaths, exports, fixups, or signing. A link
 performed or inspected only on Linux is not acceptance evidence.
 
+macOS-only host mechanics (`target_os = "macos"`, `libc`, `std::os::macos`) go in
+`crates/reld-core/src/platforms/platform_macos` or the shared `platform_unix` tree; the `dylint` CI
+job ([`../../dylints/README.md`](../../dylints/README.md)) rejects them elsewhere.
+
 ## Consumer acceptance
 
 The three-platform consumer job builds the host-named `reld` Mach-O driver through `setup-soldr`,

@@ -1,5 +1,6 @@
-#![cfg_attr(not(unix), allow(dead_code))]
-
+use reld_core::platforms::process::isolate_process_group;
+use reld_core::platforms::process::kill_process_tree;
+use reld_core::platforms::process::reap_process_group;
 use std::io;
 use std::io::Read;
 use std::process::Command;
@@ -19,14 +20,9 @@ pub(crate) fn output_with_timeout(
     command: &mut Command,
     timeout: Duration,
 ) -> io::Result<TimedOutput> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-
-        // Give the shell and everything it launches a private process group so a timed-out
-        // compiler or linker cannot survive after the shell itself is killed.
-        command.process_group(0);
-    }
+    // Give the shell and everything it launches a private process group so a timed-out
+    // compiler or linker cannot survive after the shell itself is killed.
+    isolate_process_group(command);
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
@@ -35,8 +31,7 @@ pub(crate) fn output_with_timeout(
 
     let outcome = match child.wait_timeout(timeout)? {
         Some(status) => {
-            #[cfg(unix)]
-            kill_process_group(child.id())?;
+            reap_process_group(&child)?;
             TimedOutput::Completed(output(status, stdout, stderr)?)
         }
         None => {
@@ -78,31 +73,4 @@ fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Ve
     reader
         .join()
         .map_err(|_| io::Error::other("external-test output reader panicked"))?
-}
-
-#[cfg(unix)]
-fn kill_process_tree(child: &mut std::process::Child) -> io::Result<()> {
-    kill_process_group(child.id())
-}
-
-#[cfg(unix)]
-fn kill_process_group(id: u32) -> io::Result<()> {
-    let process_group = -id.cast_signed();
-    // SAFETY: `kill` does not dereference pointers. The negative PID deliberately addresses the
-    // private process group established above, not an unrelated process.
-    if unsafe { libc::kill(process_group, libc::SIGKILL) } == 0 {
-        return Ok(());
-    }
-
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_tree(child: &mut std::process::Child) -> io::Result<()> {
-    child.kill()
 }

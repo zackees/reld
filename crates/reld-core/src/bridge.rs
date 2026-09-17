@@ -21,6 +21,7 @@
 use crate::bail;
 use crate::error::Context;
 use crate::error::Result;
+use crate::platforms::path::EXE_SUFFIX;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -744,9 +745,6 @@ fn not_found_message(engine: &Engine) -> String {
     )
 }
 
-/// Executable suffix for the current host.
-const EXE_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
-
 /// Attempts to find `rust-lld` next to the currently active toolchain.
 fn find_rust_lld() -> Option<PathBuf> {
     let candidate = rustlib_bin_dir()?.join(format!("rust-lld{EXE_SUFFIX}"));
@@ -1119,8 +1117,7 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
         // Propagate a signal-killed child as `128 + signal`, naming the engine and signal, so a
         // crashed bridge (ld.lld, lld-link, ld64.lld) is diagnosable rather than collapsing to a
         // bare exit 1 (reld#123 D6).
-        #[cfg(unix)]
-        if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        if let Some(signal) = crate::platforms::process::exit_signal(&status) {
             eprintln!(
                 "reld: {} bridge terminated by signal {}",
                 engine.name, signal
@@ -1310,12 +1307,15 @@ mod tests {
     #[test]
     fn needs_flavor_prefix_for_rust_lld() {
         // Forward-slash paths so `file_stem()` behaves identically on every host (backslashes
-        // are not path separators off Windows). The backslash form is covered under cfg(windows).
+        // are not path separators off Windows). The host-native separator form is covered below.
         assert!(needs_flavor_prefix(Path::new("/some/path/rust-lld")));
         assert!(needs_flavor_prefix(Path::new("/some/path/rust-lld.exe")));
         assert!(needs_flavor_prefix(Path::new("RUST-LLD")));
-        #[cfg(windows)]
-        assert!(needs_flavor_prefix(Path::new(r"C:\some\path\rust-lld.exe")));
+        let native = format!(
+            "C:{s}some{s}path{s}rust-lld.exe",
+            s = std::path::MAIN_SEPARATOR
+        );
+        assert!(needs_flavor_prefix(Path::new(&native)));
     }
 
     #[test]
@@ -1323,10 +1323,11 @@ mod tests {
         assert!(!needs_flavor_prefix(Path::new("/some/path/lld-link")));
         assert!(!needs_flavor_prefix(Path::new("/some/path/lld-link.exe")));
         assert!(!needs_flavor_prefix(Path::new("/some/path/ld64.lld")));
-        #[cfg(windows)]
-        assert!(!needs_flavor_prefix(Path::new(
-            r"C:\some\path\lld-link.exe"
-        )));
+        let native = format!(
+            "C:{s}some{s}path{s}lld-link.exe",
+            s = std::path::MAIN_SEPARATOR
+        );
+        assert!(!needs_flavor_prefix(Path::new(&native)));
     }
 
     #[test]

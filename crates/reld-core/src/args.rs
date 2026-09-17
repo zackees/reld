@@ -20,6 +20,7 @@ use crate::error::Result;
 use crate::fs::FileReplacementMode;
 use crate::fs::FileWriteMode;
 use crate::input_data::FileId;
+use crate::platforms::host::HostOs;
 use crate::save_dir::SaveDir;
 use hashbrown::HashMap;
 use hashbrown::HashSet;
@@ -276,10 +277,15 @@ enum PlatformKind {
 
 impl PlatformKind {
     fn host() -> Self {
-        cfg_select! {
-            target_os = "windows" => PlatformKind::Coff,
-            target_os = "macos" => PlatformKind::MachO,
-            target_os = "linux" => PlatformKind::Elf,
+        match crate::platforms::host::os() {
+            HostOs::Windows => PlatformKind::Coff,
+            HostOs::MacOs => PlatformKind::MachO,
+            HostOs::Linux
+            | HostOs::Android
+            | HostOs::FreeBsd
+            | HostOs::Illumos
+            | HostOs::Wasi
+            | HostOs::OtherUnix => PlatformKind::Elf,
         }
     }
 
