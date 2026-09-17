@@ -1,54 +1,56 @@
 [skipped_groups.unsupported_options]
+# Each comment names the option reld's parser rejects, as observed by running the test against the
+# native engine. Keep them accurate: reld#14 burns this list down by implementing the named
+# option, and a stale reason sends that work at the wrong flag. `--library` came off this list
+# that way. A test that fails for any other reason does not belong in this group.
 reason = "Reld does not yet implement one or more linker options exercised by these tests"
 tracking_issue = 14
 tests = [
-  "audit.sh",
-  "color-diagnostics.sh",
+  "audit.sh",                              # `--audit`
   "compress-debug-sections-zlib-level.sh", # --compress-debug-sections=zlib:$level
   "compress-debug-sections-zstd-level.sh", # --compress-debug-sections=zstd:$level
-  "default-symver-version-script.sh",
-  "default-symver.sh",
-  "depaudit.sh",
-  "depaudit2.sh",
-  "dynamic-list-data.sh",
-  "emit-relocs-cpp.sh",
-  "emit-relocs-dead-sections.sh",
-  "emit-relocs.sh",
-  "execute-only.sh",
+  "default-symver-version-script.sh",      # `--default-symver`
+  "default-symver.sh",                     # `--default-symver`
+  "depaudit.sh",                           # `--depaudit`
+  "depaudit2.sh",                          # `--audit`
+  "dynamic-list-data.sh",                  # `--dynamic-list-data`
+  "emit-relocs-cpp.sh",                    # `--emit-relocs`
+  "emit-relocs-dead-sections.sh",          # `--emit-relocs`
+  "emit-relocs.sh",                        # `--emit-relocs`
+  "execute-only.sh",                       # `--execute-only`
   "fatal-warnings.sh",                     # `-warn-common` and `-fatal-warnings`
-  "filter.sh",
+  "filter.sh",                             # `--filter` / `-F`
   "global-offset-table.sh",                # `-defsym=foo=_GLOBAL_OFFSET_TABLE_`
   "icf-gcc-except-table.sh",               # `--icf`
   "icf.sh",                                # `--icf`
-  "image-base.sh",
-  "init-in-dso.sh",
-  "init.sh",
-  "library.sh",
-  "oformat-binary.sh",
-  "omagic.sh",
-  "no-warnings.sh",
+  "image-base.sh",                         # `--image-base`
+  "init-in-dso.sh",                        # `-init`
+  "init.sh",                               # `-init`
+  "oformat-binary.sh",                     # `--oformat=binary` and `-Map`
+  "omagic.sh",                             # `--omagic`
+  "no-warnings.sh",                        # `-warn-common`, which `-w` then has to suppress
   "pack-dyn-relocs-android.sh",            # `--pack-dyn-relocs=android`
-  "package-metadata.sh",
-  "relocatable-merge-sections.sh",
+  "package-metadata.sh",                   # `--package-metadata`
+  "relocatable-merge-sections.sh",         # `--relocatable-merge-sections`
   "repro.sh",                              # Note in this test's second half that it uses a custom environment variable called `MOLD_REPRO`. While Reld currently doesn't support `--repro`, it will eventually be moved to the "ignore" group once support is added.
-  "require-defined.sh",
-  "response-file-quoting.sh",
-  "retain-symbols-file.sh",
-  "run.sh",
+  "require-defined.sh",                    # `--require-defined`
+  "response-file-quoting.sh",              # Response-file quoting: reld reports `Missing opening quote`
+  "retain-symbols-file.sh",                # `--retain-symbols-file`
+  "run.sh",                                # `mold -run`, which needs mold-wrapper.so
   "section-align.sh",                      # `--section-alignment`
   "sort-debug-info-compressed.sh",         # `-Map`
   "sort-debug-info-merged.sh",             # `-Map`
   "sort-debug-info.sh",                    # `-Map`
-  "spare-program-headers.sh",
+  "spare-program-headers.sh",              # `--spare-program-headers`
   "static-archive.sh",                     # error: Undefined symbol main, passes with GNU ld
   "synthetic-symbols.sh",                  # `--image-base`
   "thin-archive.sh",                       # error: Undefined symbol main, passes with GNU ld
-  "trace-symbol-symver.sh",
-  "trace-symbol.sh",
-  "undefined-glob-gc-sections.sh",
-  "undefined-glob.sh",
-  "warn-common.sh",
-  "warn-once.sh",
+  "trace-symbol-symver.sh",                # `--trace-symbol`
+  "trace-symbol.sh",                       # `-y` / `--trace-symbol`
+  "undefined-glob-gc-sections.sh",         # `--undefined-glob`
+  "undefined-glob.sh",                     # `--undefined-glob`
+  "warn-common.sh",                        # `-warn-common`
+  "warn-once.sh",                          # `--warn-once`
 ]
 
 [skipped_groups.symbol_versioning]
@@ -173,7 +175,11 @@ tests = [
   "auxiliary.sh",                   # Different message format
   "build-id.sh",                    # Different build ID data size
   "cmdline.sh",                     # Different message formats for unknown options.
-  "comment.sh",                     # We store a different string in the comment section than mold.
+  # reld implements `--color-diagnostics` (reld#144), and this test fails on a semantic
+  # difference, not a missing option: a bare `--color-diagnostics` means `always` in reld and
+  # ld.lld, so it colors a pipe, while mold reads it as `auto`. Verified against ld.lld.
+  "color-diagnostics.sh",
+  "comment.sh",           # We store a different string in the comment section than mold.
   # Read-only copies now land in `.data.rel.ro` (reld#123), which is what removed
   # `copyrel-relro.sh` from this list. These four still differ from mold in other ways.
   "copyrel-alignment.sh",           # Copy relocation placement differs from mold

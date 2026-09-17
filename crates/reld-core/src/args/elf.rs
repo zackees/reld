@@ -578,6 +578,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare_with_param()
         .prefix("L")
+        .long("library-path")
         .help("Add directory to library search path")
         .execute(|args, _modifier_stack, value| {
             let handle_sysroot = |path| {
@@ -596,6 +597,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare_with_param()
         .prefix("l")
+        .long("library")
         .help("Link with library")
         .sub_option_with_value(
             ":filename",
@@ -2639,6 +2641,40 @@ mod tests {
         // (rustc omits `--gc-sections`) keeps the code the user requested.
         assert!(!parse_args([]).gc_sections);
         assert!(parse_args(["--gc-sections"]).gc_sections);
+    }
+
+    #[test]
+    fn library_and_library_path_long_forms_match_the_short_ones() {
+        // GNU ld spells `-l`/`-L` as `--library`/`--library-path`, in both the separated and the
+        // `=` form. mold's `library.sh` covers exactly this.
+        let short = parse_args(["-L", "/libs", "-lfoo"]);
+        for long in [
+            vec!["--library-path", "/libs", "--library", "foo"],
+            vec!["--library-path=/libs", "--library=foo"],
+        ] {
+            let parsed = parse_args(long.iter().copied());
+            assert_eq!(parsed.lib_search_path, short.lib_search_path);
+            assert_eq!(
+                parsed
+                    .common()
+                    .inputs
+                    .iter()
+                    .map(|input| format!("{:?}", input.spec))
+                    .collect_vec(),
+                short
+                    .common()
+                    .inputs
+                    .iter()
+                    .map(|input| format!("{:?}", input.spec))
+                    .collect_vec(),
+                "{long:?}"
+            );
+        }
+        // `-l:filename` names a file verbatim; the long form inherits that.
+        assert!(matches!(
+            parse_args(["--library=:libfoo.a"]).common().inputs[0].spec,
+            InputSpec::Search(_)
+        ));
     }
 
     #[test]
