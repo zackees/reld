@@ -28,7 +28,11 @@ cargo build --release --target x86_64-unknown-linux-gnu \
 
 Then run the reld-built reld and have it link the test suite — a two-generation bootstrap.
 
-`Acceptance:` `bash ci/selfhost.sh` exits 0.
+`Acceptance:` `uv run --no-sync python -m ci.selfhost` exits 0, run per PR and per push to
+main by [`selfhost-linux.yml`](../../.github/workflows/selfhost-linux.yml). It builds three
+generations and requires generations 1 and 2 to be byte-identical outside `.comment`, where
+the linker records its own identity, so a divergence is a real dependence on something other
+than the input rather than a version string.
 
 ## P2-T3 — Real-world corpus, published as a pass rate
 
