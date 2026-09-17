@@ -174,11 +174,12 @@ tests = [
   "build-id.sh",                    # Different build ID data size
   "cmdline.sh",                     # Different message formats for unknown options.
   "comment.sh",                     # We store a different string in the comment section than mold.
-  "copyrel-alignment.sh",           # We put copy relocation info to `.bss`
-  "copyrel-norelro.sh",             # We put copy relocation info to `.bss`
-  "copyrel-protected.sh",           # We put copy relocation info to `.bss`
-  "copyrel-relro.sh",               # We put copy relocation info to `.bss`
-  "copyrel-relro2.sh",              # We put copy relocation info to `.bss`
+  # Read-only copies now land in `.data.rel.ro` (reld#123), which is what removed
+  # `copyrel-relro.sh` from this list. These four still differ from mold in other ways.
+  "copyrel-alignment.sh",           # Copy relocation placement differs from mold
+  "copyrel-norelro.sh",             # Copy relocation placement differs from mold
+  "copyrel-protected.sh",           # Copy relocation placement differs from mold
+  "copyrel-relro2.sh",              # Copy relocation placement differs from mold
   "demangle.sh",                    # Different message formats
   "duplicate-error-archive.sh",     # Different message formats
   "duplicate-error-gc-sections.sh", # Different message formats

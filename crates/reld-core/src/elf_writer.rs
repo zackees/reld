@@ -5713,10 +5713,11 @@ fn write_copy_relocation_dynamic_symbol_definition<'data>(
     let sym_index = sym_def.symbol_id.to_input(object.symbol_id_range);
     let sym = object.object.symbol(sym_index)?;
     let name = sym_def.name;
+    let destination = crate::elf::copy_relocation_section(object.object, sym_index)?;
     let shndx = layout
         .output_sections
-        .output_index_of_section(output_section_id::BSS)
-        .context("Copy relocation with no BSS section")?;
+        .output_index_of_section(destination)
+        .context("Copy relocation with no destination section")?;
     let res = layout
         .local_symbol_resolution(sym_def.symbol_id)
         .context("Copy relocation for unresolved symbol")?;
@@ -6647,10 +6648,14 @@ fn write_dynamic_file<'data, A: Arch<Platform = Elf>>(
                 // Symbol needs a copy relocation, which means that the dynamic symbol will be
                 // written by the epilogue not by us. However, we do need to write a regular
                 // symtab entry.
+                let destination = crate::elf::copy_relocation_section(
+                    object.object,
+                    symbol_id.to_input(object.symbol_id_range),
+                )?;
                 table_writer.debug_symbol_writer.copy_symbol(
                     symbol,
                     name,
-                    output_section_id::BSS,
+                    destination,
                     res.value(),
                     ValueFlags::empty(),
                 )?;

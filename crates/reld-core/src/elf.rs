@@ -6272,10 +6272,12 @@ fn allocate_for_copy_relocations<'data>(
 
         let alignment = Alignment::new(state.object.section_alignment(section)?)?;
 
-        // Allocate space in BSS for the copy of the symbol.
+        // Reserve space for the copy of the symbol. This must pick the same section as
+        // `assign_copy_relocation_address` below, which keeps read-only symbols inside RELRO.
         let size = symbol.size();
+        let destination = copy_relocation_section(state.object, symbol_index)?;
         common.allocate(
-            output_section_id::BSS.part_id_with_alignment::<Elf>(alignment),
+            destination.part_id_with_alignment::<Elf>(alignment),
             alignment.align_up(size),
         );
 
@@ -6305,26 +6307,53 @@ fn assign_copy_relocation_addresses<'data>(
 
             let alignment = Alignment::new(state.object.section_alignment(section)?)?;
 
+            let destination = copy_relocation_section(state.object, symbol_index)?;
+
             let input_address = symbol.value();
-            let output_address =
-                assign_copy_relocation_address(alignment, symbol.size(), memory_offsets);
+            let output_address = assign_copy_relocation_address(
+                alignment,
+                symbol.size(),
+                destination,
+                memory_offsets,
+            );
 
             Ok((input_address, output_address))
         })
         .try_collect()
 }
 
-/// Assigns the address in BSS for the copy relocation of a symbol.
+/// Where the copy of a symbol lives. A symbol the shared object kept read-only must land inside
+/// PT_GNU_RELRO, otherwise a `const` stays writable for the life of the process. GNU ld uses
+/// `.data.rel.ro` for this and lld uses `.bss.rel.ro`; both are covered by RELRO.
+///
+/// Layout and both symbol-table writers must agree, so they all go through here.
+pub(crate) fn copy_relocation_section(
+    object: &crate::elf::File<'_>,
+    symbol_index: object::SymbolIndex,
+) -> Result<OutputSectionId> {
+    let symbol = object.symbol(symbol_index)?;
+    let section_index = object
+        .symbol_section(symbol, symbol_index)?
+        .context("Copy relocation for undefined symbol")?;
+    let writable = platform::SectionHeader::is_writable(object.section(section_index)?);
+    Ok(if writable {
+        output_section_id::BSS
+    } else {
+        output_section_id::DATA_REL_RO
+    })
+}
+
+/// Assigns the address for the copy relocation of a symbol.
 fn assign_copy_relocation_address(
     alignment: Alignment,
     size: u64,
+    destination: OutputSectionId,
     memory_offsets: &mut OutputSectionPartMap<u64>,
 ) -> u64 {
-    let bss =
-        memory_offsets.get_mut(output_section_id::BSS.part_id_with_alignment::<Elf>(alignment));
-    let a = *bss;
-    *bss += alignment.align_up(size);
-    a
+    let offset = memory_offsets.get_mut(destination.part_id_with_alignment::<Elf>(alignment));
+    let address = *offset;
+    *offset += alignment.align_up(size);
+    address
 }
 
 impl CopyRelocationInfo {
