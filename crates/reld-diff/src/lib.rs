@@ -806,10 +806,26 @@ impl Report {
         !self.diffs.is_empty()
     }
 
-    /// Caller-supplied ignore patterns that suppressed at least one observed difference.
+    /// Ignore patterns that suppressed at least one observed difference, whether they came from
+    /// the caller or from `--reld-defaults`.
     #[must_use]
     pub fn used_ignores(&self) -> std::collections::HashSet<String> {
         self.used_ignores.borrow().clone()
+    }
+
+    /// The inherited `--reld-defaults` patterns that were in play for this report's architecture.
+    ///
+    /// A caller-supplied ignore is ratcheted per fixture, but a default suppresses differences
+    /// across the whole suite and no single fixture can tell whether it is still needed. Callers
+    /// that run many fixtures take the union of these and of [`Report::used_ignores`], and a
+    /// default in the first set but not the second is a candidate for removal (reld#13).
+    #[must_use]
+    pub fn declared_default_ignores(&self) -> Vec<String> {
+        self.config
+            .reld_default_ignores
+            .iter()
+            .map(|entry| entry.pattern.clone())
+            .collect()
     }
 
     #[must_use]

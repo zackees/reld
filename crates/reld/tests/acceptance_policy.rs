@@ -240,3 +240,63 @@ impl AggregateOracleCoverage {
         [("ELF", &self.elf), ("Mach-O", &self.macho)].into_iter()
     }
 }
+
+/// Which inherited `--reld-defaults` ignores the whole run still needed (reld#13).
+///
+/// A caller-supplied ignore is ratcheted per fixture: the fixture that declares it is the fixture
+/// that must still observe it. A default cannot work that way, because it suppresses differences
+/// across every fixture and no single one of them can say whether it is still earning its place.
+/// So the run takes the union instead: a default that no fixture observed is a candidate for
+/// removal, and reporting it is how the inherited list shrinks rather than calcifying.
+#[derive(Default)]
+pub(crate) struct AggregateDefaultIgnores {
+    declared: std::collections::BTreeSet<String>,
+    used: std::collections::BTreeSet<String>,
+}
+
+impl AggregateDefaultIgnores {
+    pub(crate) fn record(
+        &mut self,
+        declared: Vec<String>,
+        used: &std::collections::HashSet<String>,
+    ) {
+        self.declared.extend(declared);
+        self.used.extend(used.iter().cloned());
+    }
+
+    /// Declared defaults no fixture observed, in a stable order.
+    pub(crate) fn unobserved(&self) -> Vec<&str> {
+        self.declared
+            .iter()
+            .filter(|pattern| !self.used.contains(*pattern))
+            .map(String::as_str)
+            .collect()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let unobserved = self.unobserved();
+        if unobserved.is_empty() {
+            return format!(
+                "all {} inherited reld-diff default ignores were still observed",
+                self.declared.len()
+            );
+        }
+        format!(
+            "{} of {} inherited reld-diff default ignores were not observed by any fixture in this run (reld#13):\n  {}",
+            unobserved.len(),
+            self.declared.len(),
+            unobserved.join("\n  ")
+        )
+    }
+
+    /// Fails only when asked to. Coverage of the defaults depends on which fixtures a host can
+    /// run, so an unobserved default is a lead to confirm on a full matrix, not a red build.
+    pub(crate) fn verify(&self) -> Result {
+        ensure!(
+            self.unobserved().is_empty(),
+            "{}\nRemove each pattern from `apply_reld_defaults` and re-run, or drop RELD_RATCHET_DEFAULT_IGNORES.",
+            self.summary()
+        );
+        Ok(())
+    }
+}

@@ -1,5 +1,6 @@
 mod acceptance_policy;
 
+use acceptance_policy::AggregateDefaultIgnores;
 use acceptance_policy::AggregateOracleCoverage;
 use acceptance_policy::FixtureOracleValidation;
 use acceptance_policy::OracleFormat;
@@ -7,6 +8,7 @@ use acceptance_policy::TrackedIgnore;
 use acceptance_policy::ignore_patterns_for_arch;
 use acceptance_policy::should_enforce_aggregate_coverage;
 use acceptance_policy::validate_test_config_ignores;
+use std::collections::HashSet;
 
 #[test]
 fn aggregate_gate_only_runs_for_a_full_execution() {
@@ -161,4 +163,47 @@ fn relocation_coverage_distinguishes_no_format_from_zero_denominator() {
             .to_string()
             .contains("ELF aggregate relocation coverage 0%")
     );
+}
+
+#[test]
+fn a_default_ignore_no_fixture_observed_is_reported_as_a_removal_candidate() {
+    let mut aggregate = AggregateDefaultIgnores::default();
+    // Two fixtures, each declaring the same defaults and each observing a different one.
+    aggregate.record(
+        vec![
+            "section.plt".to_owned(),
+            "section.hash".to_owned(),
+            "segment.PHDR.*".to_owned(),
+        ],
+        &HashSet::from(["section.plt".to_owned()]),
+    );
+    aggregate.record(
+        vec![
+            "section.plt".to_owned(),
+            "section.hash".to_owned(),
+            "segment.PHDR.*".to_owned(),
+        ],
+        &HashSet::from([
+            "section.hash".to_owned(),
+            "an-ignore-from-the-fixture".to_owned(),
+        ]),
+    );
+
+    // The union is what counts: `section.plt` is still needed even though the second fixture did
+    // not observe it. Only the default no fixture observed is a candidate.
+    assert_eq!(aggregate.unobserved(), vec!["segment.PHDR.*"]);
+    assert!(aggregate.summary().contains("1 of 3"));
+    assert!(aggregate.verify().is_err());
+}
+
+#[test]
+fn every_default_ignore_observed_passes_and_says_so() {
+    let mut aggregate = AggregateDefaultIgnores::default();
+    aggregate.record(
+        vec!["section.plt".to_owned()],
+        &HashSet::from(["section.plt".to_owned()]),
+    );
+    assert!(aggregate.unobserved().is_empty());
+    assert!(aggregate.summary().contains("all 1"));
+    aggregate.verify().unwrap();
 }
