@@ -150,6 +150,12 @@ publishing long before the speed column has content.
 - **Scale.** Nothing specifies workload *size*. The bugs that ship are threshold bugs: >64K
   sections (COFF `NumberOfSections` is `u16`), >2 GB output, >64K relocations in one COFF
   section (`IMAGE_SCN_LNK_NRELOC_OVFL`). None appear in a 100-seed synthetic run.
+  The >64K section and >64K relocation cases run in the per-PR Phase 2 Linux gate. The >2 GiB
+  output does not: its inputs alone are gigabytes, so it runs weekly from
+  `.github/workflows/scale-gate-linux.yml` via `ci/scale_gate.py`, which links the output,
+  validates every section and segment against the file size, executes it, and records peak RSS,
+  wall time, output size, runner image, and reld commit. Tracked by
+  [#16](https://github.com/zackees/reld/issues/16).
 - **Re-link over an existing output.** Especially relevant given the product is incremental and
   mold's measured 300 ms win comes from overwriting rather than recreating.
 
