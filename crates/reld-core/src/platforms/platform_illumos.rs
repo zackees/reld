@@ -96,3 +96,7 @@ pub mod process {
         }
     }
 }
+
+pub mod term {
+    pub use crate::platforms::platform_unix::term::prepare_stderr_for_ansi;
+}

@@ -145,11 +145,19 @@ tracing-subscriber = { version = "0.3.16", default-features = false, features = 
   "fmt",
   "registry",
 ] }
-twox-hash = { version = "2.1.2", default-features = false, features = ["xxhash3_128"] }
+twox-hash = { version = "2.1.2", default-features = false, features = [
+  "xxhash3_128",
+] }
 uuid = { version = "1.3.0", default-features = false, features = ["v4"] }
 wait-timeout = { version = "0.2.0", default-features = false }
 wait4 = { version = "0.1.3", default-features = false }
 which = { version = "8.0.0", default-features = false, features = ["real-sys"] }
+# Windows console mechanics for colored diagnostics (reld#144). Approved as a direct
+# dependency in reld#144; the version already resolved through `colored`.
+windows-sys = { version = "0.61.2", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+] }
 winnow = { version = "1.0.0", default-features = false, features = [
   "ascii",
   "simd",

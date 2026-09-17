@@ -1,4 +1,4 @@
-use colored::Colorize as _;
+use crate::diagnostic::Severity;
 use std::fmt::Display;
 
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
@@ -105,7 +105,11 @@ impl Warning {
 
 impl Display for Warning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "reld: {} {}", "warning:".yellow(), self.message)
+        write!(
+            f,
+            "{}",
+            crate::diagnostic::render(Severity::Warning, &self.message)
+        )
     }
 }
 
@@ -205,7 +209,7 @@ impl std::fmt::Debug for Error {
 }
 
 pub fn report_error(error: &Error) {
-    eprintln!("reld: {}: {error:?}", "error".red());
+    crate::diagnostic::emit(Severity::Error, &format_args!("{error:?}"));
 }
 
 pub fn report_error_and_exit(error: &Error) -> ! {
