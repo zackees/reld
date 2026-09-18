@@ -175,11 +175,6 @@ impl Config {
         // Every inherited default below is tracked independently. Do not add an untyped string:
         // the report validates the typed list before using these patterns.
         let mut defaults = Vec::from([
-            // We don't currently support allocating space except in sections, so we have
-            // sections to hold the section and program headers. We then need
-            // to ignore them because GNU ld doesn't define such sections.
-            TrackedIgnore::new("section.shdr", 13),
-            TrackedIgnore::new("section.phdr", 13),
             // We don't yet support these sections.
             TrackedIgnore::new("section.data.rel.ro", 13),
             // We set this to 8. GNU ld sometimes does too, but sometimes to 0.
@@ -187,11 +182,7 @@ impl Config {
             TrackedIgnore::new("section.plt.got.entsize", 13),
             TrackedIgnore::new("section.plt.entsize", 13),
             // GNU ld sometimes sets this differently that we do.
-            TrackedIgnore::new("section.plt", 13),
             TrackedIgnore::new("section.plt.alignment", 13),
-            TrackedIgnore::new("section.bss.alignment", 13),
-            TrackedIgnore::new("section.gnu.build.attributes", 13),
-            TrackedIgnore::new("section.annobin.notes.entsize", 13),
             // We don't yet group .lrodata sections separately.
             TrackedIgnore::new("section.lrodata", 13),
             // We sometimes eliminate __tls_get_addr where GNU ld doesn't. This can mean that
@@ -220,26 +211,15 @@ impl Config {
             // DT_FLAGS.BIND_NOW
             TrackedIgnore::new(".dynamic.DT_BIND_NOW", 13),
             TrackedIgnore::new(".dynamic.DT_FLAGS.BIND_NOW", 13),
-            // When GNU ld encounters a GOT-forming reference to an ifunc, it generates a
-            // canonical PLT entry and points the GOT at that. This means that it ends up with
-            // GOT->PLT->GOT. We don't as yet support doing this.
-            TrackedIgnore::new("rel.missing-got-plt-got", 13),
             // We do support this. TODO: Should definitely look into why we're seeing this
             // missing in our output.
             TrackedIgnore::new("section.rela.plt", 13),
             // We currently write 10 byte PLT entries in some cases where GNU ld writes 8 byte
             // ones.
             TrackedIgnore::new("section.plt.got.alignment", 13),
-            // GNU ld sometimes makes this writable sometimes not. Presumably this depends on
-            // whether there are relocations or some flags.
-            TrackedIgnore::new("section.eh_frame.flags", 13),
             // TLSDESC relaxations aren't yet implemented.
             TrackedIgnore::new("rel.match_failed.R_X86_64_GOTPC32_TLSDESC", 13),
             TrackedIgnore::new("rel.match_failed.R_X86_64_CODE_4_GOTPC32_TLSDESC", 13),
-            TrackedIgnore::new(
-                "rel.missing-opt.R_X86_64_TLSDESC_CALL.SkipTlsDescCall.*",
-                13,
-            ),
             // Reld eliminates GOTPCRELX in statically linked executables even for undefined
             // symbols, whereas other linkers don't. This is a valid optimisation that other
             // linkers don't currently do.
@@ -247,15 +227,6 @@ impl Config {
                 "rel.extra-opt.R_X86_64_GOTPCRELX.CallIndirectToRelative.static-*",
                 13,
             ),
-            // Reld applies MovIndirectToLea relaxation to _DYNAMIC symbol in static builds
-            // because it's marked as NON_INTERPOSABLE. GNU ld keeps the GOT-relative access.
-            // Both are correct, but Reld's approach is more optimized.
-            TrackedIgnore::new(
-                "rel.extra-opt.R_X86_64_REX_GOTPCRELX.MovIndirectToLea.static-*",
-                13,
-            ),
-            // We don't yet support emitting warnings.
-            TrackedIgnore::new("section.gnu.warning", 13),
             // GNU ld sometimes applies relaxations that we don't yet.
             TrackedIgnore::new("rel.match_failed.R_AARCH64_TLSDESC_LD64_LO12", 13),
             TrackedIgnore::new("rel.match_failed.R_AARCH64_TLSGD_ADD_LO12_NC", 13),
@@ -290,14 +261,10 @@ impl Config {
             // ld and lld only emit the GOT entries and leave direct references as null. Our
             // behaviour seems more consistent with the description of
             // `-zdynamic-undefined-weak`.
-            TrackedIgnore::new("rel.undefined-weak.dynamic.R_X86_64_64", 13),
             TrackedIgnore::new("rel.undefined-weak.dynamic.R_AARCH64_ABS64", 13),
             // On aarch64, GNU ld, at least sometimes, converts R_AARCH64_ABS64 to a
             // PLT-forming relocation. We at present, don't.
             TrackedIgnore::new("rel.dynamic-plt-bypass", 13),
-            // If we don't optimise a TLS access, then we'll have references to __tls_get_addr,
-            // when GNU ld doesn't.
-            TrackedIgnore::new("dynsym.__tls_get_addr.*", 13),
             // GNU ld emits two segments, whereas reld emits only a single segment.
             TrackedIgnore::new("segment.LOAD.R.*", 13),
             // We haven't provided an implementation that is compatible with existing linkers.
@@ -310,18 +277,13 @@ impl Config {
             // TODO: RISC-V
             TrackedIgnore::new("segment.LOAD.RW.alignment", 13),
             // TODO: Latest lld sometimes doesn’t create a .note.gnu.property section even when
-            // Reld does.
+            // Reld does. Still observed by the linux-gnu x86_64 acceptance run (reld#186).
             TrackedIgnore::new("segment.GNU_PROPERTY.alignment", 13),
             TrackedIgnore::new("segment.GNU_PROPERTY.flags", 13),
             // TODO: We consider SFrame sections experimental and disabled by default.
             TrackedIgnore::new("segment.GNU_SFRAME.alignment", 13),
             TrackedIgnore::new("segment.GNU_SFRAME.flags", 13),
             TrackedIgnore::new("section.sframe", 13),
-            // Different linkers put the PLT in different locations relative to .text, so
-            // whether range-extension thunks are needed varies.
-            TrackedIgnore::new("rel.plt.extra-thunk", 13),
-            TrackedIgnore::new("rel.plt.absent-thunk", 13),
-            // On some systems Reld outputs these symbols while GNU ld does not.
         ]);
 
         match arch {
