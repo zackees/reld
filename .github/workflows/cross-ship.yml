@@ -194,27 +194,47 @@ jobs:
           name: ${{ matrix.artifact }}
           path: package
 
-      # On Windows (msvc or gnu), reld bridges `--version` to its lld-link
-      # COFF backend, so it prints lld's version, not its own.
+      # This job is the only part of the workflow on scarce runners, so it does
+      # exactly one thing the Linux build job cannot: execute the binary on the
+      # real OS (reld#174). The format check already happened in `cross-build`.
+      #
+      # `-flavor gnu --version` selects the native ELF argument model on any
+      # host, so reld's own code answers — `Reld … (compatible with GNU
+      # linkers)` — with no external linker involved. A bare `--version`
+      # bridges to lld-link / ld64.lld and would only prove that linker exists.
+      # The version token is not asserted: build.rs makes it depend on checkout
+      # depth and tags.
+
       - name: Smoke deployed reld (windows)
         if: startsWith(matrix.name, 'windows')
         shell: pwsh
         run: |
-          $out = & ".\package\${{ matrix.executable }}" --version 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
-          Write-Output $out
-          if ($out -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
+          $exe = ".\package\${{ matrix.executable }}"
 
-      # On macOS, reld is invoked as a linker and bridges every call (incl.
-      # --version) to ld64.lld, so it can't print its own version (see the
-      # macOS self-host note in ci.yml). Confirm the shipped binary is a
-      # well-formed arm64 Mach-O executable instead.
+          $native = & $exe -flavor gnu --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "reld -flavor gnu --version exited with $LASTEXITCODE" }
+          Write-Output $native
+          if ($native -notmatch '^Reld .*\(compatible with GNU linkers\)') {
+            throw "reld's own code did not answer -flavor gnu --version"
+          }
+
+          # The lld-link hand-off is part of the Windows product, so keep it.
+          $bridge = & $exe --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
+          Write-Output $bridge
+          if ($bridge -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
+
+      # On Apple Silicon the kernel kills an arm64 executable with a missing or
+      # invalid code signature at exec, which no format check can see. Running
+      # it is the point of this leg.
       - name: Smoke deployed reld (macos-arm64)
         if: matrix.name == 'macos-arm64'
         shell: bash
         run: |
-          set -euxo pipefail
-          chmod +x "package/${{ matrix.executable }}"
-          file "package/${{ matrix.executable }}"
-          file "package/${{ matrix.executable }}" | grep -q 'Mach-O'
-          file "package/${{ matrix.executable }}" | grep -q 'arm64'
+          set -euo pipefail
+          exe="package/${{ matrix.executable }}"
+          chmod +x "$exe"
+          out="$("$exe" -flavor gnu --version 2>&1)"
+          echo "$out"
+          grep -Eq '^Reld .*\(compatible with GNU linkers\)' <<<"$out" \
+            || { echo "::error::reld's own code did not answer -flavor gnu --version"; exit 1; }
