@@ -65,6 +65,7 @@ pub(crate) mod string_merging;
 pub(crate) mod subprocess;
 pub(crate) mod symbol;
 pub(crate) mod symbol_db;
+pub(crate) mod target_probe;
 pub(crate) mod thunks;
 #[cfg(test)]
 mod tidy_tests;
