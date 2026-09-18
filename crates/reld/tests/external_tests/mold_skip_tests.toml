@@ -184,31 +184,31 @@ tests = [
   "copyrel-norelro.sh",             # Copy relocation placement differs from mold
   "copyrel-protected.sh",           # Copy relocation placement differs from mold
   "copyrel-relro2.sh",              # Copy relocation placement differs from mold
-  "demangle.sh",                    # Different message formats
   "duplicate-error-archive.sh",     # Different message formats
   "duplicate-error-gc-sections.sh", # Different message formats
   "duplicate-error.sh",             # Different message formats
   "empty-input.sh",                 # Different message formats
   "hash-style.sh",                  # Reld doesn't support `--hash-style=none`.
-  "hidden-undef.sh",                # Reld correctly errors, but message format differs from mold's.
+  # reld matches lld's `undefined hidden symbol: foo`; the test greps mold's `undefined symbol: foo`
+  "hidden-undef.sh",
   "help.sh",
-  "invalid-version-script.sh",      # Different message formats
-  "linker-script-error.sh",         # Different message formats
-  "many-output-sections.sh",        # Different message formats
+  "invalid-version-script.sh", # Different message formats
+  "linker-script-error.sh",    # Different message formats
+  "many-output-sections.sh",   # Different message formats
   "mold-wrapper.sh",
   "mold-wrapper2.sh",
-  "no-allow-shlib-undefined.sh",    # Different message formats
-  "no-allow-shlib-undefined3.sh",   # Different message formats
-  "no-allow-shlib-undefined4.sh",   # GNU ld and LLD also fail
-  "plt-symbols.sh",                 # Reld currently doesn't create entries in the symbol table with the `$plt` suffix unless `--got-plt-syms` is specified
-  "response-file-quoting.sh",       # Different message formats: the quoted @file parses natively since reld#179, but the test greps `cannot open foobar:` and reld says ``Failed to open input file `foobar` ``
-  "run-clang.sh",                   # This test checks the comment section to verify if it's linked with mold.
+  # reld matches lld's `undefined reference: foo`; the test greps mold's `undefined symbol: foo`
+  "no-allow-shlib-undefined.sh",
+  # reld matches lld's `undefined reference: foo`; the test greps mold's
+  # `--no-allow-shlib-undefined: undefined symbol: foo`
+  "no-allow-shlib-undefined3.sh",
+  "no-allow-shlib-undefined4.sh", # GNU ld and LLD also fail
+  "plt-symbols.sh",               # Reld currently doesn't create entries in the symbol table with the `$plt` suffix unless `--got-plt-syms` is specified
+  "response-file-quoting.sh",     # Different message formats: the quoted @file parses natively since reld#179, but the test greps `cannot open foobar:` and reld says ``Failed to open input file `foobar` ``
+  "run-clang.sh",                 # This test checks the comment section to verify if it's linked with mold.
   "stdout.sh",
-  "unresolved-symbols.sh",          # Different message formats
   "verbose.sh",
-  "version.sh",                     # The message of `--version` is different from mold's one.
-  "warn-unresolved-symbols.sh",     # Different message formats
-  "z-defs.sh",                      # Different message formats
+  "version.sh",                   # The message of `--version` is different from mold's one.
 ]
 
 [skipped_groups.lto]
@@ -252,6 +252,8 @@ tests = [
   "common-ref.sh",
   "common-symbols.sh",
   "defsym-missing-symbol.sh",
+  # First half passes; the second expects mold's Rust demangling (`ns::versionv`) chosen from
+  # a `rustc` .comment, which lld does not do
   "demangle-cpp.sh",
   "discard-section.sh",
   "discard.sh",
@@ -259,9 +261,8 @@ tests = [
   "glibc-2.22-bug.sh",
   "initfirst.sh",
   "mergeable-strings.sh",
-  "missing-error.sh",
-  "no-allow-shlib-undefined-circular.sh",
-  "no-allow-shlib-undefined-hidden.sh",
+  "no-allow-shlib-undefined-circular.sh", # Greps mold's `libfoo.so: --no-allow-shlib-undefined: undefined symbol: baz`
+  "no-allow-shlib-undefined-hidden.sh",   # Greps mold's `undefined symbol: foo`; reld prints lld's `undefined reference: foo`
   "no-undefined-version.sh",
   "nocopyreloc.sh",
   "noinhibit-exec.sh",
@@ -278,6 +279,5 @@ tests = [
   "versioned-undef.sh",
   "warn-symbol-type.sh",
   "weak-export-exe.sh",
-  "weak-undef2.sh",
   "weak-undef5.sh",
 ]
