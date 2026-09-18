@@ -511,7 +511,8 @@ def attempt(
 ) -> Outcome:
     """Extract fresh, build, verify (when linked by reld), then smoke-test."""
     source_root = extract(archive, workdir, project.archive_root)
-    env = attempt_env(project, linker, cc=cc, cxx=cxx, base_env=os.environ, root=workdir)
+    # CARGO_TARGET_DIR must sit under the source root: artifacts are resolved relative to it.
+    env = attempt_env(project, linker, cc=cc, cxx=cxx, base_env=os.environ, root=source_root)
 
     output_parts: list[str] = []
     for argv in project.build:
