@@ -531,19 +531,11 @@ jobs:
       - run: uv run --no-sync python -m pytest ci/tests -q
         shell: bash
 
-  # Release cross-compilation on cheap, plentiful Linux runners. Building the
-  # Windows target from Linux exploits parallel Linux capacity for the compile +
-  # link phases (native on-target *test* execution stays on the native matrix
-  # legs above).
-  #
-  # NOTE: this uses the standard mingw-w64 cross toolchain directly rather than
-  # `soldr cargo`. soldr's current cross-compile path breaks here two ways — its
-  # zccache builds the cc-crate C deps (zstd, blake3) with the host compiler
-  # (host ELF objects -> mingw PE link fails, zackees/soldr#2334) and its
-  # toolchain cache does not rehydrate the target's rust-std on a cache hit
-  # (E0463 can't find crate for std). Once a published soldr cross toolchain
-  # exists (zackees/soldr#2335, `soldr cc --target ...`), this job should switch
-  # to it and drop the mingw CC/CXX/AR wiring. Tracked for reld in follow-up.
+  # Release cross-compilation on cheap, plentiful Linux runners via the
+  # blessed soldr front door (`soldr build --target`), which provisions the
+  # mingw-w64-cross toolchain from the soldr-toolchain catalogue with ZERO
+  # tools installed on the runner. Mirrors the windows-gnu leg of
+  # cross-ship.yml's cross-build job (reld#59, reld#167).
   cross-release:
     name: Cross release (linux -> ${{ matrix.target }})
     runs-on: ubuntu-24.04
@@ -556,34 +548,35 @@ jobs:
             artifact: reld.exe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Install mingw-w64 cross toolchain
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # Avoid indefinite hangs from GitHub's Azure Ubuntu mirror.
-          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
-          APT_OPTIONS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=30)
-          sudo apt-get "${APT_OPTIONS[@]}" update
-          sudo apt-get "${APT_OPTIONS[@]}" install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          targets: ${{ matrix.target }}
+          submodules: recursive
 
-      - name: Cross-compile reld (release)
+      # Provision soldr + the target toolchain from the catalogue. `cross-targets`
+      # runs `soldr prepare` for the triple and exports the compiler/linker/SDK/
+      # sysroot/env plan -- no manual CC_/CXX_/AR_ wiring and no apt mingw install.
+      - name: Setup Soldr (prepare cross toolchain)
+        uses: zackees/setup-soldr@main
+        with:
+          # 0.9.18 ships the win-gnu prepare fix (soldr#3259): `soldr prepare
+          # --target x86_64-pc-windows-gnu` captures the mingw-w64-cross
+          # toolchain, so `cross-targets` works for win-gnu.
+          version: 0.9.18
+          cross-targets: ${{ matrix.target }}
+          # win-gnu links via the mingw gcc's own ld: soldr's default `fast`
+          # injects `-fuse-ld=lld`, which the cross gcc can't resolve.
+          linker: platform-default
+          cache: true
+          cache-preset: full
+          prebuild-deps: soldr-cook
+
+      - name: Cross-compile reld (release) via blessed front door
         shell: bash
-        # The workspace pulls in cc-built C libraries (zstd, blake3 SIMD). Point
-        # the cc crate's target-scoped CC/CXX/AR (and the Rust linker) at the
-        # mingw tools so the C objects are built as PE/COFF and link cleanly.
-        env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
-          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
-          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
         run: |
           set -euxo pipefail
-          cargo build --release --target "${{ matrix.target }}" -p reld --bin reld
+          # `soldr build --target` is the blessed surface: it mounts the
+          # catalogue toolchain and injects target cc-rs env itself.
+          soldr build --package reld --bin reld --release --locked \
+            --target "${{ matrix.target }}"
 
       - name: Verify cross-compiled artifact
         shell: bash

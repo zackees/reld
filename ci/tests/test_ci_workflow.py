@@ -37,14 +37,21 @@ def test_ci_caches_linux_reference_linkers():
 def test_ci_cross_compiles_release_on_linux():
     text = WORKFLOW.read_text()
 
-    # Release cross-compile of the Windows target on a Linux runner, using the
-    # mingw-w64 cross toolchain. (soldr's cross path is deferred pending
-    # zackees/soldr#2334 / #2335 — see the job comment.)
+    # Release cross-compile of the Windows target on a Linux runner, via the
+    # blessed soldr front door (matches cross-ship.yml's proven shape).
     assert "cross-release:" in text
-    assert "cargo build --release" in text
+    assert "zackees/setup-soldr@main" in text
+    assert "cross-targets: ${{ matrix.target }}" in text
+    assert "soldr build --package reld --bin reld --release --locked" in text
     assert "x86_64-pc-windows-gnu" in text
-    assert "gcc-mingw-w64-x86-64" in text
-    assert "CC_x86_64_pc_windows_gnu" in text
+
+    # The mingw-w64 toolchain is no longer hand-provisioned on the runner --
+    # soldr's catalogue owns compiler/linker/SDK/sysroot selection instead.
+    assert "gcc-mingw-w64-x86-64" not in text
+    assert "CC_x86_64_pc_windows_gnu" not in text
+    assert "CXX_x86_64_pc_windows_gnu" not in text
+    assert "AR_x86_64_pc_windows_gnu" not in text
+    assert "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER" not in text
 
 
 def test_ci_leaves_benchmarking_to_the_canonical_dispatched_workflow():
