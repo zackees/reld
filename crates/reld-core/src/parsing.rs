@@ -92,7 +92,8 @@ pub(crate) enum SymbolPlacement<'data, P: Platform> {
     /// to the non-inclusive end of the last section merged into the specified primary.
     SectionGroupEnd(OutputSectionId),
 
-    /// An undefined symbol supplied by the user, e.g. via `--undefined=symbol-name`.
+    /// An undefined symbol supplied by the user, e.g. via `--undefined=symbol-name` or matched by
+    /// `--undefined-glob=pattern`.
     ForceUndefined,
 
     /// A symbol that redirects to some other symbol.
@@ -212,7 +213,11 @@ impl<'data, P: Platform> ParsedInputObject<'data, P> {
 }
 
 impl<'data, P: Platform> Prelude<'data, P> {
-    pub(crate) fn new(args: &'data P::Args, output_kind: OutputKind) -> Result<Self> {
+    pub(crate) fn new(
+        args: &'data P::Args,
+        output_kind: OutputKind,
+        glob_undefined_names: &[&'data [u8]],
+    ) -> Result<Self> {
         verbose_timing_phase!("Construct prelude");
 
         let mut symbols = InternalSymbolsBuilder::default();
@@ -225,6 +230,13 @@ impl<'data, P: Platform> Prelude<'data, P> {
                 name.as_bytes(),
             ));
         });
+
+        for &name in glob_undefined_names {
+            symbols.add_symbol(InternalSymDefInfo::new(
+                SymbolPlacement::ForceUndefined,
+                name,
+            ));
+        }
 
         // Add symbols defined via the command line.
         args.defsym()

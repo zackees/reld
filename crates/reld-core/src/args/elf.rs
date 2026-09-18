@@ -75,6 +75,7 @@ pub struct ElfArgs {
     pub(crate) copy_relocations: CopyRelocations,
     pub(crate) sysroot: Option<Box<Path>>,
     pub(crate) undefined: Vec<String>,
+    pub(crate) undefined_glob: Vec<String>,
     pub(crate) relro: bool,
     pub(crate) entry: Option<String>,
     pub(crate) export_all_dynamic_symbols: bool,
@@ -338,6 +339,7 @@ impl Default for ElfArgs {
             sysroot: None,
             dependency_file: None,
             undefined: Vec::new(),
+            undefined_glob: Vec::new(),
             relro: true,
             entry: None,
             b_symbolic: BSymbolicKind::None,
@@ -1595,6 +1597,15 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
 
     parser
         .declare_with_param()
+        .long("undefined-glob")
+        .help("Force resolution of all symbols matching the glob pattern")
+        .execute(|args, _modifier_stack, value| {
+            args.undefined_glob.push(value.to_owned());
+            Ok(())
+        });
+
+    parser
+        .declare_with_param()
         .long("wrap")
         .help("Use a wrapper function")
         .execute(|args, _modifier_stack, value| {
@@ -2123,6 +2134,10 @@ impl platform::Args for ElfArgs {
         &self.undefined
     }
 
+    fn undefined_glob_patterns(&self) -> &[String] {
+        &self.undefined_glob
+    }
+
     fn lib_search_path(&self) -> &[Box<Path>] {
         &self.lib_search_path
     }
@@ -2615,6 +2630,21 @@ mod tests {
     fn parse_args_err<'a>(args: impl IntoIterator<Item = &'a str>) -> crate::error::Error {
         let mut elf_args = ElfArgs::new().unwrap();
         elf_args.parse(args.into_iter()).unwrap_err()
+    }
+
+    #[test]
+    fn test_parse_undefined_glob() {
+        let args = parse_args([
+            "--undefined-glob=foo*",
+            "--undefined-glob",
+            "ba?[xz]",
+            "-u",
+            "plain",
+            "--undefined=other",
+            "/tmp/a.o",
+        ]);
+        assert_eq!(args.undefined_glob_patterns(), &["foo*", "ba?[xz]"]);
+        assert_eq!(args.undefined, ["plain", "other"]);
     }
 
     #[test]

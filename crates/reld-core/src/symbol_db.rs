@@ -26,6 +26,7 @@ use crate::output_section_id::OutputSectionId;
 use crate::output_section_id::OutputSections;
 use crate::parsing;
 use crate::parsing::InternalSymDefInfo;
+use crate::parsing::ParsedInputObject;
 use crate::parsing::Prelude;
 use crate::parsing::Redirect;
 use crate::parsing::SymbolLoc;
@@ -391,7 +392,8 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
     ) -> Result {
         timing_phase!("Load inputs into symbol DB");
 
-        let parsed_objects = loaded.objects.into_iter().try_collect()?;
+        let parsed_objects: Vec<Box<ParsedInputObject<'data, P>>> =
+            loaded.objects.into_iter().try_collect()?;
 
         let processed_linker_scripts = parsing::process_linker_scripts(
             &loaded.linker_scripts,
@@ -405,10 +407,14 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
         let pre_existing_groups = self.groups.len();
 
         if self.groups.is_empty() {
+            let glob_names =
+                glob_undefined_names::<P>(self.args.undefined_glob_patterns(), &parsed_objects);
+
             self.groups
                 .push(Group::Prelude(crate::parsing::Prelude::new(
                     self.args,
                     self.output_kind,
+                    &glob_names,
                 )?));
         }
 
@@ -1476,6 +1482,148 @@ pub(crate) fn is_mapping_symbol_name(name: &[u8]) -> bool {
     name.starts_with(b"$x") || name.starts_with(b"$d") || name == b"L0\x01"
 }
 
+/// Expands `--undefined-glob` patterns into the concrete names of every global symbol, defined by a
+/// non-dynamic input (object file or archive member), whose name matches one of `patterns`. Returns
+/// an empty vector without touching `objects` when `patterns` is empty, so links that don't use
+/// `--undefined-glob` pay no extra cost. The returned names are sorted and deduplicated so that each
+/// match is only added to the prelude once.
+fn glob_undefined_names<'data, P: Platform>(
+    patterns: &[String],
+    objects: &[Box<ParsedInputObject<'data, P>>],
+) -> Vec<&'data [u8]> {
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let mut names = Vec::new();
+
+    for obj in objects {
+        if obj.is_dynamic() {
+            continue;
+        }
+
+        for sym in obj.object.symbols_iter() {
+            if sym.is_local() || sym.is_undefined() {
+                continue;
+            }
+
+            let Ok(name) = obj.object.symbol_name(sym) else {
+                continue;
+            };
+
+            if name.is_empty() {
+                continue;
+            }
+
+            if patterns
+                .iter()
+                .any(|pattern| symbol_glob_matches(pattern.as_bytes(), name))
+            {
+                names.push(name);
+            }
+        }
+    }
+
+    names.sort_unstable();
+    names.dedup();
+
+    names
+}
+
+/// Matches `name` against a shell-style glob as used by `--undefined-glob`: `*` matches any run of
+/// bytes, `?` matches one byte, `[...]` matches a byte set with `a-z` ranges and a leading `!` or
+/// `^` for negation, and `\\` escapes the next byte. An unterminated `[` matches a literal `[`.
+fn symbol_glob_matches(pattern: &[u8], name: &[u8]) -> bool {
+    let mut p = 0usize;
+    let mut n = 0usize;
+    let mut star_p: Option<usize> = None;
+    let mut star_n = 0usize;
+
+    while n < name.len() {
+        let unit_match = match pattern.get(p).copied() {
+            Some(b'*') => {
+                star_p = Some(p);
+                star_n = n;
+                p += 1;
+                continue;
+            }
+            Some(b'?') => Some(1),
+            Some(b'[') => match match_bracket(pattern, p, name[n]) {
+                Some((true, next_p)) => Some(next_p - p),
+                Some((false, _)) => None,
+                None => (name[n] == b'[').then_some(1),
+            },
+            Some(b'\\') if p + 1 < pattern.len() => (pattern[p + 1] == name[n]).then_some(2),
+            Some(c) => (c == name[n]).then_some(1),
+            None => None,
+        };
+
+        if let Some(advance) = unit_match {
+            p += advance;
+            n += 1;
+            continue;
+        }
+
+        if let Some(sp) = star_p {
+            p = sp + 1;
+            star_n += 1;
+            n = star_n;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern.get(p).copied() == Some(b'*') {
+        p += 1;
+    }
+
+    p == pattern.len()
+}
+
+/// Matches the bracket expression in `pattern` starting at index `p` (which must point at `[`)
+/// against the single byte `c`. Returns `(matched, index_after_closing_bracket)`, or `None` if the
+/// bracket expression is unterminated. A `]` immediately after `[` or `[!`/`[^` is treated as a
+/// literal member of the set rather than the closing bracket.
+fn match_bracket(pattern: &[u8], p: usize, c: u8) -> Option<(bool, usize)> {
+    let mut i = p + 1;
+
+    let negate = matches!(pattern.get(i).copied(), Some(b'!' | b'^'));
+    if negate {
+        i += 1;
+    }
+
+    let set_start = i;
+    let mut matched = false;
+
+    loop {
+        match pattern.get(i).copied() {
+            None => return None,
+            Some(b']') if i > set_start => return Some((matched != negate, i + 1)),
+            Some(mut lo) => {
+                if lo == b'\\' {
+                    i += 1;
+                    lo = pattern.get(i).copied()?;
+                }
+
+                if pattern.get(i + 1).copied() == Some(b'-')
+                    && pattern.get(i + 2).is_some_and(|&b| b != b']')
+                {
+                    let hi = pattern[i + 2];
+                    if (lo..=hi).contains(&c) {
+                        matched = true;
+                    }
+                    i += 3;
+                } else {
+                    if lo == c {
+                        matched = true;
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
 fn read_symbols<'data, P: Platform>(
     version_script: &VersionScript,
     shards: &mut [SymbolWriterShard<'_, '_, 'data, P>],
@@ -2267,5 +2415,90 @@ impl Display for SymbolNameDisplay<'_> {
         } else {
             write!(f, "SYMBOL-READ-ERROR")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::symbol_glob_matches;
+
+    fn matches(pattern: &str, name: &str) -> bool {
+        symbol_glob_matches(pattern.as_bytes(), name.as_bytes())
+    }
+
+    #[test]
+    fn star_matches_prefix() {
+        assert!(matches("foo*", "foo"));
+        assert!(matches("foo*", "foobar"));
+        assert!(!matches("foo*", "baz"));
+        assert!(!matches("foo*", "xfoo"));
+    }
+
+    #[test]
+    fn star_matches_empty_and_anything() {
+        assert!(matches("*", ""));
+        assert!(matches("*", "anything"));
+    }
+
+    #[test]
+    fn question_mark_matches_exactly_one_byte() {
+        assert!(matches("f?o", "foo"));
+        assert!(!matches("f?o", "fo"));
+        assert!(!matches("f?o", "fooo"));
+    }
+
+    #[test]
+    fn bracket_set_matches_any_member() {
+        assert!(matches("[abc]x", "ax"));
+        assert!(matches("[abc]x", "bx"));
+        assert!(matches("[abc]x", "cx"));
+        assert!(!matches("[abc]x", "dx"));
+    }
+
+    #[test]
+    fn bracket_range_matches_members() {
+        assert!(matches("[a-c]", "a"));
+        assert!(matches("[a-c]", "b"));
+        assert!(matches("[a-c]", "c"));
+        assert!(!matches("[a-c]", "d"));
+    }
+
+    #[test]
+    fn bracket_negation() {
+        assert!(!matches("[!a]", "a"));
+        assert!(matches("[!a]", "b"));
+        assert!(!matches("[^a]", "a"));
+        assert!(matches("[^a]", "b"));
+    }
+
+    #[test]
+    fn bracket_leading_literal_close_bracket() {
+        assert!(matches("[]a]", "]"));
+        assert!(matches("[]a]", "a"));
+        assert!(!matches("[]a]", "b"));
+    }
+
+    #[test]
+    fn backslash_escapes_next_byte() {
+        assert!(matches(r"\*", "*"));
+        assert!(!matches(r"\*", "x"));
+    }
+
+    #[test]
+    fn star_with_surrounding_literals() {
+        assert!(matches("*bar*", "foobarbaz"));
+        assert!(!matches("*bar*", "foobaz"));
+    }
+
+    #[test]
+    fn multiple_stars_backtrack() {
+        assert!(matches("a*b*c", "aXbYbZc"));
+        assert!(!matches("a*b*c", "aXbY"));
+    }
+
+    #[test]
+    fn unterminated_bracket_matches_literal() {
+        assert!(matches("[ab", "[ab"));
+        assert!(!matches("[ab", "ab"));
     }
 }

@@ -1422,6 +1422,13 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
         &[]
     }
 
+    /// Glob patterns from `--undefined-glob`. Every global symbol defined by a non-dynamic input
+    /// (including archive members not otherwise loaded) whose name matches is treated as if it
+    /// had been passed to `--undefined`.
+    fn undefined_glob_patterns(&self) -> &[String] {
+        &[]
+    }
+
     fn force_export_symbol_names(&self) -> &[String] {
         &[]
     }
