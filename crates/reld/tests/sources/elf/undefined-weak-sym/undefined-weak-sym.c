@@ -5,8 +5,8 @@
 //#Mode:dynamic
 //#Shared:force-dynamic-linking.c
 //#DiffIgnore:.dynamic.DT_NEEDED #13
-//#DiffIgnore:.dynamic.DT_RELA #13
-//#DiffIgnore:.dynamic.DT_RELAENT #13
+//#DiffIgnore:.dynamic.DT_RELA #13 arch=x86_64
+//#DiffIgnore:.dynamic.DT_RELAENT #13 arch=x86_64
 //#DiffIgnore:rel.undefined-weak.dynamic.R_X86_64_GLOB_DAT #13
 
 #include "../common/runtime.h"
