@@ -242,7 +242,12 @@ fn decode_response_file(path: &Path) -> Result<String> {
         .with_context(|| format!("Invalid UTF-8 linker response file `{}`", path.display()))
 }
 
-fn response_arguments(contents: &str) -> Result<Vec<OsString>> {
+/// Splits the decoded contents of a COFF/Mach-O linker response file into arguments.
+///
+/// Only COFF/Mach-O invocation-log output extraction uses this splitter, because lld-link/
+/// ld64.lld own their response grammar and encoding; ELF never comes here, it goes through the
+/// one GNU tokenizer in `args/response_file.rs` (reld#179).
+fn bridged_response_arguments(contents: &str) -> Result<Vec<OsString>> {
     let mut arguments = Vec::new();
     let mut argument = String::new();
     let mut quote = None;
@@ -267,7 +272,11 @@ fn response_arguments(contents: &str) -> Result<Vec<OsString>> {
     Ok(arguments)
 }
 
-fn requested_output_in(argv: &[OsString], response_depth: usize) -> Result<Option<String>> {
+fn requested_output_in(
+    argv: &[OsString],
+    target: BridgeTarget,
+    response_depth: usize,
+) -> Result<Option<String>> {
     let mut arguments = argv.iter();
     while let Some(argument) = arguments.next() {
         let value = argument.to_string_lossy();
@@ -275,8 +284,17 @@ fn requested_output_in(argv: &[OsString], response_depth: usize) -> Result<Optio
             if response_depth >= 16 {
                 bail!("Linker response-file nesting exceeds 16 levels at `{path}`");
             }
-            let nested = response_arguments(&decode_response_file(Path::new(path))?)?;
-            if let Some(output) = requested_output_in(&nested, response_depth + 1)? {
+            // ELF response files go through the one GNU tokenizer (reld#179); COFF/Mach-O keep
+            // their own UTF-16-aware decoding and splitter (`bridged_response_arguments`).
+            let nested = if target == BridgeTarget::Elf {
+                crate::args::read_args_from_file(Path::new(path))?
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>()
+            } else {
+                bridged_response_arguments(&decode_response_file(Path::new(path))?)?
+            };
+            if let Some(output) = requested_output_in(&nested, target, response_depth + 1)? {
                 return Ok(Some(output));
             }
             continue;
@@ -298,8 +316,8 @@ fn requested_output_in(argv: &[OsString], response_depth: usize) -> Result<Optio
     Ok(None)
 }
 
-fn requested_output(argv: &[OsString]) -> Result<Option<String>> {
-    requested_output_in(&argv[1..], 0)
+fn requested_output(argv: &[OsString], target: BridgeTarget) -> Result<Option<String>> {
+    requested_output_in(&argv[1..], target, 0)
 }
 
 fn append_json_string(encoded: &mut String, value: &str) {
@@ -378,7 +396,7 @@ pub fn log_successful_invocation(argv: &[OsString], route: Route) -> Result<()> 
     let path = PathBuf::from(path);
     let working_directory = std::env::current_dir()
         .with_context(|| "Failed to determine the linker working directory".to_owned())?;
-    let output = requested_output(argv)?;
+    let output = requested_output(argv, route.engine.format)?;
     let encoded = encode_invocation_record(argv, route, &working_directory, output.as_deref());
     let mut log = OpenOptions::new()
         .create(true)
@@ -481,6 +499,57 @@ fn select_engine(
     );
 }
 
+/// reld-only flags that force the native engine because they request an artifact or output
+/// content that only reld produces (validation, layout/trace dumps, symbol info, GC-stats
+/// diagnostics, SFrame experiments). These are `Capability::NativeControl`: forcing native and
+/// conflicting loudly with any routed requirement, rather than silently dropping the request
+/// (#123 D6 "NativeControl"; agents/docs/routing-maintenance.md "Is it reld-only?").
+const NATIVE_CONTROL_RELD_FLAGS: &[&str] = &[
+    "validate-output",
+    "write-layout",
+    "write-trace",
+    "sym-info",
+    "write-gc-stats",
+    "verbose-gc-stats",
+    "got-plt-syms",
+    "reld-experimental-sframe",
+    "discard-sframe",
+];
+
+/// Whether `arg` is `--name` or `--name=<value>` for exactly `name`. GNU flags are case-sensitive
+/// (agents/docs/routing-maintenance.md: "Spellings are case-sensitive for GNU and ld64 flags"), so
+/// this never lowercases either side.
+fn matches_reld_only_flag(arg: &str, name: &str) -> bool {
+    arg.strip_prefix("--").is_some_and(|rest| {
+        rest == name || rest.strip_prefix(name).is_some_and(|value| value.starts_with('='))
+    })
+}
+
+/// Whether `path` begins with an LLVM bitcode magic number: `BC\xC0\xDE` for raw bitcode, or the
+/// bitcode-wrapper magic `0x0B17C0DE` (little-endian on disk: `DE C0 17 0B`) used when bitcode is
+/// embedded with a wrapper header. An LTO object with no `-flto`/`-plugin-opt` on the command line
+/// must still route to lld (#123 Phase 0 row `-plugin-opt=… + bitcode inputs`): the native engine
+/// has no LTO implementation and would silently mislink it. Archive members are not probed yet
+/// (#123 Phase 3 TargetProbe); only bare file arguments are checked here. Any IO error (missing
+/// file, permission, not a regular file, too short) is treated as "not bitcode" rather than an
+/// error: this is a best-effort routing probe, not validation.
+fn is_llvm_bitcode_file(path: &Path) -> bool {
+    use std::io::Read as _;
+    // Only probe regular files: opening a FIFO or a tty (e.g. `-o /dev/stdout`) for reading
+    // could block the link indefinitely.
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    magic == *b"BC\xC0\xDE" || magic == [0xDE, 0xC0, 0x17, 0x0B]
+}
+
 fn collect_requested_capabilities(
     args: impl IntoIterator<Item = OsString>,
     requirements: &mut Vec<Requirement>,
@@ -502,51 +571,50 @@ fn collect_requested_capabilities(
             continue;
         }
 
-        let lower = arg.to_ascii_lowercase();
-        let requirement = if lower == "--validate-output"
-            || lower == "--write-layout"
-            || lower == "--write-trace"
-            || lower == "--sym-info"
-            || lower.starts_with("--sym-info=")
+        let requirement = if NATIVE_CONTROL_RELD_FLAGS
+            .iter()
+            .any(|name| matches_reld_only_flag(arg, name))
         {
             Some(Requirement {
                 capability: Capability::NativeControl,
                 trigger: "flag:reld-only-control",
             })
-        } else if is_driver_lto_flag(&lower) {
+        } else if is_driver_lto_flag(arg) {
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "flag:-flto",
             })
-        } else if lower == "-plugin"
-            || lower == "--plugin"
-            || lower.starts_with("-plugin=")
-            || lower.starts_with("--plugin=")
+        } else if arg == "-plugin"
+            || arg == "--plugin"
+            || arg.starts_with("-plugin=")
+            || arg.starts_with("--plugin=")
         {
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "flag:--plugin",
             })
-        } else if lower == "/ltcg"
-            || lower.starts_with("/ltcg:")
-            || lower == "/gl"
-            || lower.starts_with("/gl:")
+        } else if arg.eq_ignore_ascii_case("/ltcg")
+            || arg.to_ascii_lowercase().starts_with("/ltcg:")
+            || arg.eq_ignore_ascii_case("/gl")
+            || arg.to_ascii_lowercase().starts_with("/gl:")
         {
+            // MSVC spellings (`/LTCG`, `/GL`) are case-insensitive
+            // (agents/docs/routing-maintenance.md: "case-insensitive for COFF").
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "flag:/LTCG",
             })
-        } else if lower == "--icf=all"
-            || lower == "--icf=safe"
-            || lower == "-icf=all"
-            || lower == "-icf=safe"
+        } else if arg == "--icf=all"
+            || arg == "--icf=safe"
+            || arg == "-icf=all"
+            || arg == "-icf=safe"
         {
             Some(Requirement {
                 capability: Capability::Icf,
                 trigger: "flag:--icf",
             })
-        } else if lower == "--discard-all"
-            || lower == "-discard-all"
+        } else if arg == "--discard-all"
+            || arg == "-discard-all"
             // `-x` (lowercase) is `--discard-all`; `-X` (uppercase) is
             // `--discard-locals`, a native default, so it must NOT match.
             || arg == "-x"
@@ -555,10 +623,10 @@ fn collect_requested_capabilities(
                 capability: Capability::DiscardAll,
                 trigger: "flag:--discard-all",
             })
-        } else if lower == "-plugin-opt"
-            || lower.starts_with("-plugin-opt=")
-            || lower == "--plugin-opt"
-            || lower.starts_with("--plugin-opt=")
+        } else if arg == "-plugin-opt"
+            || arg.starts_with("-plugin-opt=")
+            || arg == "--plugin-opt"
+            || arg.starts_with("--plugin-opt=")
         {
             // rustc `-C linker-plugin-lto` through clang emits `-plugin-opt=…`
             // with no `-plugin`/`-flto`; bitcode needs lld's real LTO.
@@ -566,23 +634,28 @@ fn collect_requested_capabilities(
                 capability: Capability::Lto,
                 trigger: "flag:-plugin-opt",
             })
-        } else if lower == "--fix-cortex-a53-843419" || lower == "-fix-cortex-a53-843419" {
+        } else if arg == "--fix-cortex-a53-843419" || arg == "-fix-cortex-a53-843419" {
             Some(Requirement {
                 capability: Capability::CortexA53Erratum,
                 trigger: "flag:--fix-cortex-a53-843419",
             })
-        } else if lower == "-ztext"
-            || lower == "-z=text"
-            || (lower == "-z"
-                && args
-                    .peek()
-                    .is_some_and(|next| next.to_str() == Some("text")))
+        } else if arg == "-ztext"
+            || arg == "-z=text"
+            || (arg == "-z" && args.peek().is_some_and(|next| next.to_str() == Some("text")))
         {
             // `-z text` errors on DT_TEXTREL text relocations; the native engine
             // never errors on them (it just sets DT_TEXTREL), so delegate to lld.
             Some(Requirement {
                 capability: Capability::TextRelocs,
                 trigger: "flag:-z text",
+            })
+        } else if !arg.is_empty()
+            && !arg.starts_with('-')
+            && is_llvm_bitcode_file(Path::new(arg))
+        {
+            Some(Requirement {
+                capability: Capability::Lto,
+                trigger: "input:bitcode",
             })
         } else {
             None
@@ -836,68 +909,16 @@ fn needs_flavor_prefix(linker: &Path) -> bool {
         .is_some_and(|stem| stem.eq_ignore_ascii_case("rust-lld"))
 }
 
-/// Computes the arguments to forward to the child linker from the full process argv.
-///
-/// Drops `argv[0]`, and also drops a leading `-flavor <name>` pair if present: when reld is
-/// invoked via the `-flavor link`/`-flavor darwin` multi-call convention (see `Args::new`), that
-/// selector has already been consumed by reld's own platform dispatch, so forwarding it would
-/// leak a stray `-flavor` into the child linker (and, for `rust-lld`, collide with the `-flavor
-/// <target>` that `child_command_line` prepends).
+/// Drops `argv[0]` from the full process argv, and also drops a leading `-flavor <name>` pair if
+/// present: when reld is invoked via the `-flavor link`/`-flavor darwin` multi-call convention
+/// (see `Args::new`), that selector has already been consumed by reld's own platform dispatch, so
+/// forwarding it would leak a stray `-flavor` into the child linker (and, for `rust-lld`, collide
+/// with the `-flavor <target>` that `child_command_line` prepends).
 ///
 /// Also strips any `--engine=<name>` token, wherever it appears: that's a reld-specific flag
 /// (see `select_engine`), not a linker flag, so it must never leak into the child linker's
 /// command line.
-/// reld-only performance/diagnostic knobs that must not reach a child linker. A link that routes
-/// to a bridge engine (lld) drops these from the forwarded argv rather than forwarding an option
-/// lld would reject (reld#123 D6 "Stripped").
-const STRIPPED_RELD_FLAGS: &[&str] = &[
-    "update-in-place",
-    "time",
-    "mmap-output-file",
-    "no-mmap-output-file",
-    "fallocate-output-file",
-    "no-fallocate-output-file",
-    "madvise-huge-pages",
-    "no-madvise-huge-pages",
-    "threads",
-    "no-threads",
-    "no-fork",
-    "fork",
-];
-
-/// Drops reld-only flags (and, for `--time`/`--threads`, a following value) from the forwarded
-/// argv so nothing reld-only reaches a child linker.
-fn strip_reld_only_flags(args: Vec<OsString>) -> Vec<OsString> {
-    let mut out = Vec::new();
-    let mut iter = args.into_iter().peekable();
-    while let Some(arg) = iter.next() {
-        let Some(s) = arg.to_str() else {
-            out.push(arg);
-            continue;
-        };
-        let Some(bare) = s.strip_prefix("--") else {
-            out.push(arg);
-            continue;
-        };
-        let name = bare.split('=').next().unwrap_or(bare);
-        if !STRIPPED_RELD_FLAGS.contains(&name) {
-            out.push(arg);
-            continue;
-        }
-        // `--time`/`--threads` take an optional value; when spelled `--flag value`, drop the
-        // value token too.
-        if !bare.contains('=')
-            && matches!(name, "time" | "threads")
-            && let Some(next) = iter.peek()
-            && !next.to_str().is_some_and(|v| v.starts_with('-'))
-        {
-            iter.next();
-        }
-    }
-    out
-}
-
-fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
+fn drop_reld_dispatch_tokens<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
     let mut rest: Vec<OsString> = argv.into_iter().skip(1).collect();
     if rest
         .first()
@@ -911,21 +932,135 @@ fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
         arg.to_str()
             .is_none_or(|s| !s.starts_with(ENGINE_FLAG_PREFIX))
     });
-    strip_reld_only_flags(rest)
+    rest
 }
 
-/// Removes compiler-driver-only LTO switches after they have served their routing purpose. LLD
-/// consumes LLVM bitcode directly and rejects `-flto` itself; plugin switches are real linker
-/// options and remain untouched.
+/// How a `--name` flag's value is spelled, for `strip_reld_only_flags`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrippedValueKind {
+    /// The flag never takes a value.
+    None,
+    /// `--flag=value` is a value; a bare `--flag` takes the following token as its value only
+    /// when that token doesn't start with `-` (as today -- this can misidentify a real input
+    /// file as the value, a pre-existing quirk this table does not change).
+    Optional,
+    /// The flag always has a value: `--flag=value`, or otherwise the very next token regardless
+    /// of its own spelling.
+    Required,
+}
+
+/// reld-only performance/diagnostic knobs that must not reach a child linker. A link that routes
+/// to a bridge engine (lld) drops these from the forwarded argv rather than forwarding an option
+/// lld would reject (reld#123 D6 "Stripped"). `--rpath-link` is deliberately absent: `ld.lld`
+/// documents it as "Ignored for compatibility" (agents/docs/routing-maintenance.md), so it is
+/// forwarded like any ordinary linker flag instead of being stripped.
+const STRIPPED_RELD_FLAGS: &[(&str, StrippedValueKind)] = &[
+    ("update-in-place", StrippedValueKind::None),
+    ("no-update-in-place", StrippedValueKind::None),
+    ("time", StrippedValueKind::Optional),
+    ("mmap-output-file", StrippedValueKind::None),
+    ("no-mmap-output-file", StrippedValueKind::None),
+    ("fallocate-output-file", StrippedValueKind::None),
+    ("no-fallocate-output-file", StrippedValueKind::None),
+    ("madvise-huge-pages", StrippedValueKind::None),
+    ("no-madvise-huge-pages", StrippedValueKind::None),
+    ("threads", StrippedValueKind::Optional),
+    ("no-threads", StrippedValueKind::None),
+    ("thread-count", StrippedValueKind::Required),
+    ("fork", StrippedValueKind::None),
+    ("no-fork", StrippedValueKind::None),
+    ("prepopulate-maps", StrippedValueKind::None),
+    ("debug-fuel", StrippedValueKind::Required),
+    ("reld-experiments", StrippedValueKind::Required),
+    ("gc-stats-ignore", StrippedValueKind::Required),
+    ("nix-rpath", StrippedValueKind::Required),
+    ("no-identity-comment", StrippedValueKind::None),
+    ("no-string-merge", StrippedValueKind::None),
+];
+
+/// Drops reld-only flags from `args` so nothing reld-only reaches a child linker. Returns the
+/// filtered argv alongside every dropped option as spelled on the command line -- a split value
+/// rejoined with one space (e.g. `--thread-count 4`) -- for `stripped_options_note`.
+fn strip_reld_only_flags(args: Vec<OsString>) -> (Vec<OsString>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut dropped = Vec::new();
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        let Some(s) = arg.to_str() else {
+            out.push(arg);
+            continue;
+        };
+        let Some(bare) = s.strip_prefix("--") else {
+            out.push(arg);
+            continue;
+        };
+        let name = bare.split('=').next().unwrap_or(bare);
+        let Some(&(_, kind)) = STRIPPED_RELD_FLAGS.iter().find(|entry| entry.0 == name) else {
+            out.push(arg);
+            continue;
+        };
+
+        let mut spelling = s.to_owned();
+        if !bare.contains('=') {
+            let takes_following_value = match kind {
+                StrippedValueKind::None => false,
+                StrippedValueKind::Required => true,
+                StrippedValueKind::Optional => iter
+                    .peek()
+                    .is_some_and(|next| !next.to_str().is_some_and(|v| v.starts_with('-'))),
+            };
+            if takes_following_value && let Some(value) = iter.next() {
+                spelling.push(' ');
+                spelling.push_str(&value.to_string_lossy());
+            }
+        }
+        dropped.push(spelling);
+    }
+    (out, dropped)
+}
+
+/// Computes the arguments to forward to the child linker from the full process argv: the reld
+/// dispatch tokens dropped (see `drop_reld_dispatch_tokens`), then every top-level reld-only flag
+/// stripped (see `strip_reld_only_flags`).
+#[cfg(test)]
+fn forwarded_args<I: IntoIterator<Item = OsString>>(argv: I) -> Vec<OsString> {
+    strip_reld_only_flags(drop_reld_dispatch_tokens(argv)).0
+}
+
+/// Builds the human-readable `RELD_LOG_ENGINE` note listing every reld-only flag dropped before
+/// forwarding to `engine_name`, or `None` if nothing was dropped. Deliberately does not start
+/// with `reld: engine=`: `ci/linker_modes.py` parses that exact prefix to find the
+/// routing-decision line, and this note is a separate, optional line after it.
+fn stripped_options_note(engine_name: &str, dropped: &[String]) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "reld: not forwarding reld-only options to {engine_name}: {}",
+        dropped.join(", ")
+    ))
+}
+
+/// Removes compiler-driver-only LTO switches and every reld-only flag before forwarding to a
+/// bridge engine. Returns the forwarded argv alongside every flag dropped as reld-only (see
+/// `strip_reld_only_flags`).
+///
+/// For the `lld` engine, `expand_and_strip_driver_lto` runs first so ELF `@response` files are
+/// expanded before reld-only flags are stripped -- otherwise a reld-only flag hidden inside an
+/// ELF response file would reach `ld.lld` unstripped. LLD also consumes LLVM bitcode directly and
+/// rejects `-flto` itself; plugin switches are real linker options and remain untouched. Other
+/// engines' response files stay opaque (COFF/Mach-O own their response grammar and encoding; see
+/// `bridged_response_arguments`), so only their top-level argv is stripped.
 fn forwarded_args_for_engine<I: IntoIterator<Item = OsString>>(
     argv: I,
     engine: &Engine,
-) -> Result<Vec<OsString>> {
-    let forwarded = forwarded_args(argv);
+) -> Result<(Vec<OsString>, Vec<String>)> {
+    let dropped_tokens = drop_reld_dispatch_tokens(argv);
     if engine.name == "lld" {
-        return expand_and_strip_driver_lto(forwarded, 0);
+        let expanded = expand_and_strip_driver_lto(dropped_tokens, 0)?;
+        return Ok(strip_reld_only_flags(expanded));
     }
-    Ok(forwarded)
+    Ok(strip_reld_only_flags(dropped_tokens))
 }
 
 /// Derives Nix RUNPATH `-rpath` flags from the forwarded argv, mirroring nixpkgs'
@@ -1018,10 +1153,8 @@ fn nix_rpath_flags_with(argv: &[OsString], nix_store: &str, dont_set_rpath: bool
 }
 
 fn is_driver_lto_flag(arg: &str) -> bool {
-    arg.eq_ignore_ascii_case("-flto")
-        || arg.eq_ignore_ascii_case("--flto")
-        || arg.to_ascii_lowercase().starts_with("-flto=")
-        || arg.to_ascii_lowercase().starts_with("--flto=")
+    // GNU flags are case-sensitive (agents/docs/routing-maintenance.md).
+    arg == "-flto" || arg == "--flto" || arg.starts_with("-flto=") || arg.starts_with("--flto=")
 }
 
 fn expand_and_strip_driver_lto(
@@ -1087,10 +1220,23 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
     let engine = route.engine;
     let linker = discover_linker(engine)?;
 
-    let forwarded = forwarded_args_for_engine(argv, engine)?;
-    let mut forwarded = forwarded;
-    // A routed link must keep the Nix store RUNPATH the native engine would have derived.
-    forwarded.extend(nix_rpath_flags(&forwarded));
+    let (mut forwarded, dropped) = forwarded_args_for_engine(argv, engine)?;
+    // If `--nix-rpath=off` was stripped, the bridge must not derive Nix RUNPATH flags either:
+    // the bridge now honors what it strips, rather than re-deriving something the caller asked
+    // it not to set.
+    let nix_rpath_off = dropped
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            entry
+                .strip_prefix("--nix-rpath=")
+                .or_else(|| entry.strip_prefix("--nix-rpath "))
+        })
+        .is_some_and(|value| value == "off");
+    if !nix_rpath_off {
+        // A routed link must keep the Nix store RUNPATH the native engine would have derived.
+        forwarded.extend(nix_rpath_flags(&forwarded));
+    }
     let child_args = child_command_line(&linker, engine, forwarded);
 
     if route_logging_enabled() {
@@ -1100,6 +1246,9 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
             route.reason.label(),
             linker.display()
         );
+        if let Some(note) = stripped_options_note(engine.name, &dropped) {
+            eprintln!("{note}");
+        }
     }
 
     let mut command = std::process::Command::new(&linker);
@@ -1277,7 +1426,9 @@ mod tests {
             OsString::from("Build/Mixed Case/app"),
         ];
         assert_eq!(
-            requested_output(&gnu).unwrap().as_deref(),
+            requested_output(&gnu, BridgeTarget::Elf)
+                .unwrap()
+                .as_deref(),
             Some("Build/Mixed Case/app")
         );
 
@@ -1286,7 +1437,9 @@ mod tests {
             OsString::from("-OUT:C:/Build/Mixed Case/app.exe"),
         ];
         assert_eq!(
-            requested_output(&coff).unwrap().as_deref(),
+            requested_output(&coff, BridgeTarget::Coff)
+                .unwrap()
+                .as_deref(),
             Some("C:/Build/Mixed Case/app.exe")
         );
 
@@ -1299,8 +1452,43 @@ mod tests {
             OsString::from(format!("@{}", response.path().display())),
         ];
         assert_eq!(
-            requested_output(&response_argv).unwrap().as_deref(),
+            requested_output(&response_argv, BridgeTarget::Coff)
+                .unwrap()
+                .as_deref(),
             Some(r"C:\Build\Mixed Case\response.exe")
+        );
+    }
+
+    #[test]
+    fn response_file_quoting_matches_on_native_and_classifier_paths() {
+        // mold's response-file-quoting.sh: a quote can open and close mid-token (they
+        // concatenate around it), and a backslash escapes exactly the next character.
+        let mold_quoting = TempFile::create_with_contents(
+            "mold-response-file-quoting",
+            b"/t/a.o\n/t\"\\/b.\"\\o\n\\foo\\bar\n",
+        );
+        let tokens = crate::args::read_args_from_file(mold_quoting.path()).unwrap();
+        assert_eq!(tokens, vec!["/t/a.o", "/t/b.o", "foobar"]);
+
+        let icf_quoting = TempFile::create_with_contents(
+            "icf-response-file-quoting",
+            br#"-o 'out'"put".so --i"cf=all""#,
+        );
+        let tokens = crate::args::read_args_from_file(icf_quoting.path()).unwrap();
+        assert_eq!(tokens, vec!["-o", "output.so", "--icf=all"]);
+
+        let icf_arg = format!("@{}", icf_quoting.path().display());
+        assert_eq!(
+            requested(&["reld", icf_arg.as_str()]),
+            vec![Capability::Icf]
+        );
+
+        let argv = vec![OsString::from("reld"), OsString::from(icf_arg)];
+        assert_eq!(
+            requested_output(&argv, BridgeTarget::Elf)
+                .unwrap()
+                .as_deref(),
+            Some("output.so")
         );
     }
 
@@ -1793,7 +1981,7 @@ mod tests {
             OsString::from("-lfoo"),
             OsString::from("foo.o"),
         ];
-        let out = strip_reld_only_flags(argv.to_vec());
+        let out = strip_reld_only_flags(argv.to_vec()).0;
         let out: Vec<&str> = out.iter().filter_map(|a| a.to_str()).collect();
         assert_eq!(out, ["-L", "/lib", "-lfoo", "foo.o"]);
     }
@@ -1805,7 +1993,7 @@ mod tests {
             OsString::from("parse"),
             OsString::from("foo.o"),
         ];
-        let out = strip_reld_only_flags(argv.to_vec());
+        let out = strip_reld_only_flags(argv.to_vec()).0;
         let out: Vec<&str> = out.iter().filter_map(|a| a.to_str()).collect();
         assert_eq!(out, ["foo.o"]);
     }
@@ -1874,7 +2062,7 @@ mod tests {
             let route = select_route_with_env(&argv, target, None).unwrap();
             assert_eq!(route.engine, Engine::default_for(target));
             assert_eq!(
-                forwarded_args_for_engine(argv, route.engine).unwrap(),
+                forwarded_args_for_engine(argv, route.engine).unwrap().0,
                 vec![response_arg.clone()]
             );
         }
@@ -1890,7 +2078,9 @@ mod tests {
             OsString::from("foo.o"),
         ];
         assert_eq!(
-            forwarded_args_for_engine(argv, Engine::find("lld").unwrap()).unwrap(),
+            forwarded_args_for_engine(argv, Engine::find("lld").unwrap())
+                .unwrap()
+                .0,
             vec![
                 OsString::from("--plugin=/tool/LLVMgold.so"),
                 OsString::from("foo.o"),
@@ -1917,7 +2107,7 @@ mod tests {
         let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
         assert_eq!(route.engine.name, "lld");
         assert_eq!(
-            forwarded_args_for_engine(argv, route.engine).unwrap(),
+            forwarded_args_for_engine(argv, route.engine).unwrap().0,
             vec![
                 OsString::from("--build-id=sha1"),
                 OsString::from("nested.o"),
@@ -2065,15 +2255,96 @@ mod tests {
     }
 
     #[test]
-    fn discard_all_flag_is_case_sensitive() {
+    fn classifier_is_case_sensitive() {
         // `-x` is `--discard-all` (routes to lld); `-X` is `--discard-locals`
         // (a native default) and must not route.
         assert_eq!(requested(&["reld", "-x"]), vec![Capability::DiscardAll]);
         assert!(requested(&["reld", "-X"]).is_empty());
+
+        // GNU and ld64 flag spellings are case-sensitive (agents/docs/routing-maintenance.md); a
+        // differently-cased spelling of a routed flag is unrecognized by the classifier, and the
+        // native parser -- not the router -- owns rejecting it.
+        for flag in [
+            "--ICF=all",
+            "--Icf=safe",
+            "-FLTO",
+            "--FLTO=thin",
+            "--PLUGIN=/x.so",
+            "-Plugin-opt=O0",
+            "--Discard-All",
+            "--FIX-CORTEX-A53-843419",
+            "-zTEXT",
+            "--Validate-Output",
+        ] {
+            assert!(requested(&["reld", flag]).is_empty(), "flag {flag}");
+            let route = select_route_with_env(
+                &[OsString::from("ld.reld"), OsString::from(flag)],
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "reld", "flag {flag}");
+            assert_eq!(route.reason, SelectionReason::Default, "flag {flag}");
+        }
     }
 
     #[test]
-    fn plugin_opt_routes_to_lld_for_lto() {
+    fn static_group_flags_stay_native() {
+        // Pins that clang's `-static` archive-grouping idiom stays on the fast engine, in both
+        // its `--start-group`/`--end-group` and `-(`/`-)` spellings. The inputs are relative and
+        // deliberately don't exist: this exercises routing only, never a real link.
+        for argv in [
+            &[
+                "ld.reld",
+                "-static",
+                "-o",
+                "a.out",
+                "crt1.o",
+                "crti.o",
+                "crtbeginT.o",
+                "-L/nonexistent/gcc",
+                "main.o",
+                "--start-group",
+                "-lgcc",
+                "-lgcc_eh",
+                "-lc",
+                "--end-group",
+                "crtend.o",
+                "crtn.o",
+            ][..],
+            &[
+                "ld.reld",
+                "-static",
+                "-o",
+                "a.out",
+                "crt1.o",
+                "crti.o",
+                "crtbeginT.o",
+                "-L/nonexistent/gcc",
+                "main.o",
+                "-(",
+                "-lgcc",
+                "-lgcc_eh",
+                "-lc",
+                "-)",
+                "crtend.o",
+                "crtn.o",
+            ][..],
+        ] {
+            assert!(requested(argv).is_empty(), "argv {argv:?}");
+            let route = select_route_with_env(
+                &argv.iter().map(OsString::from).collect::<Vec<_>>(),
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "reld", "argv {argv:?}");
+            assert_eq!(route.reason, SelectionReason::Default, "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn plugin_opt_and_bitcode_route_to_lld() {
         // rustc `-C linker-plugin-lto` through clang emits `-plugin-opt=…`
         // without `-plugin`/`-flto`, so bitcode must still route to lld.
         assert_eq!(
@@ -2084,5 +2355,187 @@ mod tests {
             requested(&["reld", "-plugin-opt", "O0"]),
             vec![Capability::Lto]
         );
+        for argv in [
+            &["ld.reld", "-plugin-opt=O0", "foo.o"][..],
+            &["ld.reld", "-plugin-opt", "O0", "foo.o"][..],
+        ] {
+            let route = select_route_with_env(
+                &argv.iter().map(OsString::from).collect::<Vec<_>>(),
+                BridgeTarget::Elf,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.engine.name, "lld", "argv {argv:?}");
+            assert_eq!(
+                route.reason,
+                SelectionReason::Capability("flag:-plugin-opt"),
+                "argv {argv:?}"
+            );
+        }
+
+        // An LTO object with no `-flto`/`-plugin-opt` on the command line must still route to
+        // lld: the native engine has no LTO implementation (#123 Phase 0).
+        let raw_bitcode =
+            TempFile::create_with_contents("raw-bitcode", b"BC\xC0\xDE\x35\x14\x00\x00");
+        let wrapped_bitcode = TempFile::create_with_contents(
+            "wrapped-bitcode",
+            b"\xDE\xC0\x17\x0B\x00\x00\x00\x00",
+        );
+        for input in [raw_bitcode.path(), wrapped_bitcode.path()] {
+            let argv = [
+                OsString::from("ld.reld"),
+                OsString::from(input.to_str().unwrap()),
+            ];
+            let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+            assert_eq!(route.engine.name, "lld", "input {}", input.display());
+            assert_eq!(
+                route.reason,
+                SelectionReason::Capability("input:bitcode"),
+                "input {}",
+                input.display()
+            );
+        }
+
+        // A real ELF object (not bitcode) stays native.
+        let elf_input =
+            TempFile::create_with_contents("not-bitcode-elf", b"\x7fELF\x02\x01\x01\x00");
+        let argv = [
+            OsString::from("ld.reld"),
+            OsString::from(elf_input.path().to_str().unwrap()),
+        ];
+        let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+        assert_eq!(route.engine.name, "reld");
+    }
+
+    #[test]
+    fn reld_only_flags_never_reach_child() {
+        // One representative spelling per `Stripped` value kind (see `StrippedValueKind`):
+        // `Required` flags use both the `=value` and split `flag value` spellings, `Optional`
+        // flags are exercised with an inline `=value` (avoiding the pre-existing ambiguity where
+        // a bare `--time`/`--threads` can misidentify a following real input as its value) plus
+        // one bare case (`--time`).
+        let cases: &[(&str, &[&str])] = &[
+            ("thread-count", &["--thread-count", "4"]),
+            ("debug-fuel", &["--debug-fuel=10"]),
+            ("reld-experiments", &["--reld-experiments=1,_"]),
+            ("gc-stats-ignore", &["--gc-stats-ignore", "x.o"]),
+            ("nix-rpath", &["--nix-rpath=auto"]),
+            ("threads", &["--threads=4"]),
+            ("time", &["--time"]),
+        ];
+        for (name, tokens) in cases {
+            // The real input (`foo.o`) precedes the reld-only tokens so a bare `--time` at the
+            // end of argv (no following token) cannot swallow it as an optional value.
+            let mut argv = vec![
+                OsString::from("ld.reld"),
+                OsString::from("--icf=all"),
+                OsString::from("foo.o"),
+            ];
+            argv.extend(tokens.iter().map(OsString::from));
+
+            let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+            assert_eq!(route.engine.name, "lld", "flag {name}");
+
+            let (forwarded, dropped) =
+                forwarded_args_for_engine(argv.clone(), route.engine).unwrap();
+            assert_eq!(
+                forwarded,
+                vec![OsString::from("--icf=all"), OsString::from("foo.o")],
+                "flag {name}"
+            );
+            let note = stripped_options_note("lld", &dropped).unwrap();
+            assert!(
+                note.contains(format!("--{name}").as_str()),
+                "flag {name}: note {note}"
+            );
+        }
+
+        // Nested inside an @file: reld-only flags must be stripped there too, because they reach
+        // the ELF GNU tokenizer before lld ever sees the expanded response file.
+        let response = TempFile::create_with_contents(
+            "nested-reld-only-flags",
+            b"--fork --thread-count 2 bar.o",
+        );
+        let argv = vec![
+            OsString::from("ld.reld"),
+            OsString::from("--icf=all"),
+            OsString::from(format!("@{}", response.path().display())),
+            OsString::from("foo.o"),
+        ];
+        let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+        assert_eq!(route.engine.name, "lld");
+        let (forwarded, dropped) = forwarded_args_for_engine(argv, route.engine).unwrap();
+        assert_eq!(
+            forwarded,
+            vec![
+                OsString::from("--icf=all"),
+                OsString::from("bar.o"),
+                OsString::from("foo.o"),
+            ]
+        );
+        assert!(dropped.iter().any(|flag| flag == "--fork"));
+        assert!(dropped.iter().any(|flag| flag == "--thread-count 2"));
+
+        // Every `NativeControl` name forces the native engine and conflicts loudly with a routed
+        // requirement, rather than silently forwarding.
+        for name in NATIVE_CONTROL_RELD_FLAGS {
+            let argv = vec![
+                OsString::from("ld.reld"),
+                OsString::from(format!("--{name}")),
+                OsString::from("--icf=all"),
+            ];
+            let error = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("No bundled ELF engine supports"),
+                "flag {name}: unexpected message: {message}"
+            );
+        }
+
+        // Completeness: every #123 D6 reld-only flag is classified exactly once, as `Stripped`
+        // or `NativeControl`. (`--rpath-link` is excluded: `ld.lld` honors it, so it's forwarded
+        // rather than stripped -- see the `STRIPPED_RELD_FLAGS` doc comment.)
+        const INVENTORY: &[&str] = &[
+            "debug-fuel",
+            "discard-sframe",
+            "fallocate-output-file",
+            "no-fallocate-output-file",
+            "fork",
+            "no-fork",
+            "gc-stats-ignore",
+            "got-plt-syms",
+            "madvise-huge-pages",
+            "no-madvise-huge-pages",
+            "nix-rpath",
+            "no-identity-comment",
+            "no-string-merge",
+            "no-threads",
+            "no-update-in-place",
+            "update-in-place",
+            "prepopulate-maps",
+            "reld-experimental-sframe",
+            "reld-experiments",
+            "sym-info",
+            "thread-count",
+            "time",
+            "verbose-gc-stats",
+            "write-gc-stats",
+            "validate-output",
+            "write-layout",
+            "write-trace",
+            "mmap-output-file",
+            "no-mmap-output-file",
+            "threads",
+        ];
+        for name in INVENTORY {
+            let in_stripped = STRIPPED_RELD_FLAGS
+                .iter()
+                .any(|(candidate, _)| candidate == name);
+            let in_native_control = NATIVE_CONTROL_RELD_FLAGS.contains(name);
+            assert!(
+                in_stripped ^ in_native_control,
+                "{name} must be in exactly one of STRIPPED_RELD_FLAGS or NATIVE_CONTROL_RELD_FLAGS"
+            );
+        }
     }
 }

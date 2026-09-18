@@ -2581,7 +2581,7 @@ mod tests {
         let file2 = NamedTempFile::new().expect("Could not create temp file");
         // Response-file parsing treats backslashes as escapes. Quote the whole
         // argument and escape Windows separators so a nested @file survives a
-        // round trip through `arguments_from_string`.
+        // round trip through `response_file::tokenize_gnu`.
         let nested_path = file2.path().to_str().unwrap().replace('\\', "\\\\");
         let file_option = format!("\"@{nested_path}\"");
         write_options_to_file(file1.as_file(), &[&file_option]);
@@ -2595,45 +2595,6 @@ mod tests {
         args.parse(inline_options.iter())
             .expect("Recursive @file options should parse correctly but be ignored");
         input1_assertions(&args);
-    }
-
-    #[test]
-    fn test_arguments_from_string() {
-        use crate::args::arguments_from_string;
-
-        assert!(arguments_from_string("").unwrap().is_empty());
-        assert!(arguments_from_string("''").unwrap().is_empty());
-        assert!(arguments_from_string("\"\"").unwrap().is_empty());
-        assert_eq!(
-            arguments_from_string(r#""foo" "bar""#).unwrap(),
-            ["foo", "bar"]
-        );
-        assert_eq!(
-            arguments_from_string(r#""foo\"" "\"b\"ar""#).unwrap(),
-            ["foo\"", "\"b\"ar"]
-        );
-        assert_eq!(
-            arguments_from_string("   foo  bar      ").unwrap(),
-            ["foo", "bar"]
-        );
-        assert!(arguments_from_string("'foo''bar'").is_err());
-        assert_eq!(
-            arguments_from_string("'foo' 'bar' baz").unwrap(),
-            ["foo", "bar", "baz"]
-        );
-        assert_eq!(arguments_from_string("foo\nbar").unwrap(), ["foo", "bar"]);
-        assert_eq!(
-            arguments_from_string(r#"'foo' "bar" baz"#).unwrap(),
-            ["foo", "bar", "baz"]
-        );
-        assert_eq!(arguments_from_string("'foo bar'").unwrap(), ["foo bar"]);
-        assert_eq!(
-            arguments_from_string("'foo \"  bar'").unwrap(),
-            ["foo \"  bar"]
-        );
-        assert!(arguments_from_string("foo\\").is_err());
-        assert!(arguments_from_string("'foo").is_err());
-        assert!(arguments_from_string("foo\"").is_err());
     }
 
     #[test]
