@@ -410,13 +410,14 @@ jobs:
           --exact-log-total difftest.log=100 --exact-log-total external-tests.log=407
           --upstream-failed "$PHASE1_UPSTREAM_FAILED"
 
-      # --minimum-run is raised to the first green aarch64 run's count (reld#194).
+      # --minimum-run is the first green aarch64 run's count (509, reld#194), so a fixture that
+      # silently stops running fails the build instead of shrinking the evidence.
       - name: Publish Linux aarch64 counts and skips
         if: always() && matrix.kind == 'linux-gnu' && matrix.arch == 'aarch64'
         shell: bash
         run: >-
           uv run --no-sync python ci/phase1_summary.py --job linux-gnu-aarch64
-          --log platform-tests.log --log acceptance-tests.log --versions versions.txt --minimum-run 1
+          --log platform-tests.log --log acceptance-tests.log --versions versions.txt --minimum-run 509
           --upstream-failed "$PHASE1_UPSTREAM_FAILED"
 
       - name: Publish Windows GNU counts and skips
