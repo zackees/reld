@@ -227,7 +227,13 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          soldr build --package reld --bin reld --release --locked
+          # setup-soldr's aarch64-apple-darwin cross prep exports
+          # CARGO_ENCODED_RUSTFLAGS with Apple link-args (`--target=arm64-apple-darwin
+          # -isysroot ... -fuse-ld=lld`). Cargo applies it to every unit when no
+          # --target is given, so this host build's build scripts would link as
+          # Darwin. Drop it for the host build only.
+          env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
+            soldr build --package reld --bin reld --release --locked
           host_reld="$PWD/target/release/reld"
           test -x "$host_reld"
 
