@@ -1,4 +1,7 @@
+import re
 from pathlib import Path
+
+from ci import windows_ci
 
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml"
@@ -85,12 +88,66 @@ def test_ci_uses_bash_to_invoke_python_for_every_windows_msvc_script():
 def test_ci_provisions_uv_and_has_no_bare_python_script_invocations():
     text = WORKFLOW.read_text()
 
-    assert text.count("astral-sh/setup-uv@") == 2
-    assert text.count("uv sync --extra dev") == 2
+    # phase1-native, phase1-native-run, and python each provision their own uv.
+    assert text.count("astral-sh/setup-uv@") == 3
+    assert text.count("uv sync --extra dev") == 3
     assert "uv run --no-project" not in text
     for line in text.splitlines():
         stripped = line.strip()
         assert not stripped.startswith(("python ", "python3 "))
+
+
+def _job_blocks(text: str) -> dict[str, str]:
+    """Split ci.yml's `jobs:` section into name -> block-text, keyed by job id."""
+
+    lines = text.splitlines()
+    job_header = re.compile(r"^  ([a-z0-9-]+):$")
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        match = job_header.match(line)
+        if match:
+            starts.append((match.group(1), index))
+
+    blocks: dict[str, str] = {}
+    for position, (name, start) in enumerate(starts):
+        end = starts[position + 1][1] if position + 1 < len(starts) else len(lines)
+        blocks[name] = "\n".join(lines[start:end])
+    return blocks
+
+
+def test_phase1_msvc_and_macos_compile_on_linux_and_only_replay_on_target():
+    text = WORKFLOW.read_text()
+    blocks = _job_blocks(text)
+
+    cross_build = blocks["phase1-cross-build"]
+    assert "runs-on: ubuntu-24.04" in cross_build
+    assert "zackees/setup-soldr@main" in cross_build
+    assert "version: 0.9.18" in cross_build
+    assert "soldr cargo nextest archive" in cross_build
+    assert "x86_64-pc-windows-msvc" in cross_build
+    assert "aarch64-apple-darwin" in cross_build
+    assert "x86_64-pc-windows-gnu" not in cross_build
+
+    native_run = blocks["phase1-native-run"]
+    assert "needs: phase1-cross-build" in native_run
+    assert "name: Phase 1 / ${{ matrix.name }}" in native_run
+    assert "actions/download-artifact@v4" in native_run
+    assert "cargo nextest run --archive-file" in native_run
+    assert "--workspace-remap" in native_run
+    assert "ci.windows_ci native-tests" in native_run
+    assert "cargo build --workspace" not in native_run
+    assert "$CARGO_COMMAND build --workspace" not in native_run
+    assert "$CARGO_COMMAND test" not in native_run
+
+    native = blocks["phase1-native"]
+    assert "windows-gnu x86_64" in native
+    assert "linux-gnu x86_64" in native
+    assert "$CARGO_COMMAND build --workspace --all-targets --target" in native
+    assert "windows-msvc" not in native
+    assert "macos-14" not in native
+
+    assert 'NEXTEST_VERSION: "0.9.140"' in text
+    assert f'PHASE1_NATIVE_FILTER: "{windows_ci.PHASE1_NATIVE_FILTER}"' in text
 
 
 def test_phase1_summary_only_relaxes_missing_log_validation_after_failure():

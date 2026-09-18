@@ -15,6 +15,18 @@ from typing import Sequence
 
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 
+# nextest filterset reproducing the tests the native legs ran under `cargo test` before reld#130:
+# `-p reld-layout-schema -p reld-diff -p reld-testkit --all-targets`, `-p reld-core --lib`,
+# `-p reld --bins`, and `-p reld --test acceptance-policy`.
+PHASE1_NATIVE_FILTER = (
+    "package(reld-layout-schema) | package(reld-diff) | package(reld-testkit)"
+    " | (package(reld-core) & kind(lib))"
+    " | (package(reld) & (kind(bin) | binary(acceptance-policy)))"
+)
+# The acceptance corpus is only listed on the native legs (was `--test acceptance -- --list`).
+PHASE1_ACCEPTANCE_LIST_FILTER = "package(reld) & binary(acceptance)"
+PHASE1_ARCHIVE_ENV = "PHASE1_NEXTEST_ARCHIVE"
+
 
 class WindowsCiError(RuntimeError):
     """A Windows CI contract was not satisfied."""
@@ -104,6 +116,13 @@ def _require_file(path: Path, description: str) -> Path:
     return path
 
 
+def _nextest_archive_args() -> list[str]:
+    archive = _require_file(
+        Path(_required_env(PHASE1_ARCHIVE_ENV)).resolve(), "phase-1 nextest archive"
+    )
+    return ["--archive-file", str(archive), "--workspace-remap", str(_workspace())]
+
+
 def _capture_allow_failure(args: Sequence[str]) -> str:
     completed = subprocess.run(
         list(args),
@@ -176,23 +195,34 @@ def install_benchmark_linkers() -> None:
 
 
 def native_tests() -> None:
+    """Replay the phase-1 nextest archive that the phase1-cross-build job compiled on Linux.
+
+    Windows no longer compiles anything here: it downloads ``phase1-tests.tar.zst`` and reruns
+    the archived binaries in-place so the native leg only exercises the platform, not the build.
+    """
+
     env = _msvc_path_env()
-    _run(_cargo("build", "--workspace", "--all-targets"), env=env)
+    archive_args = _nextest_archive_args()
     commands = [
         _cargo(
-            "test",
-            "-p",
-            "reld-layout-schema",
-            "-p",
-            "reld-diff",
-            "-p",
-            "reld-testkit",
-            "--all-targets",
+            "nextest",
+            "run",
+            *archive_args,
+            "--no-fail-fast",
+            "--color",
+            "never",
+            "-E",
+            PHASE1_NATIVE_FILTER,
         ),
-        _cargo("test", "-p", "reld-core", "--lib"),
-        _cargo("test", "-p", "reld", "--bins"),
-        _cargo("test", "-p", "reld", "--test", "acceptance-policy"),
-        _cargo("test", "-p", "reld", "--test", "acceptance", "--", "--list"),
+        _cargo(
+            "nextest",
+            "list",
+            *archive_args,
+            "--color",
+            "never",
+            "-E",
+            PHASE1_ACCEPTANCE_LIST_FILTER,
+        ),
     ]
     log = Path("platform-tests.log")
     for index, command in enumerate(commands):

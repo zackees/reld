@@ -39,6 +39,11 @@ env:
   MSVC_LINK_VERSION: "14.44"
   APPLE_LD_VERSION: "1053.12"
   LIBTINFO5_VERSION: "6.3-2ubuntu0.3"
+  # One pinned cargo-nextest for both the archive producer (phase1-cross-build)
+  # and the replaying runner (phase1-native-run), so they agree on the archive
+  # format. Kept equal to setup-soldr 0.9.18's pinned cargo-nextest; both jobs
+  # install it explicitly rather than relying on whatever soldr bundles.
+  NEXTEST_VERSION: "0.9.140"
 
 jobs:
   hygiene:
@@ -137,14 +142,6 @@ jobs:
             kind: windows-gnu
             os: windows-2022
             target: x86_64-pc-windows-gnu
-          - name: windows-msvc x86_64
-            kind: windows-msvc
-            os: windows-2022
-            target: x86_64-pc-windows-msvc
-          - name: macos arm64
-            kind: macos-arm64
-            os: macos-14
-            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -166,13 +163,7 @@ jobs:
           path-type: inherit
           install: mingw-w64-ucrt-x86_64-clang
 
-      - if: matrix.kind == 'windows-msvc'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          toolset: "14.44"
-
-      - if: matrix.kind != 'macos-arm64'
-        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
+      - uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
         with:
           version: 18.1.8
 
@@ -293,33 +284,6 @@ jobs:
           "${RUNNER_TEMP}/smoke-bfd.exe"
           "${RUNNER_TEMP}/smoke-lld.exe"
 
-      - name: Verify and smoke Windows MSVC reference linkers
-        if: matrix.kind == 'windows-msvc'
-        shell: bash
-        run: uv run --no-sync python -m ci.windows_ci verify-msvc-linkers
-
-      - name: Install macOS LLVM reference linker
-        if: matrix.kind == 'macos-arm64'
-        shell: bash
-        run: |
-          brew install llvm@18
-          echo "$(brew --prefix llvm@18)/bin" >> "${GITHUB_PATH}"
-
-      - name: Verify and smoke macOS reference linkers
-        if: matrix.kind == 'macos-arm64'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          xcrun ld -v 2>&1 | head -2 | tee versions.txt
-          "$(brew --prefix llvm@18)/bin/ld64.lld" --version | head -1 | tee -a versions.txt
-          xcrun ld -v 2>&1 | grep -q "${APPLE_LD_VERSION}"
-          "$(brew --prefix llvm@18)/bin/ld64.lld" --version | grep -q "${LLD_VERSION}"
-          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/smoke.c"
-          clang "${RUNNER_TEMP}/smoke.c" -o "${RUNNER_TEMP}/smoke-apple-ld"
-          clang "${RUNNER_TEMP}/smoke.c" -fuse-ld="$(brew --prefix llvm@18)/bin/ld64.lld" -o "${RUNNER_TEMP}/smoke-lld"
-          "${RUNNER_TEMP}/smoke-apple-ld"
-          "${RUNNER_TEMP}/smoke-lld"
-
       - name: Linux build and native tests
         if: matrix.kind == 'linux-gnu'
         shell: bash
@@ -412,6 +376,240 @@ jobs:
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test --target "${{ matrix.target }}" -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
 
+      - name: Record an earlier phase failure for the summary
+        if: failure()
+        shell: bash
+        run: printf 'PHASE1_UPSTREAM_FAILED=true\n' >> "${GITHUB_ENV}"
+
+      - name: Publish Linux counts and skips
+        if: always() && matrix.kind == 'linux-gnu'
+        shell: bash
+        run: >-
+          uv run --no-sync python ci/phase1_summary.py --job linux-gnu
+          --log platform-tests.log --log acceptance-tests.log --log difftest.log
+          --log external-tests.log --versions versions.txt --minimum-run 507
+          --exact-log-total difftest.log=100 --exact-log-total external-tests.log=407
+          --upstream-failed "$PHASE1_UPSTREAM_FAILED"
+
+      - name: Publish Windows GNU counts and skips
+        if: always() && matrix.kind == 'windows-gnu'
+        shell: bash
+        run: >-
+          uv run --no-sync python ci/phase1_summary.py --job windows-gnu --log platform-tests.log --versions versions.txt
+          --upstream-failed "$PHASE1_UPSTREAM_FAILED"
+
+  # Goal (reld#130): the Windows MSVC and macos-arm64 phase-1 legs stop
+  # compiling on their scarce native runners. Compile the phase-1 test suite
+  # once here, on cheap Linux runners, through the blessed soldr cross front
+  # door (mirrors cross-ship.yml's cross-build job), and ship a cargo-nextest
+  # archive per target. The native runner (phase1-native-run) only downloads
+  # the archive and replays it -- no product compilation on-target.
+  #
+  # windows-gnu is intentionally NOT cross-built here: it isn't a soldr-blessed
+  # cross target (soldr blesses MSVC on Windows, not the MinGW toolchain used by
+  # windows-gnu), so it stays compiling on its own Windows host in
+  # phase1-native, unchanged.
+  phase1-cross-build:
+    name: Phase 1 cross build (linux -> ${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc
+            target: x86_64-pc-windows-msvc
+            artifact: phase1-tests-windows-msvc
+            format: PE32
+            bins: reld.exe reld-link.exe
+          - name: macos-arm64
+            target: aarch64-apple-darwin
+            artifact: phase1-tests-macos-arm64
+            format: Mach-O
+            bins: reld
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      # Provision soldr + the target toolchain from the catalogue. `cross-targets`
+      # runs `soldr prepare` for the triple and exports the compiler/linker/SDK/
+      # sysroot/env plan -- no manual CC_/CXX_/AR_ wiring and no apt/choco/brew
+      # toolchain installs (mirrors cross-ship.yml's cross-build job).
+      - name: Setup Soldr (prepare cross toolchain)
+        id: setup
+        uses: zackees/setup-soldr@main
+        with:
+          # 0.9.18 ships the win-gnu prepare fix (soldr#3259); pinned to match
+          # cross-ship.yml. cargo-nextest is installed at NEXTEST_VERSION in the
+          # next step so the archive this job produces is replayable by the
+          # same pinned cargo-nextest that phase1-native-run installs.
+          version: 0.9.18
+          cross-targets: ${{ matrix.target }}
+          linker: fast
+          cache: true
+          cache-preset: full
+          prebuild-deps: soldr-cook
+
+      - name: Install pinned cargo-nextest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          nextest_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          mkdir -p "${nextest_bin}"
+          curl -fsSL --retry 3 "https://get.nexte.st/${NEXTEST_VERSION}/linux" | tar zxf - -C "${nextest_bin}"
+          cargo nextest --version | grep -q "${NEXTEST_VERSION}"
+
+      - name: Build phase-1 nextest archive via soldr
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p package
+          soldr cargo nextest archive --locked --workspace \
+            --target "${{ matrix.target }}" \
+            --archive-file package/phase1-tests.tar.zst \
+            --archive-format tar-zst
+          for bin in ${{ matrix.bins }}; do
+            cp "target/${{ matrix.target }}/debug/${bin}" "package/${bin}"
+          done
+          ls -la package
+
+      - name: Verify cross artifact format
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s package/phase1-tests.tar.zst
+          for bin in ${{ matrix.bins }}; do
+            file "package/${bin}" | grep -q '${{ matrix.format }}'
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  # Native runner: download the phase-1 nextest archive that phase1-cross-build
+  # compiled on Linux and replay it. No product compilation happens here for
+  # windows-msvc/macos-arm64 -- they only download and run (reld#130).
+  phase1-native-run:
+    name: Phase 1 / ${{ matrix.name }}
+    needs: phase1-cross-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      PHASE1_UPSTREAM_FAILED: "false"
+      PHASE1_NEXTEST_ARCHIVE: ${{ github.workspace }}/phase1-package/phase1-tests.tar.zst
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc x86_64
+            kind: windows-msvc
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            artifact: phase1-tests-windows-msvc
+          - name: macos arm64
+            kind: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            artifact: phase1-tests-macos-arm64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - name: Sync Python tooling
+        shell: bash
+        run: uv sync --extra dev
+
+      - if: matrix.kind == 'windows-msvc'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          toolset: "14.44"
+
+      - if: matrix.kind == 'windows-msvc'
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
+        with:
+          version: 18.1.8
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install host test tooling
+        uses: taiki-e/install-action@8261f1f64137bdbc4bc1035170d52408e108cbd4 # taplo-cli
+        with:
+          tool: taplo-cli@0.10.0
+
+      - name: Verify and smoke Windows MSVC reference linkers
+        if: matrix.kind == 'windows-msvc'
+        shell: bash
+        run: uv run --no-sync python -m ci.windows_ci verify-msvc-linkers
+
+      - name: Install macOS LLVM reference linker
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          brew install llvm@18
+          echo "$(brew --prefix llvm@18)/bin" >> "${GITHUB_PATH}"
+
+      - name: Verify and smoke macOS reference linkers
+        if: matrix.kind == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          xcrun ld -v 2>&1 | head -2 | tee versions.txt
+          "$(brew --prefix llvm@18)/bin/ld64.lld" --version | head -1 | tee -a versions.txt
+          xcrun ld -v 2>&1 | grep -q "${APPLE_LD_VERSION}"
+          "$(brew --prefix llvm@18)/bin/ld64.lld" --version | grep -q "${LLD_VERSION}"
+          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/smoke.c"
+          clang "${RUNNER_TEMP}/smoke.c" -o "${RUNNER_TEMP}/smoke-apple-ld"
+          clang "${RUNNER_TEMP}/smoke.c" -fuse-ld="$(brew --prefix llvm@18)/bin/ld64.lld" -o "${RUNNER_TEMP}/smoke-lld"
+          "${RUNNER_TEMP}/smoke-apple-ld"
+          "${RUNNER_TEMP}/smoke-lld"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: phase1-package
+
+      - name: Stage cross-built reld binaries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p target/debug
+          case "${{ matrix.kind }}" in
+            windows-msvc)
+              cp phase1-package/reld.exe target/debug/
+              cp phase1-package/reld-link.exe target/debug/
+              ;;
+            macos-arm64)
+              cp phase1-package/reld target/debug/reld
+              chmod +x target/debug/reld
+              ;;
+          esac
+
+      - name: Install pinned cargo-nextest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          case "${{ matrix.kind }}" in
+            windows-msvc)
+              curl -fsSL --retry 3 "https://get.nexte.st/${NEXTEST_VERSION}/windows-tar" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+              ;;
+            macos-arm64)
+              curl -fsSL --retry 3 "https://get.nexte.st/${NEXTEST_VERSION}/mac" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+              ;;
+          esac
+          cargo nextest --version | grep -q "${NEXTEST_VERSION}"
+
       - name: Windows MSVC native tests
         if: matrix.kind == 'windows-msvc'
         shell: bash
@@ -430,14 +628,14 @@ jobs:
       - name: macOS native tests
         if: matrix.kind == 'macos-arm64'
         shell: bash
+        env:
+          PHASE1_NATIVE_FILTER: "package(reld-layout-schema) | package(reld-diff) | package(reld-testkit) | (package(reld-core) & kind(lib)) | (package(reld) & (kind(bin) | binary(acceptance-policy)))"
         run: |
           set -euxo pipefail
-          $CARGO_COMMAND build --workspace --all-targets
-          $CARGO_COMMAND test -p reld-layout-schema -p reld-diff -p reld-testkit --all-targets 2>&1 | tee platform-tests.log
-          $CARGO_COMMAND test -p reld-core --lib 2>&1 | tee -a platform-tests.log
-          $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
-          $CARGO_COMMAND test -p reld --test acceptance-policy 2>&1 | tee -a platform-tests.log
-          $CARGO_COMMAND test -p reld --test acceptance -- --list 2>&1 | tee -a platform-tests.log
+          cargo nextest run --archive-file "$PHASE1_NEXTEST_ARCHIVE" --workspace-remap "$GITHUB_WORKSPACE" \
+            --no-fail-fast --color never -E "$PHASE1_NATIVE_FILTER" 2>&1 | tee platform-tests.log
+          cargo nextest list --archive-file "$PHASE1_NEXTEST_ARCHIVE" --workspace-remap "$GITHUB_WORKSPACE" \
+            --color never -E 'package(reld) & binary(acceptance)' 2>&1 | tee -a platform-tests.log
 
       - name: macOS reld bridge e2e (sqlite)
         if: matrix.kind == 'macos-arm64'
@@ -482,23 +680,6 @@ jobs:
         if: failure()
         shell: bash
         run: printf 'PHASE1_UPSTREAM_FAILED=true\n' >> "${GITHUB_ENV}"
-
-      - name: Publish Linux counts and skips
-        if: always() && matrix.kind == 'linux-gnu'
-        shell: bash
-        run: >-
-          uv run --no-sync python ci/phase1_summary.py --job linux-gnu
-          --log platform-tests.log --log acceptance-tests.log --log difftest.log
-          --log external-tests.log --versions versions.txt --minimum-run 507
-          --exact-log-total difftest.log=100 --exact-log-total external-tests.log=407
-          --upstream-failed "$PHASE1_UPSTREAM_FAILED"
-
-      - name: Publish Windows GNU counts and skips
-        if: always() && matrix.kind == 'windows-gnu'
-        shell: bash
-        run: >-
-          uv run --no-sync python ci/phase1_summary.py --job windows-gnu --log platform-tests.log --versions versions.txt
-          --upstream-failed "$PHASE1_UPSTREAM_FAILED"
 
       - name: Publish Windows MSVC counts and skips
         if: always() && matrix.kind == 'windows-msvc'
