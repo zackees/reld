@@ -181,8 +181,19 @@ jobs:
 
           command -v clang >/dev/null || { echo "::error::clang not found on ubuntu-24.04 (ships clang; not apt-installing)"; exit 1; }
 
+          # soldr's mingw package uses a conda layout: headers and import libs
+          # live under <root>/x86_64-w64-mingw32/sysroot/usr, which clang's
+          # MinGW driver doesn't probe (it expects <root>/x86_64-w64-mingw32/
+          # include). Point it there explicitly when that layout is present.
+          sysroot_flags=()
+          mingw_sysroot="$(dirname "$(dirname "$mingw_gcc")")/x86_64-w64-mingw32/sysroot/usr"
+          if [ -d "$mingw_sysroot/include" ]; then
+            sysroot_flags=(-isystem "$mingw_sysroot/include" -L"$mingw_sysroot/lib")
+          fi
+
           RELD_LOG_ENGINE=1 RELD_INVOCATION_LOG="$PWD/mingw-hello/invocations.jsonl" \
             clang --target=x86_64-w64-mingw32 --ld-path="$host_reld" \
+            "${sysroot_flags[@]}" \
             mingw-hello/hello.c -o mingw-hello/hello.exe
 
           file mingw-hello/hello.exe | grep -q 'PE32+'
