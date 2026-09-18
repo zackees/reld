@@ -14,16 +14,34 @@ name: Cross ship (build off-platform, run on-platform)
 # windows-gnu is intentionally NOT cross-built from Linux (soldr blesses MSVC
 # on Windows; windows-gnu builds on a Windows host with the MinGW bundle).
 #
-# NOTE: additive and DRAFT — this workflow does not touch the existing green
-# jobs. It must be validated against a live CI run before the cross legs in
-# `ci.yml` (cross-release + the native reld-bench build steps) are migrated onto
-# it. See reld#59.
+# NOTE: validated — this workflow ran green on main across all six jobs
+# (https://github.com/zackees/reld/actions/runs/35276124820) and is no longer a
+# draft. It still runs additively alongside `ci.yml`'s cross legs; migrating
+# `ci.yml`'s cross-release and native reld-bench build steps onto it is a
+# separate, tracked step. See reld#59.
 
 on:
   workflow_dispatch:
+  schedule:
+    # Weekly, offset off the hour to avoid the Actions rush.
+    - cron: "37 6 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "ci/cross_ship_metrics.py"
+      - "ci/tests/test_cross_ship_metrics.py"
+      - ".github/workflows/cross-ship.yml"
   pull_request:
     paths:
-      - .github/workflows/cross-ship.yml
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "ci/cross_ship_metrics.py"
+      - "ci/tests/test_cross_ship_metrics.py"
+      - ".github/workflows/cross-ship.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
@@ -93,9 +111,11 @@ jobs:
           prebuild-deps: soldr-cook
 
       - name: Cross-compile reld (release) via blessed front door
+        id: compile
         shell: bash
         run: |
           set -euxo pipefail
+          compile_start="$(date +%s)"
           # `soldr build --target` is the blessed surface: it mounts the
           # catalogue toolchain and injects target cc-rs env itself. No manual
           # CC_/CXX_/AR_ and no apt/choco/brew toolchain installs.
@@ -106,6 +126,8 @@ jobs:
             \( -name 'reld' -o -name 'reld.exe' \) -print -quit)"
           test -n "$built"
           cp "$built" "package/${{ matrix.executable }}"
+          compile_end="$(date +%s)"
+          echo "wall-seconds=$((compile_end - compile_start))" >> "$GITHUB_OUTPUT"
 
       - name: Verify cross artifact format
         shell: bash
@@ -124,22 +146,18 @@ jobs:
       - name: Report soldr cache metrics
         if: always()
         shell: bash
-        env:
-          CACHE_HIT: ${{ steps.setup.outputs.cache-hit }}
-          COMPILE_HITS: ${{ steps.setup.outputs.compile-cache-hits }}
-          COMPILE_MISSES: ${{ steps.setup.outputs.compile-cache-misses }}
-          COMPILE_RATE: ${{ steps.setup.outputs.compile-cache-hit-rate }}
         run: |
-          {
-            echo "### soldr cache — ${{ matrix.name }} (${{ matrix.target }})"
-            echo ""
-            echo "| metric | value |"
-            echo "|---|---|"
-            echo "| cache-hit | ${CACHE_HIT:-n/a} |"
-            echo "| compile-cache-hits | ${COMPILE_HITS:-n/a} |"
-            echo "| compile-cache-misses | ${COMPILE_MISSES:-n/a} |"
-            echo "| compile-cache-hit-rate | ${COMPILE_RATE:-n/a} |"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          set -euo pipefail
+          python3 ci/cross_ship_metrics.py \
+            --target "${{ matrix.name }}" \
+            --triple "${{ matrix.target }}" \
+            --cache-hit "${{ steps.setup.outputs.cache-hit }}" \
+            --build-cache-hit "${{ steps.setup.outputs.build-cache-hit }}" \
+            --target-cache-hit "${{ steps.setup.outputs.target-cache-hit }}" \
+            --compile-cache-hits "${{ steps.setup.outputs.compile-cache-hits }}" \
+            --compile-cache-misses "${{ steps.setup.outputs.compile-cache-misses }}" \
+            --compile-cache-hit-rate "${{ steps.setup.outputs.compile-cache-hit-rate }}" \
+            --wall-seconds "${{ steps.compile.outputs.wall-seconds }}"
 
       - uses: actions/upload-artifact@v4
         with:
