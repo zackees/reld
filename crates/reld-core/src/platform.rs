@@ -1133,6 +1133,13 @@ pub(crate) trait ObjectFile<'data>: Sized + Send + Sync + std::fmt::Debug + 'dat
     ) -> Result;
 
     fn dynamic_tags(&self) -> Result<&'data [<Self::Platform as Platform>::DynamicEntry]>;
+
+    /// Library specifiers from `SHT_LLVM_DEPENDENT_LIBRARIES` (`.deplibs`) sections, in section
+    /// order then string order. ld.lld links these by default (reld#180). Platforms without such
+    /// sections return an empty list.
+    fn dependent_libraries(&self) -> Result<Vec<&'data [u8]>> {
+        Ok(Vec::new())
+    }
 }
 
 pub(crate) trait SectionHeader: std::fmt::Debug + Send + Sync + 'static {
@@ -1151,6 +1158,12 @@ pub(crate) trait SectionHeader: std::fmt::Debug + Send + Sync + 'static {
     fn should_retain(&self) -> bool;
 
     fn should_exclude(&self) -> bool;
+
+    /// Whether this is an `SHT_LLVM_DEPENDENT_LIBRARIES` (`.deplibs`) section. Such sections are
+    /// consumed by the linker and never copied to a non-relocatable output (matches lld).
+    fn is_dependent_libraries(&self) -> bool {
+        false
+    }
 
     fn is_group(&self) -> bool;
 

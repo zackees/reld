@@ -2691,6 +2691,22 @@ fn load_glibc_abi_dt_relr_version(
     Ok(())
 }
 
+/// Parses the contents of an `SHT_LLVM_DEPENDENT_LIBRARIES` (`.deplibs`) section into its
+/// NUL-separated library specifiers. Mirrors lld's handling of `SHT_LLVM_DEPENDENT_LIBRARIES` in
+/// `ObjFile::initializeSections` (lld/ELF/InputFiles.cpp).
+pub(crate) fn parse_dependent_libraries(data: &[u8]) -> Result<Vec<&[u8]>> {
+    if data.last().is_some_and(|&byte| byte != 0) {
+        bail!("corrupted dependent libraries section (unterminated string)");
+    }
+
+    // lld passes empty specifiers through to the library search too, but an empty specifier can
+    // only ever resolve to a directory, so we skip them here.
+    Ok(data
+        .split(|&byte| byte == 0)
+        .filter(|specifier| !specifier.is_empty())
+        .collect())
+}
+
 impl<'data> platform::ObjectFile<'data> for File<'data> {
     type Platform = Elf;
 
@@ -2896,6 +2912,27 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
 
     fn dynamic_tags(&self) -> Result<&'data [DynamicEntry]> {
         dynamic_tags(&self.sections, self.data)
+    }
+
+    fn dependent_libraries(&self) -> Result<Vec<&'data [u8]>> {
+        // lld only reads `.deplibs` from relocatable object files.
+        if self.is_dynamic() {
+            return Ok(Vec::new());
+        }
+
+        let mut libraries = Vec::new();
+        for (index, section) in self.sections.enumerate() {
+            if section.sh_type(LittleEndian) == object::elf::SHT_LLVM_DEPENDENT_LIBRARIES {
+                let data = self.raw_section_data(section)?;
+                libraries.extend(parse_dependent_libraries(data).with_context(|| {
+                    format!(
+                        "Failed to parse dependent libraries section `{}`",
+                        self.section_display_name(index)
+                    )
+                })?);
+            }
+        }
+        Ok(libraries)
     }
 
     fn parse_relocations(&self) -> Result<RelocationSections> {
@@ -3506,6 +3543,10 @@ impl platform::SectionHeader for SectionHeader {
 
     fn should_exclude(&self) -> bool {
         self.sh_flags(LittleEndian).contains(shf::EXCLUDE)
+    }
+
+    fn is_dependent_libraries(&self) -> bool {
+        self.sh_type(LittleEndian) == object::elf::SHT_LLVM_DEPENDENT_LIBRARIES
     }
 
     fn is_group(&self) -> bool {
@@ -6402,5 +6443,34 @@ impl SinglePartSectionId {
 impl RegularSectionId {
     const fn output_section_id(self) -> OutputSectionId {
         crate::output_section_id::regular_section_base::<Elf>().offset(self as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_dependent_libraries_splits_on_nul() {
+        let libraries = parse_dependent_libraries(b"m\0pthread\0").unwrap();
+        assert_eq!(libraries, [b"m".as_slice(), b"pthread".as_slice()]);
+    }
+
+    #[test]
+    fn parse_dependent_libraries_empty_input_is_empty() {
+        let libraries = parse_dependent_libraries(b"").unwrap();
+        assert!(libraries.is_empty());
+    }
+
+    #[test]
+    fn parse_dependent_libraries_skips_empty_specifiers() {
+        let libraries = parse_dependent_libraries(b"m\0\0foo\0").unwrap();
+        assert_eq!(libraries, [b"m".as_slice(), b"foo".as_slice()]);
+    }
+
+    #[test]
+    fn parse_dependent_libraries_rejects_unterminated_string() {
+        let error = parse_dependent_libraries(b"m").unwrap_err();
+        assert!(error.to_string().contains("unterminated string"));
     }
 }
