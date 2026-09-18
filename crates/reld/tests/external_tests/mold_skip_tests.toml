@@ -42,15 +42,13 @@ tests = [
   # `--image-base` works now; this fails in the second half, where a program defines
   # `__ehdr_start` and friends itself and the synthetic definitions are required to win.
   "synthetic-symbols.sh",
-  "spare-program-headers.sh",      # `--spare-program-headers`
-  "static-archive.sh",             # error: Undefined symbol main, passes with GNU ld
-  "thin-archive.sh",               # error: Undefined symbol main, passes with GNU ld
-  "trace-symbol-symver.sh",        # `--trace-symbol`
-  "trace-symbol.sh",               # `-y` / `--trace-symbol`
-  "undefined-glob-gc-sections.sh", # `--undefined-glob`
-  "undefined-glob.sh",             # `--undefined-glob`
-  "warn-common.sh",                # `-warn-common`
-  "warn-once.sh",                  # `--warn-once`
+  "spare-program-headers.sh", # `--spare-program-headers`
+  "static-archive.sh",        # error: Undefined symbol main, passes with GNU ld
+  "thin-archive.sh",          # error: Undefined symbol main, passes with GNU ld
+  "trace-symbol-symver.sh",   # `--trace-symbol`
+  "trace-symbol.sh",          # `-y` / `--trace-symbol`
+  "warn-common.sh",           # `-warn-common`
+  "warn-once.sh",             # `--warn-once`
 ]
 
 [skipped_groups.symbol_versioning]

@@ -3141,6 +3141,29 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
     ) {
         for (index, def_info) in self.internal_symbols.symbol_definitions.iter().enumerate() {
             let symbol_id = self.symbol_id_range.offset_to_id(index);
+
+            // Symbols named by `-u`/`--undefined`/`--undefined-glob` are GC roots, as in GNU ld,
+            // lld and mold: keep the defining section alive even under `--gc-sections`.
+            if matches!(def_info.placement, SymbolPlacement::ForceUndefined) {
+                let canonical_id = resources.symbol_db.definition(symbol_id);
+                if canonical_id != symbol_id && !canonical_id.is_undefined() {
+                    let file_id = resources.symbol_db.file_id_for_symbol(canonical_id);
+                    let old_flags = resources
+                        .per_symbol_flags
+                        .get_atomic(canonical_id)
+                        .fetch_or(ValueFlags::DIRECT);
+                    if !old_flags.has_resolution() {
+                        queue.send_work::<A>(
+                            resources,
+                            file_id,
+                            WorkItem::LoadGlobalSymbol(canonical_id),
+                            scope,
+                        );
+                    }
+                }
+                continue;
+            }
+
             if !resources.symbol_db.is_canonical(symbol_id) {
                 continue;
             }
