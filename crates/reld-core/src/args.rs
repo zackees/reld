@@ -166,7 +166,9 @@ impl Args {
         let target = crate::bridge::resolve_link_target(
             explicit,
             rest,
-            std::env::var(crate::bridge::RELD_ENGINE_ENV).ok().as_deref(),
+            std::env::var(crate::bridge::RELD_ENGINE_ENV)
+                .ok()
+                .as_deref(),
             host,
         );
 
@@ -1639,7 +1641,7 @@ mod tests {
         let err = Args::new(|| ["reld", "-flavor", "bogus"].into_iter()).unwrap_err();
         assert!(
             err.to_string().contains("Valid flavors"),
-            "unexpected error message: {err}"
+            "unexpected error message: {err:?}"
         );
     }
 }

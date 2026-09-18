@@ -1183,7 +1183,11 @@ fn select_route_with_policy(
         } else {
             requirements.as_slice()
         };
-    let engine = select_engine(target.format, override_name.as_deref(), checked_requirements)?;
+    let engine = select_engine(
+        target.format,
+        override_name.as_deref(),
+        checked_requirements,
+    )?;
     let default = Engine::default_for(target.format);
     let reason = if override_name.is_some() {
         override_reason
@@ -1205,7 +1209,9 @@ fn select_route_with_policy(
     // Inject the MinGW emulation only when the probe didn't see one already spelled out on argv
     // (`Signal::Emulation`): that's the case where a GNU-syntax line has only COFF inputs and no
     // `-m i386pe*`, so `ld.lld` still needs telling which PE/COFF flavor to emit.
-    let emulation_on_argv = target.probe.is_some_and(|p| p.decided_by == Signal::Emulation);
+    let emulation_on_argv = target
+        .probe
+        .is_some_and(|p| p.decided_by == Signal::Emulation);
     let mingw_emulation = if *engine == MINGW_LLD_ENGINE && !emulation_on_argv {
         target.probe.and_then(|probe| probe.mingw_emulation())
     } else {
@@ -3191,7 +3197,7 @@ mod tests {
         let error = select_route_with_env(&argv, conflicting_override, None).unwrap_err();
         assert!(
             error.to_string().contains("target:i386"),
-            "unexpected message: {error}"
+            "unexpected message: {error:?}"
         );
 
         let no_args: &[&str] = &[];
