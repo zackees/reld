@@ -44,18 +44,28 @@ jobs:
     name: Cross-build reld front door (linux -> ${{ matrix.name }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # A Linux-only run needs no cross-built driver. Skipping the job here rather
+    # than letting the matrix evaluate to `[]` keeps it off the "matrix must
+    # define at least one vector" edge, which the default `platforms: linux`
+    # path would otherwise hit on every dispatch.
+    if: >-
+      ${{ github.event_name == 'schedule'
+          || inputs.platforms == 'all' || inputs.platforms == 'windows' || inputs.platforms == 'macos'
+          || startsWith(github.ref_name, 'perf/all/')
+          || startsWith(github.ref_name, 'perf/windows/')
+          || startsWith(github.ref_name, 'perf/macos/') }}
     strategy:
       fail-fast: false
       matrix:
+        # Never empty: the `if` above decides whether this job runs at all, and
+        # each branch below selects which targets it runs for.
         include: >-
           ${{ fromJSON(
-            (github.event_name == 'schedule' || inputs.platforms == 'all' || startsWith(github.ref_name, 'perf/all/'))
-            && '[{"name":"windows-msvc","target":"x86_64-pc-windows-msvc","bin":"reld-link","artifact":"benchmark-driver-windows-msvc","executable":"reld-link.exe"},{"name":"macos-arm64","target":"aarch64-apple-darwin","bin":"reld","artifact":"benchmark-driver-macos-arm64","executable":"ld64.reld"}]'
-            || (inputs.platforms == 'windows' || startsWith(github.ref_name, 'perf/windows/'))
+            (inputs.platforms == 'windows' || startsWith(github.ref_name, 'perf/windows/'))
             && '[{"name":"windows-msvc","target":"x86_64-pc-windows-msvc","bin":"reld-link","artifact":"benchmark-driver-windows-msvc","executable":"reld-link.exe"}]'
             || (inputs.platforms == 'macos' || startsWith(github.ref_name, 'perf/macos/'))
             && '[{"name":"macos-arm64","target":"aarch64-apple-darwin","bin":"reld","artifact":"benchmark-driver-macos-arm64","executable":"ld64.reld"}]'
-            || '[]'
+            || '[{"name":"windows-msvc","target":"x86_64-pc-windows-msvc","bin":"reld-link","artifact":"benchmark-driver-windows-msvc","executable":"reld-link.exe"},{"name":"macos-arm64","target":"aarch64-apple-darwin","bin":"reld","artifact":"benchmark-driver-macos-arm64","executable":"ld64.reld"}]'
           ) }}
     steps:
       - uses: actions/checkout@v4
