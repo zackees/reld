@@ -11,8 +11,6 @@ name: Link corpus
 
 on:
   workflow_dispatch:
-  "push":  # TEMPORARY: branch-only verification trigger, removed before merge
-    branches: [feat/meta-work-185]
   workflow_run:
     workflows: ["Benchmark Stats"]
     types: [completed]
