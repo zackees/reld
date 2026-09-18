@@ -275,6 +275,44 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
     // the `lld-mingw` engine in `bridge::resolve_link_target`, not to a flag-table capability.
 ];
 
+/// Clang-driver-only flags with no `ld64.lld` equivalent (reld#192, a reld#123 Phase 3
+/// sub-issue's decision: reld is a pure linker, not a compiler driver, and owns no
+/// driver-compatibility surface). rustc's default Apple linker-flavor, `darwin-cc`, invokes the
+/// linker through clang and so passes clang-driver arguments (`-Wl,...`, `-nodefaultlibs`,
+/// `-mmacosx-version-min=...`, `--target=<triple>`, ...) straight through to reld; reld does not
+/// translate them. Instead soldr (or any other caller) is expected to inject rustc's `ld64.lld`
+/// linker-flavor explicitly (`-Clinker-flavor=ld64.lld`), which invokes reld with a plain ld64
+/// argv and none of these.
+///
+/// Deliberately kept OUT of `FLAG_TABLE`: that table is GNU/ELF-context (`-nostdlib` is a real GNU
+/// ld spelling there, for instance), while every spelling here is `Disposition::Unsupported`, but
+/// only when the resolved format is Mach-O -- see `bridge::reject_darwin_cc_argv`, which is the
+/// sole consumer of this list and applies it unconditionally (no `RELD_UNSUPPORTED=ignore` escape
+/// hatch: `ld64.lld` would reject these flags anyway).
+///
+/// A spelling ending in `=` or `,` matches any argument with that prefix (e.g. `-Wl,` matches
+/// `-Wl,-dead_strip`); every other spelling matches only an exact argument.
+pub(crate) static DARWIN_CC_DRIVER_FLAGS: &[&str] = &[
+    "-Wl,",
+    "-Xlinker",
+    "-nodefaultlibs",
+    "-nostdlib",
+    "-nostartfiles",
+    "-dynamiclib",
+    "-isysroot",
+    "-fuse-ld=",
+    "--ld-path=",
+    "-mmacosx-version-min=",
+    "-mmacos-version-min=",
+    "-mios-version-min=",
+    "-mios-simulator-version-min=",
+    "-mtargetos=",
+    "--target=",
+    "-target",
+    "-m64",
+    "-m32",
+];
+
 /// Renders the flag table as rows of `spelling | disposition | emitters`.
 pub(crate) fn render_flag_table() -> String {
     let mut out = String::new();
@@ -303,6 +341,16 @@ pub(crate) fn render_flag_table() -> String {
             .join(", ");
         out.push_str(&format!("{spellings} | {disposition} | {emitters}\n"));
     }
+
+    out.push('\n');
+    out.push_str(
+        "Mach-O (ld64.lld) clang-driver flags -- Unsupported, add -Clinker-flavor=ld64.lld:\n",
+    );
+    for spelling in DARWIN_CC_DRIVER_FLAGS {
+        out.push_str(spelling);
+        out.push('\n');
+    }
+
     out
 }
 
@@ -333,6 +381,23 @@ mod tests {
                     "rendered table missing `{spelling}`"
                 );
             }
+        }
+        for spelling in DARWIN_CC_DRIVER_FLAGS {
+            assert!(
+                rendered.contains(spelling),
+                "rendered table missing darwin-cc flag `{spelling}`"
+            );
+        }
+    }
+
+    #[test]
+    fn darwin_cc_flags_have_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for spelling in DARWIN_CC_DRIVER_FLAGS {
+            assert!(
+                seen.insert(*spelling),
+                "duplicate spelling `{spelling}` in DARWIN_CC_DRIVER_FLAGS"
+            );
         }
     }
 

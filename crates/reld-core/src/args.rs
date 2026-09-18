@@ -133,6 +133,8 @@ impl Args {
     /// Precedence for platform selection (reld#184): an explicit COFF/Mach-O `-flavor` or driver
     /// name wins first, then `--engine`/`RELD_ENGINE`, then the `TargetProbe`, then GNU-syntax
     /// default ELF, then the host. See `bridge::resolve_link_target` for the full precedence.
+    /// Mach-O in particular is selected by the target, on any host: a Mach-O signal routes to
+    /// `ld64.lld` on a Linux host exactly as it would on macOS (reld#192).
     pub fn new<F, S, I>(input: F) -> Result<Self>
     where
         F: Fn() -> I,
@@ -1630,6 +1632,52 @@ mod tests {
             args.link_target().format(),
             crate::bridge::BridgeTarget::Elf
         );
+    }
+
+    #[test]
+    fn macho_signal_routes_on_any_host() {
+        // reld#192: a Mach-O signal picks BridgeTarget::MachO regardless of the host, so this
+        // holds even on a Linux/Windows CI runner, not just on a macOS one.
+        if std::env::var_os("RELD_ENGINE").is_some() {
+            return;
+        }
+
+        let args = Args::new(|| {
+            [
+                "reld",
+                "-arch",
+                "arm64",
+                "-platform_version",
+                "macos",
+                "11.0",
+                "14.0",
+                "-o",
+                "a",
+            ]
+            .into_iter()
+        })
+        .unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::MachO
+        );
+        assert_eq!(
+            args.bridge_target(),
+            Some(crate::bridge::BridgeTarget::MachO)
+        );
+        assert!(args.is_macho());
+
+        let args =
+            Args::new(|| ["reld", "--target=arm64-apple-macos11", "-o", "a"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::MachO
+        );
+        assert_eq!(
+            args.bridge_target(),
+            Some(crate::bridge::BridgeTarget::MachO)
+        );
+        assert!(args.is_macho());
     }
 
     #[test]
