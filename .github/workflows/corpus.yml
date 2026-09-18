@@ -1,0 +1,153 @@
+name: Link corpus
+
+# A real-world link corpus published as a pass rate (reld#185, #6 P2-T3): reld tries to link a
+# fixed set of real projects, and the fraction that link cleanly is the published signal. This is
+# too heavy to run on every PR or every commit (AGENTS.md Test layout rule 5). Instead it runs right
+# after each default-branch Benchmark Stats run: benchmark-stats.yml republishes the
+# benchmark-stats branch from scratch with a force push, which drops corpus/, so the corpus
+# republishes itself right after it to restore it. A project that fails to link lowers the
+# published rate; it does not fail this job. Harness errors (a missing input, or no project
+# measuring reld at all) are a separate failure and are reported that way.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Benchmark Stats"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  corpus:
+    name: Link real projects with reld
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+
+      - name: Sync Python tooling
+        run: uv sync --extra dev
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Free runner disk
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: >-
+          sudo env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+          "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT"
+          uv run --no-sync python -m ci.free_runner_disk
+
+      - name: Install toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang cmake make
+          clang --version
+          cmake --version
+
+      - name: Test the corpus harness
+        run: uv run --no-sync python -m pytest ci/tests/test_corpus.py -q
+
+      - name: Build reld
+        run: cargo build --release --locked -p reld
+
+      # The script exits 0 when projects fail to link (that lowers the published rate) and
+      # nonzero only on a missing input or when no project measured reld at all.
+      - name: Link the corpus with reld
+        run: >-
+          uv run --no-sync python -m ci.corpus
+          --reld "$GITHUB_WORKSPACE/target/release/reld"
+          --workdir "$RUNNER_TEMP/corpus"
+          --publish --output-dir corpus-output
+
+      - name: Upload corpus results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: link-corpus
+          path: corpus-output
+          if-no-files-found: error
+
+  publish:
+    name: Publish corpus to benchmark-stats
+    needs: corpus
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: link-corpus
+          path: corpus-output
+
+      # Only the corpus/ directory on the benchmark-stats branch is written; the benchmark
+      # artifacts that benchmark-stats.yml publishes there are left untouched. Retried on a
+      # rejected push (another publisher won the race) by refetching, never by force-pushing,
+      # since a force push would clobber the benchmark artifacts living on the same branch.
+      - name: Publish corpus/ on the benchmark-stats branch
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            dir="$(mktemp -d)"
+            if git ls-remote --exit-code --heads "$remote" benchmark-stats >/dev/null; then
+              git clone --depth 1 --branch benchmark-stats "$remote" "$dir"
+            else
+              git -C "$dir" init -b benchmark-stats
+              git -C "$dir" remote add origin "$remote"
+            fi
+            rm -rf "$dir/corpus"
+            mkdir -p "$dir/corpus"
+            cp -a corpus-output/. "$dir/corpus/"
+            git -C "$dir" config user.name "github-actions[bot]"
+            git -C "$dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C "$dir" add corpus
+            if git -C "$dir" diff --cached --quiet; then
+              echo "corpus unchanged"
+              exit 0
+            fi
+            git -C "$dir" commit -m "chore: publish link corpus for ${GITHUB_SHA}"
+            if git -C "$dir" push origin HEAD:benchmark-stats; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); refetching"
+            sleep 10
+          done
+          exit 1
+
+      - name: Report corpus publication outcome
+        if: always()
+        env:
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Corpus publication"
+            echo
+            echo "| Field | Value |"
+            echo "|:------|:------|"
+            echo "| source SHA | ${GITHUB_SHA} |"
+            echo "| generated timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| publish outcome | ${PUBLISH_OUTCOME:-not-run} |"
+            echo "| destination | https://github.com/${GITHUB_REPOSITORY}/tree/benchmark-stats/corpus |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

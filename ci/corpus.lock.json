@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "name": "zlib",
+      "language": "c",
+      "stressors": ["pie", "shared-library", "symbol-versioning"],
+      "revision": "v1.3.1",
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz",
+      "sha256": "UNPINNED",
+      "archive_root": "zlib-1.3.1",
+      "ldflags": [],
+      "build": [
+        ["sh", "-c", "./configure && make -j\"$JOBS\""]
+      ],
+      "smoke": [
+        ["make", "test"]
+      ],
+      "artifacts": ["example", "minigzip", "examplesh", "libz.so.1.3.1"],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "zlib-static",
+      "language": "c",
+      "stressors": ["static"],
+      "revision": "v1.3.1",
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz",
+      "sha256": "UNPINNED",
+      "archive_root": "zlib-1.3.1",
+      "ldflags": ["-static"],
+      "build": [
+        ["sh", "-c", "./configure --static && make -j\"$JOBS\" example minigzip"]
+      ],
+      "smoke": [
+        ["./example"],
+        ["sh", "-c", "printf 'reld corpus\\n' | ./minigzip | ./minigzip -d | grep -qx 'reld corpus'"]
+      ],
+      "artifacts": ["example", "minigzip"],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "sqlite",
+      "language": "c",
+      "stressors": ["pie", "glibc-symbol-versioning", "pthread"],
+      "revision": "3.46.1",
+      "url": "https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip",
+      "sha256": "UNPINNED",
+      "archive_root": "sqlite-amalgamation-3460100",
+      "ldflags": [],
+      "build": [
+        ["sh", "-c", "$CC -O1 -DSQLITE_THREADSAFE=1 shell.c sqlite3.c $LDFLAGS -lpthread -lm -ldl -o sqlite3"]
+      ],
+      "smoke": [
+        ["sh", "-c", "./sqlite3 :memory: 'select sqlite_version();' | grep -qx 3.46.1"]
+      ],
+      "artifacts": ["sqlite3"],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "fmt",
+      "language": "c++",
+      "stressors": ["templates", "comdat", "pie"],
+      "revision": "11.0.2",
+      "url": "https://github.com/fmtlib/fmt/releases/download/11.0.2/fmt-11.0.2.zip",
+      "sha256": "UNPINNED",
+      "archive_root": "fmt-11.0.2",
+      "ldflags": [],
+      "build": [
+        ["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-DFMT_TEST=ON", "-DFMT_DOC=OFF"],
+        ["cmake", "--build", "build", "--parallel", "--target", "format-test"]
+      ],
+      "smoke": [
+        ["build/bin/format-test"]
+      ],
+      "artifacts": ["build/bin/format-test"],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "mimalloc",
+      "language": "c",
+      "stressors": ["tls", "shared-library", "pie"],
+      "revision": "v2.1.7",
+      "url": "https://github.com/microsoft/mimalloc/archive/refs/tags/v2.1.7.tar.gz",
+      "sha256": "UNPINNED",
+      "archive_root": "mimalloc-2.1.7",
+      "ldflags": [],
+      "build": [
+        ["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-DMI_BUILD_TESTS=ON"],
+        ["cmake", "--build", "build", "--parallel"]
+      ],
+      "smoke": [
+        ["ctest", "--test-dir", "build", "--output-on-failure"]
+      ],
+      "artifacts": ["build/libmimalloc.so", "build/mimalloc-test-api"],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "ripgrep",
+      "language": "rust",
+      "stressors": ["build-scripts", "pie"],
+      "revision": "14.1.1",
+      "url": "https://static.crates.io/crates/ripgrep/ripgrep-14.1.1.crate",
+      "sha256": "UNPINNED",
+      "archive_root": "ripgrep-14.1.1",
+      "ldflags": [],
+      "build": [
+        ["cargo", "build", "--release", "--locked"]
+      ],
+      "smoke": [
+        ["sh", "-c", "./target/release/rg --version | grep -q '^ripgrep 14.1.1'"],
+        ["sh", "-c", "printf 'alpha\\nbeta\\n' | ./target/release/rg -x beta"]
+      ],
+      "artifacts": ["target/release/rg"],
+      "timeout_seconds": 900
+    }
+  ]
+}
