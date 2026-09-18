@@ -7,6 +7,14 @@
 //!    emulation names are not a signal. The emulation fully determines format/arch/class/endian;
 //!    `-EB`/`-EL` do NOT override it.
 //! 2. `-arch <name>` (Mach-O; last one wins).
+//!
+//!    Step 2b, only when no `-arch` matched: a clang-driver `--target=<triple>` /
+//!    `-target <triple>` (separate token) naming an Apple triple (one containing `-apple-`; last
+//!    one wins). The triple's first `-`-separated component is mapped through the same arch table
+//!    as `-arch` (`aarch64` is additionally treated like `arm64`); an arch component the table
+//!    doesn't recognise still yields Mach-O with `arch`/`class`/`endian` all `None`, rather than
+//!    falling through to a later step. A `--target=`/`-target` naming a non-Apple triple is not a
+//!    signal at all here (reld#192).
 //! 3. Format-only argv signals: COFF `/OUT:<path>` / `-out:<path>` (case-insensitive prefix), or
 //!    `-platform_version` followed by 3 tokens (Mach-O). If both appear, the COFF signal wins.
 //!    arch/class/endian are then filled in from the first input whose header (see step 5) matches
@@ -148,6 +156,8 @@ pub(crate) enum Endian {
 pub(crate) enum Signal {
     Emulation,
     MachOArch,
+    /// A clang-driver `--target=<triple>` / `-target <triple>` naming an Apple triple (reld#192).
+    DriverTarget,
     CoffOut,
     MachOPlatformVersion,
     OutputFormat,
@@ -309,6 +319,10 @@ pub(crate) fn probe_target<S: AsRef<str>>(args: &[S], inputs: &[&[u8]]) -> Optio
     let endian_override = last_endian_override(args);
 
     if let Some(target) = last_macho_arch_target(args) {
+        return Some(with_endian_override(target, endian_override));
+    }
+
+    if let Some(target) = last_driver_target_target(args) {
         return Some(with_endian_override(target, endian_override));
     }
 
@@ -481,6 +495,57 @@ fn probe_macho_arch(name: &str) -> Option<FormatTuple> {
     };
 
     Some(tuple)
+}
+
+// --- Step 2b: clang-driver `--target=<triple>` / `-target <triple>` (Apple triples only) ----
+
+/// Scans for the LAST `--target=<triple>` (joined) or `-target <triple>` (separate token) whose
+/// triple contains `-apple-`, and maps it to a Mach-O `ProbedTarget`. A `--target=`/`-target`
+/// naming a non-Apple triple is skipped entirely: it is not a signal at this step (reld#192).
+fn last_driver_target_target<S: AsRef<str>>(args: &[S]) -> Option<ProbedTarget> {
+    let mut found: Option<FormatTuple> = None;
+
+    for (index, arg) in args.iter().enumerate() {
+        let arg = arg.as_ref();
+        let triple = if let Some(value) = arg.strip_prefix("--target=") {
+            Some(value)
+        } else if arg == "-target" {
+            args.get(index + 1).map(|value| value.as_ref())
+        } else {
+            None
+        };
+
+        let Some(triple) = triple else { continue };
+        if !triple.contains("-apple-") {
+            continue;
+        }
+
+        found = Some(probe_driver_target_arch(triple));
+    }
+
+    found.map(|(format, arch, class, endian)| ProbedTarget {
+        format,
+        arch,
+        class,
+        endian,
+        decided_by: Signal::DriverTarget,
+    })
+}
+
+/// Maps the first `-`-separated component of an Apple `triple` (e.g. `arm64` in
+/// `arm64-apple-macos11`) through `probe_macho_arch`, additionally treating `aarch64` like
+/// `arm64`. An unrecognised arch component still yields Mach-O with `arch`/`class`/`endian` all
+/// `None`, rather than `None` altogether: the triple already told us the format even when it
+/// doesn't tell us the architecture.
+fn probe_driver_target_arch(triple: &str) -> FormatTuple {
+    let arch_component = triple.split('-').next().unwrap_or(triple);
+    let arch_component = if arch_component == "aarch64" {
+        "arm64"
+    } else {
+        arch_component
+    };
+
+    probe_macho_arch(arch_component).unwrap_or((ObjectFormat::MachO, None, None, None))
 }
 
 // --- Step 3: format-only argv signals (COFF `/OUT:`/`-out:`, Mach-O `-platform_version`) ----
@@ -1322,6 +1387,56 @@ mod tests {
     }
 
     #[test]
+    fn driver_target_signal_selects_macho() {
+        let cases = [
+            Case {
+                label: "--target=arm64-apple-macos11",
+                args: vec!["--target=arm64-apple-macos11"],
+                inputs: vec![],
+                expected: Some(ProbedTarget {
+                    format: ObjectFormat::MachO,
+                    arch: Some(ProbedArch::AArch64),
+                    class: Some(Class::Bits64),
+                    endian: Some(Endian::Little),
+                    decided_by: Signal::DriverTarget,
+                }),
+            },
+            Case {
+                label: "-target x86_64-apple-darwin",
+                args: vec!["-target", "x86_64-apple-darwin"],
+                inputs: vec![],
+                expected: Some(ProbedTarget {
+                    format: ObjectFormat::MachO,
+                    arch: Some(ProbedArch::X86_64),
+                    class: Some(Class::Bits64),
+                    endian: Some(Endian::Little),
+                    decided_by: Signal::DriverTarget,
+                }),
+            },
+            Case {
+                label: "--target=x86_64-unknown-linux-gnu alone is not a signal",
+                args: vec!["--target=x86_64-unknown-linux-gnu"],
+                inputs: vec![],
+                expected: None,
+            },
+            Case {
+                label: "-arch beats --target= (arch wins)",
+                args: vec!["-arch", "x86_64", "--target=arm64-apple-macos11"],
+                inputs: vec![],
+                expected: Some(ProbedTarget {
+                    format: ObjectFormat::MachO,
+                    arch: Some(ProbedArch::X86_64),
+                    class: Some(Class::Bits64),
+                    endian: Some(Endian::Little),
+                    decided_by: Signal::MachOArch,
+                }),
+            },
+        ];
+
+        run_cases(&cases);
+    }
+
+    #[test]
     fn target_probe_no_signal_is_none() {
         let cases = [
             Case {
@@ -1428,6 +1543,12 @@ mod tests {
                 args: vec![],
                 inputs: vec![b"OUTPUT_FORMAT(pe-x86-64)\n".to_vec()],
                 expected: Some(TargetFamily::MinGwCoff),
+            },
+            FamilyCase {
+                label: "--target=arm64-apple-darwin",
+                args: vec!["--target=arm64-apple-darwin"],
+                inputs: vec![],
+                expected: Some(TargetFamily::MachO),
             },
         ];
 

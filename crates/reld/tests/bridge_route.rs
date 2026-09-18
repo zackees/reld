@@ -4,6 +4,8 @@
 //! reld#184 extends this file with end-to-end routing tests: they run the built `reld` binary
 //! against a fake bridge linker that records its argv, and assert that the `RELD_LOG_ENGINE`
 //! routing line on stderr names the engine `TargetProbe` picked.
+//!
+//! reld#192 adds Mach-O-from-any-host routing and the darwin-cc rule.
 
 use reld_core::platforms::host;
 use reld_core::platforms::host::HostOs;
@@ -141,6 +143,16 @@ fn elf_header(class: u8, data: u8, machine: u16) -> Vec<u8> {
 fn coff_header(machine: u16) -> Vec<u8> {
     let mut bytes = vec![0_u8; 20];
     bytes[0..2].copy_from_slice(&machine.to_le_bytes());
+    bytes
+}
+
+/// Builds a fake 32-byte Mach-O header: the 64-bit magic `0xfeedfacf` at offset 0 and
+/// `CPU_TYPE_ARM64` (`0x0100000c`) at offset 4, both little-endian, e.g. `macho_header()` is an
+/// `MH_MAGIC_64` ARM64 object.
+fn macho_header() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 32];
+    bytes[0..4].copy_from_slice(&0xfeedfacf_u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&0x0100000c_u32.to_le_bytes());
     bytes
 }
 
@@ -418,5 +430,191 @@ fn native_elf_route_is_unchanged() {
         "reld: engine=reld (native, reason=default)"
     };
     assert!(stderr.contains(expected), "stderr: {stderr}");
+    assert!(!record.exists(), "stderr: {stderr}");
+}
+
+// --- Mach-O from any host and the darwin-cc rule (reld#192) ---------------------------------
+
+/// Clang's Darwin driver invokes the linker with `-demangle -dynamic -arch <arch>
+/// -platform_version <platform> <min> <sdk> ...`; when `--ld-path=reld` puts reld in that seat, it
+/// must route to `ld64.lld` on every host, not only on macOS where the host default already
+/// happens to be Mach-O.
+#[test]
+fn macho_from_linux_links() {
+    if !posix_host() {
+        eprintln!("skipping: host has no POSIX shell scripts");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("could not create temp dir");
+    let args: Vec<OsString> = vec![
+        "-demangle".into(),
+        "-dynamic".into(),
+        "-arch".into(),
+        "arm64".into(),
+        "-platform_version".into(),
+        "macos".into(),
+        "11.0.0".into(),
+        "0.0.0".into(),
+        "-o".into(),
+        directory.path().join("hello").into(),
+        directory.path().join("missing.o").into(),
+    ];
+    let (output, argv) = run_routed(&args, directory.path());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reld: engine=ld64.lld (bridge, reason="),
+        "stderr: {stderr}"
+    );
+    let expected = if host::os() == HostOs::MacOs {
+        "reld: engine=ld64.lld (bridge, reason=default)"
+    } else {
+        "reld: engine=ld64.lld (bridge, reason=target:mach-o)"
+    };
+    assert!(stderr.contains(expected), "stderr: {stderr}");
+    assert!(
+        has_adjacent_lines(&argv, "-arch", "arm64"),
+        "recorded argv: {argv:?}"
+    );
+    assert!(
+        has_adjacent_lines(&argv, "-platform_version", "macos"),
+        "recorded argv: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|line| line.starts_with("--engine=")),
+        "recorded argv: {argv:?}"
+    );
+}
+
+/// With no `-arch` at all, a Mach-O input header is itself a signal that this is a Mach-O link,
+/// exactly as an ELF or COFF input header is for those formats, so it must route to `ld64.lld` on
+/// every host.
+#[test]
+fn macho_input_header_routes_to_ld64_lld() {
+    if !posix_host() {
+        eprintln!("skipping: host has no POSIX shell scripts");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("could not create temp dir");
+    let input = directory.path().join("hello.o");
+    std::fs::write(&input, macho_header()).expect("could not write fake Mach-O object");
+
+    let args: Vec<OsString> = vec!["-o".into(), directory.path().join("a").into(), input.into()];
+    let (output, _argv) = run_routed(&args, directory.path());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = if host::os() == HostOs::MacOs {
+        "reld: engine=ld64.lld (bridge, reason=default)"
+    } else {
+        "reld: engine=ld64.lld (bridge, reason=target:mach-o)"
+    };
+    assert!(stderr.contains(expected), "stderr: {stderr}");
+}
+
+/// rustc's default linker flavor for an Apple target wraps the linker in the platform `cc`, which
+/// emits clang-driver-only flags (`-nodefaultlibs`, `-mmacosx-version-min=`, `-Wl,`, ...) that
+/// `ld64.lld` cannot parse; a Mach-O-routed argv carrying one of those flags must fail before the
+/// bridge ever runs, naming `-Clinker-flavor=ld64.lld` as the fix. The same link expressed the way
+/// `-Clinker-flavor=ld64.lld` calls the linker directly (`-flavor darwin ...`, no cc-only flags)
+/// must still link.
+#[test]
+fn macos_rustc_default_flavor_links() {
+    if !posix_host() {
+        eprintln!("skipping: host has no POSIX shell scripts");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("could not create temp dir");
+    let record = directory.path().join("argv.txt");
+    let args: Vec<OsString> = vec![
+        "-arch".into(),
+        "arm64".into(),
+        "-mmacosx-version-min=11.0.0".into(),
+        directory.path().join("main.o").into(),
+        "-nodefaultlibs".into(),
+        "-lSystem".into(),
+        "-Wl,-dead_strip".into(),
+        "-o".into(),
+        directory.path().join("app").into(),
+    ];
+    let (output, _argv) = run_routed(&args, directory.path());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("-Clinker-flavor=ld64.lld"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("`-mmacosx-version-min=")
+            || stderr.contains("`-nodefaultlibs`")
+            || stderr.contains("`-Wl,`"),
+        "stderr: {stderr}"
+    );
+    assert!(!record.exists(), "stderr: {stderr}");
+
+    let directory = tempfile::tempdir().expect("could not create temp dir");
+    let args: Vec<OsString> = vec![
+        "-flavor".into(),
+        "darwin".into(),
+        "-arch".into(),
+        "arm64".into(),
+        "-platform_version".into(),
+        "macos".into(),
+        "11.0.0".into(),
+        "14.0".into(),
+        directory.path().join("main.o").into(),
+        "-lSystem".into(),
+        "-dead_strip".into(),
+        "-o".into(),
+        directory.path().join("app").into(),
+    ];
+    let (output, argv) = run_routed(&args, directory.path());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("reld: engine=ld64.lld (bridge, reason="),
+        "stderr: {stderr}"
+    );
+    assert!(
+        argv.iter().any(|line| line == "-dead_strip"),
+        "recorded argv: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|line| line.starts_with("-Wl,")),
+        "recorded argv: {argv:?}"
+    );
+}
+
+/// `--target=<apple triple>` is as unambiguous a Mach-O signal as `-arch`, but it is also a
+/// clang-driver-only flag under the darwin-cc rule: a Mach-O-routed argv that carries it without
+/// an `-arch` must still fail before the bridge runs.
+#[test]
+fn darwin_cc_driver_target_is_rejected() {
+    if !posix_host() {
+        eprintln!("skipping: host has no POSIX shell scripts");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("could not create temp dir");
+    let record = directory.path().join("argv.txt");
+    let args: Vec<OsString> = vec![
+        "--target=arm64-apple-macos11".into(),
+        "-nodefaultlibs".into(),
+        "-o".into(),
+        directory.path().join("a").into(),
+        directory.path().join("a.o").into(),
+    ];
+    let (output, _argv) = run_routed(&args, directory.path());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("-Clinker-flavor=ld64.lld"),
+        "stderr: {stderr}"
+    );
     assert!(!record.exists(), "stderr: {stderr}");
 }

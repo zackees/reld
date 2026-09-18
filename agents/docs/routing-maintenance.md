@@ -28,6 +28,7 @@ A PR that enhances the native engine and does not touch routing is incomplete. R
 | Human-facing capability claims | `README.md` "Polylinker" table, `agents/docs/polylinker.md`, `DESIGN.md` §4.5 |
 | Link-target resolution (format / engine family) | `bridge.rs::resolve_link_target`, `bridge.rs::probe_link_target`, `target_probe.rs` |
 | Target emulation dispositions | `flag_table.rs` `-m <emulation>` rules |
+| Mach-O clang-driver (darwin-cc) rejection | `bridge.rs::reject_darwin_cc_argv`, `flag_table.rs::DARWIN_CC_DRIVER_FLAGS` |
 
 #123 replaces the scattered tables with one `FlagRule` table carrying a four-way `Disposition`
 (`Native`, `SatisfiedByConstruction`, `Requires(Capability)`, `Unsupported`) and generated
@@ -132,10 +133,11 @@ run as `ld.lld -m i386pep`, i.e. lld's MinGW driver / rust-lld `-flavor gnu`).
    override is still capability-checked against whatever the argv/inputs actually need (see below);
    it does not suppress a loud error.
 3. Otherwise `bridge.rs::probe_link_target` calls `target_probe.rs::probe_target`, whose own
-   precedence is `-m <emulation>`, then `-arch`, then `/OUT:` / `-platform_version`, then
-   `OUTPUT_FORMAT` in a linker script, then the first object input's header, then bitcode. A
-   GNU-syntax invocation (`-flavor gnu|ld`, or driver name `ld`) only chooses between ELF and
-   MinGW at this step, so `-flavor gnu -m i386pep` is `lld-mingw`, exactly as `-m i386pep` alone is.
+   precedence is `-m <emulation>`, then `-arch`, then `--target=`/`-target` (Apple triples only),
+   then `/OUT:` / `-platform_version`, then `OUTPUT_FORMAT` in a linker script, then the first
+   object input's header, then bitcode. A GNU-syntax invocation (`-flavor gnu|ld`, or driver name
+   `ld`) only chooses between ELF and MinGW at this step, so `-flavor gnu -m i386pep` is
+   `lld-mingw`, exactly as `-m i386pep` alone is.
 4. GNU syntax with nothing else to go on falls back to ELF; every other syntax falls back to the
    host's own format.
 
@@ -175,6 +177,39 @@ so the probe decides from argv alone, with no extra input I/O.
 
 See [#184](https://github.com/zackees/reld/issues/184) for the TargetProbe/`lld-mingw` design and
 [#123](https://github.com/zackees/reld/issues/123) for the phased routing audit this extends.
+
+## Mach-O from any host, and the darwin-cc rule (reld#192)
+
+Mach-O is keyed on the link target, not the host: `-arch`, `-platform_version`, a clang-driver
+`--target=<apple triple>`/`-target <apple triple>` (probe signal `Signal::DriverTarget`, the step
+added after `-arch` in `target_probe.rs::probe_target` above), or a thin/fat Mach-O input header
+route to the `ld64.lld` engine on any host. On a Linux host the `RELD_LOG_ENGINE` line reads
+`reld: engine=ld64.lld (bridge, reason=target:mach-o)`; the engine is discovered like every other
+bridge (`RELD_BRIDGE_LINKER`, then `rust-lld -flavor darwin` from the active toolchain, then
+`ld64.lld` on `PATH`). A Linux host can therefore link Mach-O with
+`clang --target=arm64-apple-macos11 --ld-path=reld` (CI proof:
+`.github/workflows/cross-ship.yml` links a Mach-O hello on ubuntu and runs it on the macos-14
+host-run leg).
+
+The darwin-cc rule, decided on [#123](https://github.com/zackees/reld/issues/123) and recorded on
+zackees/soldr#3262: rustc's default Apple linker flavor `darwin-cc` passes clang-driver arguments.
+reld does not translate them. Callers must pass `-Clinker-flavor=ld64.lld` (rustc then invokes
+reld directly with a plain ld64 argv); soldr injects this flag. When the resolved format is Mach-O
+and argv (including `@file` contents) carries any clang-driver-only flag listed in
+`flag_table.rs::DARWIN_CC_DRIVER_FLAGS` (`-Wl,`, `-Xlinker`, `-nodefaultlibs`, `-nostdlib`,
+`-nostartfiles`, `-dynamiclib`, `-isysroot`, `-fuse-ld=`, `--ld-path=`, `-m*-version-min=`,
+`-mtargetos=`, `--target=`/`-target`, `-m64`, `-m32`), reld fails before any engine runs, naming
+the flag and `-Clinker-flavor=ld64.lld`. There is no `RELD_UNSUPPORTED` escape hatch for this
+(`ld64.lld` would reject the flags anyway). Check is `bridge.rs::reject_darwin_cc_argv`, called
+from `select_route_with_policy`.
+
+**Maintenance rule.** Adding a spelling to `DARWIN_CC_DRIVER_FLAGS` requires checking it is not an
+`ld64.lld` option (`lld/MachO/Options.td`) — a real ld64 flag in that list would reject valid
+links. A darwin-cc translation layer must not be added; that was explicitly rejected on
+[#123](https://github.com/zackees/reld/issues/123).
+
+See [#192](https://github.com/zackees/reld/issues/192) for the Mach-O target-keyed routing and
+darwin-cc rejection.
 
 ## How a routing decision is surfaced, and why stderr is not free
 
@@ -229,3 +264,5 @@ so on stderr (name the engine and the signal) rather than exit 1 silently.
 - [ ] `RELD_LOG_ENGINE=1` output for the affected configuration is pasted in the PR.
 - [ ] If I changed which formats/architectures the native engine accepts, I updated the
       TargetProbe native set, the `-m` flag rules, and the target routing tests.
+- [ ] If I touched Mach-O routing: the darwin-cc list contains no real ld64 spelling, and
+      `bridge_route.rs` macho tests still pass.

@@ -14,9 +14,13 @@ linker engines per platform and routes each link request to whichever bundled en
 it. The engines today are reld's own native engine (Linux/ELF), `lld` (`ld.lld`, ELF), `lld-link`
 (Windows/COFF, MSVC syntax), `ld64.lld` (macOS/Mach-O), and `lld-mingw` (Windows/MinGW PE/COFF
 from a GNU-style command line, run as `ld.lld -m i386pep`, i.e. lld's MinGW driver — this
-includes cross links from Linux, e.g. `clang --target=x86_64-w64-mingw32 --ld-path=reld`). The
-framing generalizes: as more engines get bundled (e.g. `radlink` per `DESIGN.md` §7), routing
-decides per-link which one runs, rather than reld growing a fork of itself per engine.
+includes cross links from Linux, e.g. `clang --target=x86_64-w64-mingw32 --ld-path=reld`). Mach-O
+routes to `ld64.lld` from any host — target-keyed on `-arch`/`--target=<apple triple>`/a Mach-O
+input, not on the host OS (reld#192). Apple rustc builds must pass
+`-Clinker-flavor=ld64.lld`; the default `darwin-cc` flavor's clang-driver arguments are rejected
+loudly, naming that fix. The framing generalizes: as more engines get bundled (e.g. `radlink` per
+`DESIGN.md` §7), routing decides per-link which one runs, rather than reld growing a fork of
+itself per engine.
 
 The point of the framing: a capability reld's fast default engine doesn't have (the leading
 example is LTO) doesn't have to mean "reject the flag." It can mean "hand this link to a bundled

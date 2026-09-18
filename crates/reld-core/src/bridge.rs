@@ -27,6 +27,16 @@
 //! This module intentionally never falls back to the closed-source MSVC `link.exe` (or to Apple's
 //! `ld64`) -- silently doing so would poison benchmark comparability and mask discovery bugs
 //! (issue #17, decision B2).
+//!
+//! reld#192 (a reld#123 Phase 3 sub-issue) makes Mach-O routing target-keyed rather than
+//! host-keyed: a Mach-O signal (`-arch`, `-platform_version`, a `--target=`/`-target` Apple
+//! triple, or a Mach-O input header) routes to `ld64.lld` from any host, including a Linux one
+//! cross-linking Mach-O. The same issue also decided the "darwin-cc" rule: reld does not
+//! translate clang-driver arguments (`-Wl,...`, `-nodefaultlibs`, `-mmacosx-version-min=...`,
+//! ...), which is what rustc's default Apple linker-flavor, `darwin-cc`, would otherwise hand
+//! straight through. A Mach-O-routed argv carrying one of those flags fails loudly, before any
+//! engine selection, naming the flag and pointing at rustc's `-Clinker-flavor=ld64.lld`; see
+//! `reject_darwin_cc_argv` and `flag_table::DARWIN_CC_DRIVER_FLAGS`.
 
 use crate::bail;
 use crate::error::Context;
@@ -528,8 +538,9 @@ const PROBE_MAX_TEXT_INPUT_BYTES: u64 = 1024 * 1024;
 
 /// Options that consume one or more following tokens as their value(s), for `probe_link_target`'s
 /// candidate-input scan: the named count of tokens after the option is skipped rather than being
-/// considered a candidate input path. `-platform_version` is the only entry that skips more than
-/// one token (it takes a platform name and two version numbers).
+/// considered a candidate input path. `-platform_version` (a platform name and two version
+/// numbers) and `-sectcreate` (segment, section, file) are the only entries that skip more than
+/// one token; `-weak-l<name>` is deliberately absent, since it's always joined, never separate.
 const PROBE_SEPARATE_VALUE_OPTIONS: &[(&str, usize)] = &[
     ("-o", 1),
     ("--output", 1),
@@ -576,6 +587,20 @@ const PROBE_SEPARATE_VALUE_OPTIONS: &[(&str, usize)] = &[
     ("-install_name", 1),
     ("-platform_version", 3),
     ("-lto_library", 1),
+    ("-target", 1),
+    ("-framework", 1),
+    ("-weak_framework", 1),
+    ("-exported_symbols_list", 1),
+    ("-unexported_symbols_list", 1),
+    ("-order_file", 1),
+    ("-map", 1),
+    ("-dependency_info", 1),
+    ("-object_path_lto", 1),
+    ("-current_version", 1),
+    ("-compatibility_version", 1),
+    ("-headerpad", 1),
+    ("-undefined", 1),
+    ("-sectcreate", 3),
 ];
 
 /// Best-effort probe of the link target from `args` (the linker argv tokens after the program
@@ -584,8 +609,9 @@ const PROBE_SEPARATE_VALUE_OPTIONS: &[(&str, usize)] = &[
 /// affected tokens rather than failing the link over what is only a routing hint.
 ///
 /// Performance: clang and gcc always pass an explicit `-m <emulation>` for a native Linux link, so
-/// the argv-only signals (`Signal::Emulation`, `MachOArch`, `CoffOut`, `MachOPlatformVersion`)
-/// resolve without opening a single input file -- the common case does zero extra I/O.
+/// the argv-only signals (`Signal::Emulation`, `MachOArch`, `DriverTarget`, `CoffOut`,
+/// `MachOPlatformVersion`) resolve without opening a single input file -- the common case does
+/// zero extra I/O.
 pub(crate) fn probe_link_target<S: AsRef<str>>(
     args: &[S],
 ) -> Option<crate::target_probe::ProbedTarget> {
@@ -596,6 +622,7 @@ pub(crate) fn probe_link_target<S: AsRef<str>>(
             target.decided_by,
             crate::target_probe::Signal::Emulation
                 | crate::target_probe::Signal::MachOArch
+                | crate::target_probe::Signal::DriverTarget
                 | crate::target_probe::Signal::CoffOut
                 | crate::target_probe::Signal::MachOPlatformVersion
         )
@@ -1136,6 +1163,68 @@ fn override_from_request(
     }
 }
 
+/// The canonical spelling of `arg` if it is a clang-driver-only flag with no `ld64.lld` equivalent
+/// (reld#192; see `flag_table::DARWIN_CC_DRIVER_FLAGS`), or `None`. A spelling ending in `=` or
+/// `,` matches as a prefix (`-Wl,`, `-mmacosx-version-min=`, `--target=`, `-fuse-ld=`,
+/// `--ld-path=`, ...); every other spelling matches `arg` exactly. Case-sensitive, like every
+/// other GNU/clang-driver flag reld classifies (agents/docs/routing-maintenance.md).
+fn darwin_cc_driver_flag(arg: &str) -> Option<&'static str> {
+    crate::flag_table::DARWIN_CC_DRIVER_FLAGS
+        .iter()
+        .find(|&&spelling| {
+            if spelling.ends_with('=') || spelling.ends_with(',') {
+                arg.starts_with(spelling)
+            } else {
+                arg == spelling
+            }
+        })
+        .copied()
+}
+
+/// Rejects `argv` (the full process argv, including `argv[0]`) if it carries a clang-driver flag
+/// with no `ld64.lld` equivalent (reld#192, the "darwin-cc" rule): reld does not translate
+/// clang-driver arguments, so a Mach-O link that received them -- typically because rustc's
+/// default Apple linker-flavor, `darwin-cc`, invoked reld through clang rather than through
+/// rustc's `ld64.lld` linker-flavor -- must fail loudly and name the fix, rather than either
+/// silently mis-linking or letting `ld64.lld` itself reject the flag with an unhelpful error.
+///
+/// Skips `argv[0]` and a leading `-flavor X` pair (mirroring `drop_reld_dispatch_tokens`), and
+/// expands `@file` tokens best-effort with `expand_probe_response_files`: this is validation, not
+/// routing, but the same best-effort expansion is good enough to catch a driver flag hidden in a
+/// response file, and erring on the side of forwarding an unexpanded token to `ld64.lld` (which
+/// would then produce its own, less actionable error) is an acceptable fallback.
+fn reject_darwin_cc_argv(argv: &[OsString]) -> Result<()> {
+    let mut rest: Vec<OsString> = argv.iter().skip(1).cloned().collect();
+    if rest
+        .first()
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("-flavor"))
+    {
+        let drop = rest.len().min(2);
+        rest.drain(0..drop);
+    }
+
+    let strings: Vec<String> = rest
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    for flag in expand_probe_response_files(&strings, 0) {
+        if darwin_cc_driver_flag(&flag).is_some() {
+            bail!(
+                "This Mach-O link received the clang-driver argument `{flag}`, which has no \
+                 ld64 equivalent: reld does not translate clang-driver (rustc `darwin-cc` \
+                 linker-flavor) arguments. If rustc is invoking reld, add \
+                 `-Clinker-flavor=ld64.lld` (for example \
+                 CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=-Clinker-flavor=ld64.lld). If a \
+                 C/C++ build is linking, run the link through clang with `--ld-path=reld`. See \
+                 reld#192."
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn select_route_with_policy(
     argv: &[OsString],
     target: LinkTarget,
@@ -1143,6 +1232,13 @@ fn select_route_with_policy(
     allow_unsupported_native: bool,
     native_control_env: bool,
 ) -> Result<Route> {
+    if target.format == BridgeTarget::MachO {
+        // The darwin-cc rule (reld#192): checked unconditionally, before any engine selection or
+        // override, and with no `RELD_UNSUPPORTED=ignore` escape hatch -- `ld64.lld` would reject
+        // these flags anyway, so there is nothing an override could usefully do about them.
+        reject_darwin_cc_argv(argv)?;
+    }
+
     // COFF, Mach-O and MinGW each have a single bundled engine today, so parsing their response
     // files cannot affect selection. More importantly, their response grammars and encodings
     // differ from ELF/GNU (MSVC commonly emits UTF-16). Leave them byte-for-byte for the
@@ -3257,5 +3353,135 @@ mod tests {
         let args = ["-o", out_str, x86_str];
         let probe = probe_link_target(&args).unwrap();
         assert_eq!(probe.arch, Some(crate::target_probe::ProbedArch::X86_64));
+    }
+
+    // --- reld#192: Mach-O is keyed on the target, not the host --------------------------------
+
+    /// A 32-byte thin Mach-O header: `MH_MAGIC_64`, little-endian, `CPU_TYPE_ARM64`.
+    fn arm64_macho_header() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 32];
+        bytes[0..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&0x0100_000c_u32.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn macho_from_linux_routes_to_ld64_lld() {
+        let dir = tempfile::tempdir().unwrap();
+        let macho_input = dir.path().join("hello.o");
+        std::fs::write(&macho_input, arm64_macho_header()).unwrap();
+        let macho_input_str = macho_input.to_str().unwrap();
+
+        let clang_ld64_args: &[&str] = &[
+            "-demangle",
+            "-dynamic",
+            "-arch",
+            "arm64",
+            "-platform_version",
+            "macos",
+            "11.0.0",
+            "0.0.0",
+            "-o",
+            "hello",
+            "hello.o",
+        ];
+        let platform_version_args: &[&str] =
+            &["-platform_version", "macos", "11.0", "14.0", "-o", "a"];
+        let input_header_args: &[&str] = &[macho_input_str];
+
+        for args in [clang_ld64_args, platform_version_args, input_header_args] {
+            let target = resolve_link_target(ExplicitFormat::None, args, None, BridgeTarget::Elf);
+            let argv = argv_with_prog("reld", args);
+            let route = select_route_with_env(&argv, target, None).unwrap();
+            assert_eq!(route.engine.name, "ld64.lld", "args {args:?}");
+            assert_eq!(route.reason.label(), "target:mach-o", "args {args:?}");
+        }
+
+        // On a Mach-O host, the same clang argv agrees with the host default, so the reason is
+        // `default` rather than `target:mach-o`.
+        let target = resolve_link_target(
+            ExplicitFormat::None,
+            clang_ld64_args,
+            None,
+            BridgeTarget::MachO,
+        );
+        let argv = argv_with_prog("reld", clang_ld64_args);
+        let route = select_route_with_env(&argv, target, None).unwrap();
+        assert_eq!(route.engine.name, "ld64.lld");
+        assert_eq!(route.reason.label(), "default");
+    }
+
+    #[test]
+    fn darwin_cc_argv_fails_naming_linker_flavor() {
+        let flag_cases: &[&[&str]] = &[
+            &["-nodefaultlibs"],
+            &["-Wl,-dead_strip"],
+            &["-mmacosx-version-min=11.0"],
+            &["-dynamiclib"],
+            &["-isysroot", "/sdk"],
+        ];
+
+        for flag_args in flag_cases {
+            let mut args: Vec<&str> = vec!["-arch", "arm64"];
+            args.extend_from_slice(flag_args);
+            args.extend_from_slice(&["-o", "a", "a.o"]);
+
+            let target = resolve_link_target(ExplicitFormat::None, &args, None, BridgeTarget::Elf);
+            let argv = argv_with_prog("reld", &args);
+            let error = select_route_with_env(&argv, target, None).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("darwin-cc"), "args {args:?}: {message}");
+            assert!(
+                message.contains(&format!("`{}`", flag_args[0])),
+                "args {args:?}: {message}"
+            );
+            assert!(
+                message.contains("-Clinker-flavor=ld64.lld"),
+                "args {args:?}: {message}"
+            );
+        }
+
+        // No `-arch` at all: the `DriverTarget` signal (`--target=`) alone must still route to
+        // Mach-O and trip the darwin-cc rule.
+        let args = ["--target=arm64-apple-macos11", "-nodefaultlibs"];
+        let target = resolve_link_target(ExplicitFormat::None, &args, None, BridgeTarget::Elf);
+        assert_eq!(target.format(), BridgeTarget::MachO);
+        let argv = argv_with_prog("reld", &args);
+        let error = select_route_with_env(&argv, target, None).unwrap_err();
+        let message = error.to_string();
+        // The rejection names the first darwin-cc flag in argv order; `--target=` is itself a
+        // clang-driver argument, so it is the one reported here.
+        assert!(
+            message.contains("`--target=arm64-apple-macos11`")
+                || message.contains("`-nodefaultlibs`"),
+            "{message}"
+        );
+        assert!(message.contains("-Clinker-flavor=ld64.lld"), "{message}");
+
+        // An explicit `-flavor darwin` (`ExplicitFormat::MachO`) argv with only ld64 flags routes
+        // fine.
+        let ld64_only: &[&str] = &[
+            "-arch",
+            "arm64",
+            "-platform_version",
+            "macos",
+            "11.0",
+            "14.0",
+            "-lSystem",
+            "-o",
+            "a",
+            "a.o",
+        ];
+        let target = resolve_link_target(ExplicitFormat::MachO, ld64_only, None, BridgeTarget::Elf);
+        let argv = argv_with_prog("reld", ld64_only);
+        let route = select_route_with_env(&argv, target, None).unwrap();
+        assert_eq!(route.engine.name, "ld64.lld");
+
+        // An ELF argv containing `-Wl,foo` is NOT rejected by this rule.
+        let elf_args = ["-Wl,foo", "-o", "a", "a.o"];
+        let target = resolve_link_target(ExplicitFormat::None, &elf_args, None, BridgeTarget::Elf);
+        assert_eq!(target.format(), BridgeTarget::Elf);
+        let argv = argv_with_prog("reld", &elf_args);
+        select_route_with_env(&argv, target, None).unwrap();
     }
 }

@@ -16,6 +16,11 @@ name: Cross ship (build off-platform, run on-platform)
 # built for the Linux host, links a MinGW PE hello-world on Linux
 # (`clang --target=x86_64-w64-mingw32 --ld-path=reld`, reld#184, the #123
 # Phase 3 exit), and that the resulting exe runs on the Windows runner.
+# The macos-arm64 leg likewise proves that reld itself, built for the Linux
+# host, links a Mach-O hello-world on Linux
+# (`clang --target=arm64-apple-macos11 --ld-path=reld`, reld#192, the #123
+# Phase 3 exit), and that the resulting exe runs on the macos-14 host-run
+# runner.
 #
 # NOTE: validated — this workflow ran green on main across all six jobs
 # (https://github.com/zackees/reld/actions/runs/35276124820) and is no longer a
@@ -208,6 +213,75 @@ jobs:
           path: mingw-hello/hello.exe
           if-no-files-found: error
 
+      # reld#192 (#123 Phase 3 exit, macho_from_linux_links): prove reld
+      # itself, built for the Linux host (no --target), links a Mach-O
+      # binary when handed to clang as --ld-path. clang's Darwin driver
+      # emits ld64-flavored argv (`-arch arm64 -platform_version ...`);
+      # reld's TargetProbe routes that to the ld64.lld engine (rust-lld
+      # -flavor darwin) on Linux, keyed on the Mach-O target rather than the
+      # host. lld ad-hoc signs the arm64 output so macOS will exec it. Only
+      # runs for macos-arm64; the exe is shipped to host-run, the only leg
+      # that can actually execute a Mach-O binary, to prove it runs there.
+      - name: Link a Mach-O hello-world with reld (linux host, reld#192)
+        if: matrix.name == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # setup-soldr's aarch64-apple-darwin cross prep exports
+          # CARGO_ENCODED_RUSTFLAGS with Apple link-args (`--target=arm64-apple-darwin
+          # -isysroot ... -fuse-ld=lld`). Cargo applies it to every unit when no
+          # --target is given, so this host build's build scripts would link as
+          # Darwin. Drop it for the host build only.
+          env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS \
+            soldr build --package reld --bin reld --release --locked
+          host_reld="$PWD/target/release/reld"
+          test -x "$host_reld"
+
+          command -v clang >/dev/null || { echo "::error::clang not found on ubuntu-24.04 (ships clang; not apt-installing)"; exit 1; }
+
+          mkdir -p macho-hello
+          # No Apple SDK on the Linux runner: declare puts ourselves and link against a
+          # hand-written libSystem text stub (TAPI v4) that ld64.lld reads as a dylib.
+          cat > macho-hello/hello.c <<'EOF'
+          int puts(const char *);
+          int main(void){puts("hello from reld (mach-o)");return 0;}
+          EOF
+          cat > macho-hello/libSystem.tbd <<'EOF'
+          --- !tapi-tbd
+          tbd-version:     4
+          targets:         [ arm64-macos ]
+          install-name:    '/usr/lib/libSystem.B.dylib'
+          current-version: 1319
+          exports:
+            - targets:         [ arm64-macos ]
+              symbols:         [ _puts, dyld_stub_binder ]
+          ...
+          EOF
+
+          clang --target=arm64-apple-macos11 -c macho-hello/hello.c -o macho-hello/hello.o
+
+          # -fuse-ld=lld alongside --ld-path tells clang's Darwin driver the linker
+          # speaks lld's ld64 dialect, so it emits `-platform_version` rather than
+          # the legacy `-macos_version_min` it falls back to for an unknown ld64
+          # version on a non-Apple host. clang consumes both flags; reld only ever
+          # sees the ld64 argv.
+          RELD_LOG_ENGINE=1 RELD_INVOCATION_LOG="$PWD/macho-hello/invocations.jsonl" \
+            clang --target=arm64-apple-macos11 -fuse-ld=lld --ld-path="$host_reld" -nostdlib \
+            macho-hello/hello.o macho-hello/libSystem.tbd -o macho-hello/hello
+
+          file macho-hello/hello | grep -q 'Mach-O 64-bit.*arm64'
+          # Proves reld handled the link on the Linux host through the ld64.lld engine,
+          # keyed on the Mach-O target rather than the host (reld#192).
+          grep -q '"engine":"ld64.lld"' macho-hello/invocations.jsonl
+          grep -q '"reason":"target:mach-o"' macho-hello/invocations.jsonl
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.name == 'macos-arm64'
+        with:
+          name: reld-macho-hello
+          path: macho-hello/hello
+          if-no-files-found: error
+
       # Report setup-soldr's caching outcome — reld#59 wants this as the
       # success metric for "how well setup-soldr caching works".
       - name: Report soldr cache metrics
@@ -326,3 +400,26 @@ jobs:
           echo "$out"
           grep -Eq '^Reld .*\(compatible with GNU linkers\)' <<<"$out" \
             || { echo "::error::reld's own code did not answer -flavor gnu --version"; exit 1; }
+
+      # reld#192: the Mach-O hello-world that reld's ld64.lld engine linked
+      # on the Linux host in `cross-build`. Downloaded separately from
+      # `package/reld` because it's a different product of the same job.
+      - uses: actions/download-artifact@v4
+        if: matrix.name == 'macos-arm64'
+        with:
+          name: reld-macho-hello
+          path: macho-hello
+
+      # This is the half of macho_from_linux_links that only the macOS
+      # runner can prove: executing the Mach-O binary reld linked on Linux
+      # requires a valid ad-hoc signature, which no format check can see.
+      - name: Run reld-linked Mach-O hello-world (reld#192)
+        if: matrix.name == 'macos-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x macho-hello/hello
+          out="$(./macho-hello/hello 2>&1)"
+          echo "$out"
+          grep -q 'hello from reld (mach-o)' <<<"$out" \
+            || { echo "::error::unexpected output from reld-linked Mach-O hello"; exit 1; }
