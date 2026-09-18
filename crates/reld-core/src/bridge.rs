@@ -14,6 +14,16 @@
 //! requests that need a capability the native engine does not implement are delegated to the ELF
 //! driver in `lld`.
 //!
+//! reld#184 adds a MinGW engine (`BridgeTarget::MinGw`, bridged to `ld.lld -m i386pep` -- lld's own
+//! GNU-syntax PE/COFF driver) and wires `target_probe` (reld#178) into engine selection through
+//! `resolve_link_target`. The link target is now resolved target-first: an explicit flavor (COFF
+//! `-flavor link`, Mach-O `-flavor darwin`/`ld64`) wins outright with no probing at all; otherwise a
+//! `--engine=`/`RELD_ENGINE` override picks the format from the named engine; otherwise the
+//! best-effort target probe (argv signals, then input file headers) picks it; only when nothing
+//! signals a format at all does the host's default apply. See `resolve_link_target` for the exact
+//! precedence and `LinkTarget`/`ExplicitFormat` for the types that carry it through to
+//! `select_route`.
+//!
 //! This module intentionally never falls back to the closed-source MSVC `link.exe` (or to Apple's
 //! `ld64`) -- silently doing so would poison benchmark comparability and mask discovery bugs
 //! (issue #17, decision B2).
@@ -22,6 +32,8 @@ use crate::bail;
 use crate::error::Context;
 use crate::error::Result;
 use crate::platforms::path::EXE_SUFFIX;
+use crate::target_probe::Signal;
+use crate::target_probe::TargetFamily;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -42,6 +54,9 @@ pub enum BridgeTarget {
     Coff,
     /// macOS Mach-O, bridged to `ld64.lld`.
     MachO,
+    /// Windows PE/COFF from a GNU-style (MinGW) command line, bridged to `ld.lld -m i386pep`
+    /// (lld's MinGW driver).
+    MinGw,
 }
 
 impl BridgeTarget {
@@ -51,6 +66,7 @@ impl BridgeTarget {
             BridgeTarget::Elf => "ELF",
             BridgeTarget::Coff => "COFF",
             BridgeTarget::MachO => "Mach-O",
+            BridgeTarget::MinGw => "PE/COFF (MinGW)",
         }
     }
 }
@@ -82,6 +98,8 @@ pub(crate) enum Capability {
     DiscardAll,
     CortexA53Erratum,
     TextRelocs,
+    ForeignArch,
+    LinkerScriptInsert,
 }
 
 impl Capability {
@@ -93,6 +111,8 @@ impl Capability {
             Capability::DiscardAll => "discarding local symbols",
             Capability::CortexA53Erratum => "Cortex-A53 erratum 843419 fixups",
             Capability::TextRelocs => "text-relocation policy",
+            Capability::ForeignArch => "architectures outside the native engine's set",
+            Capability::LinkerScriptInsert => "linker-script INSERT commands",
         }
     }
 }
@@ -104,7 +124,13 @@ const LLD_CAPABILITIES: &[Capability] = &[
     Capability::DiscardAll,
     Capability::CortexA53Erratum,
     Capability::TextRelocs,
+    Capability::ForeignArch,
+    Capability::LinkerScriptInsert,
 ];
+// Deliberately its own list, not `LLD_CAPABILITIES`: lld's MinGW driver is `ld.lld`'s ELF
+// capability set does not carry over 1:1 (e.g. no Cortex-A53 erratum fixups, no `-z text`
+// policy), and routing-maintenance.md forbids copying another engine's capability list.
+const MINGW_LLD_CAPABILITIES: &[Capability] = &[Capability::Lto, Capability::Icf];
 
 const NATIVE_RELD_ENGINE: Engine = Engine {
     name: "reld",
@@ -138,14 +164,25 @@ const MACHO_LLD_ENGINE: Engine = Engine {
     native: false,
     capabilities: LLD_CAPABILITIES,
 };
+// `-flavor gnu` with `-m i386pep` (or another PE emulation) dispatches rust-lld's multi-flavor
+// driver to lld's MinGW COFF driver, the same one `ld.lld` uses for a GNU-syntax PE/COFF link.
+const MINGW_LLD_ENGINE: Engine = Engine {
+    name: "lld-mingw",
+    format: BridgeTarget::MinGw,
+    linker_basename: "ld.lld",
+    rust_lld_flavor: "gnu",
+    native: false,
+    capabilities: MINGW_LLD_CAPABILITIES,
+};
 
 /// The available engines and their capabilities. Ordering defines the default (fastest) engine
-/// for each format: native reld for ELF, and the appropriate lld driver for COFF/Mach-O.
+/// for each format: native reld for ELF, and the appropriate lld driver for COFF/Mach-O/MinGW.
 const ENGINES: &[Engine] = &[
     NATIVE_RELD_ENGINE,
     ELF_LLD_ENGINE,
     COFF_LLD_ENGINE,
     MACHO_LLD_ENGINE,
+    MINGW_LLD_ENGINE,
 ];
 
 impl Engine {
@@ -160,6 +197,7 @@ impl Engine {
             BridgeTarget::Elf => &NATIVE_RELD_ENGINE,
             BridgeTarget::Coff => &COFF_LLD_ENGINE,
             BridgeTarget::MachO => &MACHO_LLD_ENGINE,
+            BridgeTarget::MinGw => &MINGW_LLD_ENGINE,
         }
     }
 
@@ -183,6 +221,7 @@ enum SelectionReason {
     OverrideFlag,
     OverrideEnv,
     Capability(&'static str),
+    Target(&'static str),
 }
 
 impl SelectionReason {
@@ -192,7 +231,20 @@ impl SelectionReason {
             SelectionReason::OverrideFlag => "override(--engine)",
             SelectionReason::OverrideEnv => "override(RELD_ENGINE)",
             SelectionReason::Capability(trigger) => trigger,
+            SelectionReason::Target(label) => label,
         }
+    }
+}
+
+/// The `SelectionReason::Target` label for a format the probe picked (as opposed to a format
+/// requested by an override or an explicit flavor), keyed only by the resolved `BridgeTarget` so
+/// the caller of `resolve_link_target` never has to know the label spellings.
+fn target_selection_label(format: BridgeTarget) -> &'static str {
+    match format {
+        BridgeTarget::Elf => "target:elf",
+        BridgeTarget::Coff => "target:coff",
+        BridgeTarget::MachO => "target:mach-o",
+        BridgeTarget::MinGw => "target:pe-mingw",
     }
 }
 
@@ -222,6 +274,10 @@ fn route_logging_enabled() -> bool {
 pub struct Route {
     engine: &'static Engine,
     reason: SelectionReason,
+    /// The `-m <emulation>` to inject for [`MINGW_LLD_ENGINE`] when the probe determined the
+    /// MinGW emulation from something other than an explicit `-m` (e.g. a bare COFF input on a
+    /// GNU-syntax line): `None` whenever argv already carries its own `-m i386pe*`.
+    mingw_emulation: Option<&'static str>,
 }
 
 fn decode_response_file(path: &Path) -> Result<String> {
@@ -284,9 +340,10 @@ fn requested_output_in(
             if response_depth >= 16 {
                 bail!("Linker response-file nesting exceeds 16 levels at `{path}`");
             }
-            // ELF response files go through the one GNU tokenizer (reld#179); COFF/Mach-O keep
-            // their own UTF-16-aware decoding and splitter (`bridged_response_arguments`).
-            let nested = if target == BridgeTarget::Elf {
+            // ELF and MinGW response files go through the one GNU tokenizer (reld#179); COFF/
+            // Mach-O keep their own UTF-16-aware decoding and splitter
+            // (`bridged_response_arguments`).
+            let nested = if matches!(target, BridgeTarget::Elf | BridgeTarget::MinGw) {
                 crate::args::read_args_from_file(Path::new(path))?
                     .into_iter()
                     .map(OsString::from)
@@ -318,6 +375,357 @@ fn requested_output_in(
 
 fn requested_output(argv: &[OsString], target: BridgeTarget) -> Result<Option<String>> {
     requested_output_in(&argv[1..], target, 0)
+}
+
+/// What argv\[0\] / `-flavor` said about the command-line syntax, before probing. This is a
+/// syntax signal, not a format signal: `Gnu` still leaves the format itself to be resolved (see
+/// `resolve_link_target`), because a GNU-syntax line can be either ELF or, with a PE emulation,
+/// MinGW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExplicitFormat {
+    /// No `-flavor`/argv0 dispatch happened; nothing has been decided about the syntax yet.
+    None,
+    /// `-flavor gnu` (the default), or any argv0 that isn't one of the MSVC/Mach-O aliases.
+    Gnu,
+    /// `-flavor link`, or argv0 `reld-link`.
+    Coff,
+    /// `-flavor darwin`/`ld64`, or argv0 `ld64`.
+    MachO,
+}
+
+/// The resolved link target: the object format to route for, plus (whenever it was computed) the
+/// best-effort target probe that either decided that format or that `select_route` still needs to
+/// check for a `Capability::ForeignArch` trigger, even when the format itself came from an
+/// override or an explicit flavor rather than from the probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkTarget {
+    format: BridgeTarget,
+    probe: Option<crate::target_probe::ProbedTarget>,
+    /// Whether step 4 of `resolve_link_target`'s precedence (the probe's family) is what decided
+    /// `format`, as opposed to an explicit flavor, an override, or falling through to the host
+    /// default. Kept distinct from `probe_changed_format` below because a probed format that
+    /// happens to agree with what the host default would have been is still not "the target
+    /// changed the route" for `SelectionReason::Target` purposes.
+    probe_chose_format: bool,
+    /// Whether the probe's family (step 4) chose a format different from what falling through to
+    /// step 5 would have chosen. `select_route` uses this instead of `probe_chose_format` to
+    /// decide `SelectionReason::Target`, so that bridge.rs never has to know the host format.
+    probe_changed_format: bool,
+}
+
+impl LinkTarget {
+    /// The resolved object format to route this link for.
+    #[must_use]
+    pub fn format(self) -> BridgeTarget {
+        self.format
+    }
+}
+
+impl From<BridgeTarget> for LinkTarget {
+    fn from(format: BridgeTarget) -> Self {
+        LinkTarget {
+            format,
+            probe: None,
+            probe_chose_format: false,
+            probe_changed_format: false,
+        }
+    }
+}
+
+/// Resolves the link target for one invocation, in precedence order (earlier wins):
+///
+/// 1. An explicit flavor: `ExplicitFormat::Coff`/`MachO` decide the format outright, with no
+///    probing at all (`-flavor link`/`darwin`/`ld64`, or the matching argv0 alias, is as
+///    unambiguous as a format signal gets).
+/// 2. Otherwise, the best-effort target probe (`probe_link_target`) runs.
+/// 3. An engine override -- the first `--engine=<name>` token in `args`, else `env_engine` --
+///    that names a known engine picks that engine's format. Under `ExplicitFormat::Gnu`, only an
+///    override to a GNU-syntax format (`Elf`/`MinGw`) is honored; any other override's format is
+///    left as `Elf`, and `select_engine` errors loudly on the resulting mismatch later. An unknown
+///    override name does not affect the format here either; `select_engine` errors on it.
+/// 4. Otherwise, the probe's family, if it identified one: `Elf` maps to `Elf`, `MinGwCoff` to
+///    `MinGw`, `MsvcCoff` to `Coff`, `MachO` to `MachO`. Under `ExplicitFormat::Gnu`, only
+///    `MinGwCoff` maps to `MinGw`; every other family maps to `Elf` -- GNU syntax plus a PE
+///    emulation is MinGW, exactly what lld itself does with `-flavor gnu -m i386pep`.
+/// 5. Otherwise, `ExplicitFormat::Gnu` resolves to `Elf`, and `ExplicitFormat::None` resolves to
+///    `host`.
+///
+/// The probe, once computed, is kept in the returned `LinkTarget` regardless of which step ends
+/// up deciding the format: `select_route` needs it to check for a `Capability::ForeignArch`
+/// trigger even when an override or an explicit flavor picked the format outright.
+pub(crate) fn resolve_link_target<S: AsRef<str>>(
+    explicit: ExplicitFormat,
+    args: &[S],
+    env_engine: Option<&str>,
+    host: BridgeTarget,
+) -> LinkTarget {
+    match explicit {
+        ExplicitFormat::Coff => return BridgeTarget::Coff.into(),
+        ExplicitFormat::MachO => return BridgeTarget::MachO.into(),
+        ExplicitFormat::None | ExplicitFormat::Gnu => {}
+    }
+
+    let probe = probe_link_target(args);
+
+    let fallback_format = match explicit {
+        ExplicitFormat::Gnu => BridgeTarget::Elf,
+        ExplicitFormat::None => host,
+        ExplicitFormat::Coff | ExplicitFormat::MachO => unreachable!("handled above"),
+    };
+
+    let override_name = args
+        .iter()
+        .find_map(|arg| arg.as_ref().strip_prefix(ENGINE_FLAG_PREFIX))
+        .or(env_engine);
+    if let Some(engine) = override_name.and_then(Engine::find) {
+        let format = if explicit == ExplicitFormat::Gnu
+            && !matches!(engine.format, BridgeTarget::Elf | BridgeTarget::MinGw)
+        {
+            BridgeTarget::Elf
+        } else {
+            engine.format
+        };
+        return LinkTarget {
+            format,
+            probe,
+            probe_chose_format: false,
+            probe_changed_format: false,
+        };
+    }
+
+    if let Some(family) = probe.and_then(|probe| probe.family()) {
+        let format = match (explicit, family) {
+            (ExplicitFormat::Gnu, TargetFamily::MinGwCoff) => BridgeTarget::MinGw,
+            (ExplicitFormat::Gnu, _) => BridgeTarget::Elf,
+            (_, TargetFamily::Elf) => BridgeTarget::Elf,
+            (_, TargetFamily::MinGwCoff) => BridgeTarget::MinGw,
+            (_, TargetFamily::MsvcCoff) => BridgeTarget::Coff,
+            (_, TargetFamily::MachO) => BridgeTarget::MachO,
+        };
+        return LinkTarget {
+            format,
+            probe,
+            probe_chose_format: true,
+            probe_changed_format: format != fallback_format,
+        };
+    }
+
+    LinkTarget {
+        format: fallback_format,
+        probe,
+        probe_chose_format: false,
+        probe_changed_format: false,
+    }
+}
+
+/// How many leading bytes of a candidate probe input (or a positional/input-carried-capability
+/// input, see `probe_input_requirement`) are read before deciding whether it looks like text.
+const PROBE_PREFIX_LEN: usize = 64;
+
+/// Cap on how much of a text-like candidate input (e.g. a linker script) is read once it's been
+/// identified as text, so a huge script can't make routing itself slow.
+const PROBE_MAX_TEXT_INPUT_BYTES: u64 = 1024 * 1024;
+
+/// Options that consume one or more following tokens as their value(s), for `probe_link_target`'s
+/// candidate-input scan: the named count of tokens after the option is skipped rather than being
+/// considered a candidate input path. `-platform_version` is the only entry that skips more than
+/// one token (it takes a platform name and two version numbers).
+const PROBE_SEPARATE_VALUE_OPTIONS: &[(&str, usize)] = &[
+    ("-o", 1),
+    ("--output", 1),
+    ("-L", 1),
+    ("-l", 1),
+    ("-e", 1),
+    ("--entry", 1),
+    ("-u", 1),
+    ("--undefined", 1),
+    ("-y", 1),
+    ("-z", 1),
+    ("-m", 1),
+    ("-R", 1),
+    ("-h", 1),
+    ("-soname", 1),
+    ("--soname", 1),
+    ("-rpath", 1),
+    ("--rpath", 1),
+    ("-rpath-link", 1),
+    ("--rpath-link", 1),
+    ("-dynamic-linker", 1),
+    ("--dynamic-linker", 1),
+    ("-plugin", 1),
+    ("--plugin", 1),
+    ("-plugin-opt", 1),
+    ("--plugin-opt", 1),
+    ("-Map", 1),
+    ("--Map", 1),
+    ("--version-script", 1),
+    ("--dynamic-list", 1),
+    ("--sysroot", 1),
+    ("-init", 1),
+    ("-fini", 1),
+    ("--wrap", 1),
+    ("--defsym", 1),
+    ("--hash-style", 1),
+    ("--image-base", 1),
+    ("--out-implib", 1),
+    ("--subsystem", 1),
+    ("-mllvm", 1),
+    ("--build-id", 1),
+    ("-arch", 1),
+    ("-syslibroot", 1),
+    ("-install_name", 1),
+    ("-platform_version", 3),
+    ("-lto_library", 1),
+];
+
+/// Best-effort probe of the link target from `args` (the linker argv tokens after the program
+/// name and after any `-flavor X` pair). Never returns an error, and never opens a FIFO or a tty:
+/// on any I/O error, or past the 16-level `@file` nesting depth, it keeps going without the
+/// affected tokens rather than failing the link over what is only a routing hint.
+///
+/// Performance: clang and gcc always pass an explicit `-m <emulation>` for a native Linux link, so
+/// the argv-only signals (`Signal::Emulation`, `MachOArch`, `CoffOut`, `MachOPlatformVersion`)
+/// resolve without opening a single input file -- the common case does zero extra I/O.
+pub(crate) fn probe_link_target<S: AsRef<str>>(
+    args: &[S],
+) -> Option<crate::target_probe::ProbedTarget> {
+    let expanded = expand_probe_response_files(args, 0);
+
+    if let Some(target) = crate::target_probe::probe_target(&expanded, &[])
+        && matches!(
+            target.decided_by,
+            crate::target_probe::Signal::Emulation
+                | crate::target_probe::Signal::MachOArch
+                | crate::target_probe::Signal::CoffOut
+                | crate::target_probe::Signal::MachOPlatformVersion
+        )
+    {
+        return Some(target);
+    }
+
+    let owned_inputs: Vec<Vec<u8>> = probe_candidate_paths(&expanded)
+        .into_iter()
+        .filter_map(|path| read_probe_input(Path::new(path)))
+        .collect();
+    let input_refs: Vec<&[u8]> = owned_inputs.iter().map(Vec::as_slice).collect();
+
+    crate::target_probe::probe_target(&expanded, &input_refs)
+}
+
+/// Recursively expands `@file` tokens for `probe_link_target`, depth-limited to 16 like every
+/// other response-file expansion in this module. Beyond that depth, or on any read/decode error,
+/// this keeps going without that file's tokens rather than erroring: the probe is a routing hint,
+/// not validation.
+fn expand_probe_response_files<S: AsRef<str>>(args: &[S], depth: usize) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(args.len());
+    for arg in args {
+        let arg = arg.as_ref();
+        if let Some(path) = arg.strip_prefix('@') {
+            if depth < 16
+                && let Some(tokens) = read_probe_response_file(Path::new(path))
+            {
+                expanded.extend(expand_probe_response_files(&tokens, depth + 1));
+            }
+            continue;
+        }
+        expanded.push(arg.to_owned());
+    }
+    expanded
+}
+
+/// Reads and decodes one `@file` for `expand_probe_response_files`: UTF-16 COFF/Mach-O-style
+/// response files through the existing decoder and splitter, everything else through the one GNU
+/// tokenizer. `None` on any I/O or decode error.
+fn read_probe_response_file(path: &Path) -> Option<Vec<String>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.starts_with(&[0xff, 0xfe])
+        || (bytes.len() >= 2 && bytes.len().is_multiple_of(2) && bytes[1] == 0)
+    {
+        let contents = decode_response_file(path).ok()?;
+        let tokens = bridged_response_arguments(&contents).ok()?;
+        return Some(
+            tokens
+                .into_iter()
+                .map(|token| token.to_string_lossy().into_owned())
+                .collect(),
+        );
+    }
+    crate::args::read_args_from_file(path).ok()
+}
+
+/// Gathers candidate input paths from `args`, in command-line order, for `probe_link_target`:
+/// `-T`/`--script` script arguments (separate or joined/`=`-joined), and every other token that
+/// doesn't start with `-` and wasn't consumed as a separate-value option's value (see
+/// `PROBE_SEPARATE_VALUE_OPTIONS`).
+fn probe_candidate_paths(args: &[String]) -> Vec<&str> {
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+
+        if arg == "-T" || arg == "--script" {
+            if let Some(path) = args.get(index + 1) {
+                paths.push(path.as_str());
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("-T").filter(|rest| !rest.is_empty()) {
+            paths.push(path);
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg
+            .strip_prefix("--script=")
+            .or_else(|| arg.strip_prefix("-script="))
+        {
+            paths.push(path);
+            index += 1;
+            continue;
+        }
+        if let Some(&(_, skip)) = PROBE_SEPARATE_VALUE_OPTIONS
+            .iter()
+            .find(|(name, _)| *name == arg)
+        {
+            index += 1 + skip;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            paths.push(arg);
+        }
+        index += 1;
+    }
+    paths
+}
+
+/// Reads one candidate probe input file: up to the first [`PROBE_PREFIX_LEN`] bytes, or the whole
+/// file capped at [`PROBE_MAX_TEXT_INPUT_BYTES`] once it looks like text (a linker script). Skips
+/// anything that isn't a regular file -- a FIFO or a tty must never be opened for reading here --
+/// and treats any I/O error as "not a signal" rather than a hard failure.
+fn read_probe_input(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    use std::io::Seek as _;
+
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut prefix = vec![0_u8; PROBE_PREFIX_LEN];
+    let read = file.read(&mut prefix).ok()?;
+    prefix.truncate(read);
+
+    if crate::target_probe::looks_like_text(&prefix) {
+        file.rewind().ok()?;
+        let mut contents = Vec::new();
+        file.take(PROBE_MAX_TEXT_INPUT_BYTES)
+            .read_to_end(&mut contents)
+            .ok()?;
+        return Some(contents);
+    }
+
+    Some(prefix)
 }
 
 fn append_json_string(encoded: &mut String, value: &str) {
@@ -528,29 +936,55 @@ fn matches_reld_only_flag(arg: &str, name: &str) -> bool {
     })
 }
 
-/// Whether `path` begins with an LLVM bitcode magic number: `BC\xC0\xDE` for raw bitcode, or the
-/// bitcode-wrapper magic `0x0B17C0DE` (little-endian on disk: `DE C0 17 0B`) used when bitcode is
-/// embedded with a wrapper header. An LTO object with no `-flto`/`-plugin-opt` on the command line
-/// must still route to lld (#123 Phase 0 row `-plugin-opt=… + bitcode inputs`): the native engine
-/// has no LTO implementation and would silently mislink it. Archive members are not probed yet
-/// (#123 Phase 3 TargetProbe); only bare file arguments are checked here. Any IO error (missing
-/// file, permission, not a regular file, too short) is treated as "not bitcode" rather than an
-/// error: this is a best-effort routing probe, not validation.
-fn is_llvm_bitcode_file(path: &Path) -> bool {
+/// Checks whether `path` carries a capability requirement by its content, for the positional-
+/// argument and `-T`/`--script` branches of `collect_requested_capabilities`:
+///
+/// - An LLVM bitcode magic number -- `BC\xC0\xDE` for raw bitcode, or the bitcode-wrapper magic
+///   `0x0B17C0DE` (little-endian on disk: `DE C0 17 0B`) used when bitcode is embedded with a
+///   wrapper header -- needs `Capability::Lto`. An LTO object with no `-flto`/`-plugin-opt` on the
+///   command line must still route to lld (#123 Phase 0 row `-plugin-opt=… + bitcode inputs`): the
+///   native engine has no LTO implementation and would silently mislink it.
+/// - A linker script containing an `INSERT` command needs `Capability::LinkerScriptInsert`: reld's
+///   native linker-script support does not implement `INSERT` (reld#184).
+///
+/// Archive members are not probed (#123 Phase 3 TargetProbe covers only bare file arguments). Only
+/// regular files are opened: a FIFO or a tty (e.g. `-o /dev/stdout`) must never be read here. Any
+/// I/O error is treated as "no requirement" rather than an error: this is a best-effort routing
+/// probe, not validation.
+fn probe_input_requirement(path: &Path) -> Option<Requirement> {
     use std::io::Read as _;
-    // Only probe regular files: opening a FIFO or a tty (e.g. `-o /dev/stdout`) for reading
-    // could block the link indefinitely.
+    use std::io::Seek as _;
+
     if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return false;
+        return None;
     }
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut prefix = vec![0_u8; PROBE_PREFIX_LEN];
+    let read = file.read(&mut prefix).ok()?;
+    prefix.truncate(read);
+
+    if prefix.starts_with(b"BC\xC0\xDE") || prefix.starts_with(&[0xDE, 0xC0, 0x17, 0x0B]) {
+        return Some(Requirement {
+            capability: Capability::Lto,
+            trigger: "input:bitcode",
+        });
     }
-    magic == *b"BC\xC0\xDE" || magic == [0xDE, 0xC0, 0x17, 0x0B]
+
+    if crate::target_probe::looks_like_text(&prefix) {
+        file.rewind().ok()?;
+        let mut contents = Vec::new();
+        file.take(PROBE_MAX_TEXT_INPUT_BYTES)
+            .read_to_end(&mut contents)
+            .ok()?;
+        if crate::target_probe::script_uses_insert(&contents) {
+            return Some(Requirement {
+                capability: Capability::LinkerScriptInsert,
+                trigger: "input:linker-script-insert",
+            });
+        }
+    }
+
+    None
 }
 
 fn collect_requested_capabilities(
@@ -655,11 +1089,18 @@ fn collect_requested_capabilities(
                 capability: Capability::TextRelocs,
                 trigger: "flag:-z text",
             })
-        } else if !arg.is_empty() && !arg.starts_with('-') && is_llvm_bitcode_file(Path::new(arg)) {
-            Some(Requirement {
-                capability: Capability::Lto,
-                trigger: "input:bitcode",
-            })
+        } else if arg == "-T" || arg == "--script" {
+            args.next()
+                .and_then(|value| probe_input_requirement(Path::new(&value)))
+        } else if let Some(path) = arg.strip_prefix("-T").filter(|rest| !rest.is_empty()) {
+            probe_input_requirement(Path::new(path))
+        } else if let Some(path) = arg
+            .strip_prefix("--script=")
+            .or_else(|| arg.strip_prefix("-script="))
+        {
+            probe_input_requirement(Path::new(path))
+        } else if !arg.is_empty() && !arg.starts_with('-') {
+            probe_input_requirement(Path::new(arg))
         } else {
             None
         };
@@ -697,21 +1138,34 @@ fn override_from_request(
 
 fn select_route_with_policy(
     argv: &[OsString],
-    target: BridgeTarget,
+    target: LinkTarget,
     env_override: Option<&str>,
     allow_unsupported_native: bool,
     native_control_env: bool,
 ) -> Result<Route> {
-    // COFF and Mach-O each have a single bundled engine today, so parsing their response files
-    // cannot affect selection. More importantly, their response grammars and encodings differ
-    // from ELF/GNU (MSVC commonly emits UTF-16). Leave them byte-for-byte for the destination
-    // driver instead of eagerly feeding them through reld's UTF-8 GNU response parser.
-    let mut requirements = if target == BridgeTarget::Elf {
-        requested_capabilities(argv)?
+    // COFF, Mach-O and MinGW each have a single bundled engine today, so parsing their response
+    // files cannot affect selection. More importantly, their response grammars and encodings
+    // differ from ELF/GNU (MSVC commonly emits UTF-16). Leave them byte-for-byte for the
+    // destination driver instead of eagerly feeding them through reld's UTF-8 GNU response parser.
+    let mut requirements = if target.format == BridgeTarget::Elf {
+        let mut requirements = requested_capabilities(argv)?;
+        // A foreign architecture is a routing reason in its own right, independent of any flag or
+        // input-carried capability the argv classifier finds; put it first so it's the reported
+        // reason (reld#123 D6, reld#184).
+        if let Some(trigger) = target.probe.and_then(|probe| probe.foreign_arch_trigger()) {
+            requirements.insert(
+                0,
+                Requirement {
+                    capability: Capability::ForeignArch,
+                    trigger,
+                },
+            );
+        }
+        requirements
     } else {
         Vec::new()
     };
-    if target == BridgeTarget::Elf
+    if target.format == BridgeTarget::Elf
         && native_control_env
         && !requirements
             .iter()
@@ -729,8 +1183,8 @@ fn select_route_with_policy(
         } else {
             requirements.as_slice()
         };
-    let engine = select_engine(target, override_name.as_deref(), checked_requirements)?;
-    let default = Engine::default_for(target);
+    let engine = select_engine(target.format, override_name.as_deref(), checked_requirements)?;
+    let default = Engine::default_for(target.format);
     let reason = if override_name.is_some() {
         override_reason
     } else if engine != default {
@@ -738,24 +1192,44 @@ fn select_route_with_policy(
             bail!("Internal error: non-default route selected without a capability requirement");
         };
         SelectionReason::Capability(requirement.trigger)
+    } else if target.probe_changed_format {
+        // `probe_changed_format` is only ever set alongside `probe_chose_format` (see
+        // `resolve_link_target`'s step 4), so this is always true; asserted rather than merely
+        // implied, so the two fields can never silently drift apart.
+        debug_assert!(target.probe_chose_format);
+        SelectionReason::Target(target_selection_label(target.format))
     } else {
         SelectionReason::Default
     };
 
-    Ok(Route { engine, reason })
+    // Inject the MinGW emulation only when the probe didn't see one already spelled out on argv
+    // (`Signal::Emulation`): that's the case where a GNU-syntax line has only COFF inputs and no
+    // `-m i386pe*`, so `ld.lld` still needs telling which PE/COFF flavor to emit.
+    let emulation_on_argv = target.probe.is_some_and(|p| p.decided_by == Signal::Emulation);
+    let mingw_emulation = if *engine == MINGW_LLD_ENGINE && !emulation_on_argv {
+        target.probe.and_then(|probe| probe.mingw_emulation())
+    } else {
+        None
+    };
+
+    Ok(Route {
+        engine,
+        reason,
+        mingw_emulation,
+    })
 }
 
 #[cfg(test)]
 fn select_route_with_env(
     argv: &[OsString],
-    target: BridgeTarget,
+    target: LinkTarget,
     env_override: Option<&str>,
 ) -> Result<Route> {
     select_route_with_policy(argv, target, env_override, false, false)
 }
 
 /// Selects the engine for one raw linker invocation.
-pub fn select_route(argv: &[OsString], target: BridgeTarget) -> Result<Route> {
+pub fn select_route(argv: &[OsString], target: LinkTarget) -> Result<Route> {
     let native_control_env = [
         crate::args::VALIDATE_ENV,
         crate::args::WRITE_LAYOUT_ENV,
@@ -1048,18 +1522,19 @@ fn stripped_options_note(engine_name: &str, dropped: &[String]) -> Option<String
 /// bridge engine. Returns the forwarded argv alongside every flag dropped as reld-only (see
 /// `strip_reld_only_flags`).
 ///
-/// For the `lld` engine, `expand_and_strip_driver_lto` runs first so ELF `@response` files are
-/// expanded before reld-only flags are stripped -- otherwise a reld-only flag hidden inside an
-/// ELF response file would reach `ld.lld` unstripped. LLD also consumes LLVM bitcode directly and
-/// rejects `-flto` itself; plugin switches are real linker options and remain untouched. Other
-/// engines' response files stay opaque (COFF/Mach-O own their response grammar and encoding; see
-/// `bridged_response_arguments`), so only their top-level argv is stripped.
+/// For a bridged GNU-syntax engine (ELF `lld`, or MinGW `lld-mingw`), `expand_and_strip_driver_lto`
+/// runs first so GNU-tokenized `@response` files are expanded before reld-only flags are stripped
+/// -- otherwise a reld-only flag hidden inside a response file would reach `ld.lld` unstripped.
+/// LLD also consumes LLVM bitcode directly and rejects `-flto` itself; plugin switches are real
+/// linker options and remain untouched. Other engines' response files stay opaque (COFF/Mach-O own
+/// their response grammar and encoding; see `bridged_response_arguments`), so only their top-level
+/// argv is stripped.
 fn forwarded_args_for_engine<I: IntoIterator<Item = OsString>>(
     argv: I,
     engine: &Engine,
 ) -> Result<(Vec<OsString>, Vec<String>)> {
     let dropped_tokens = drop_reld_dispatch_tokens(argv);
-    if engine.name == "lld" {
+    if !engine.native && matches!(engine.format, BridgeTarget::Elf | BridgeTarget::MinGw) {
         let expanded = expand_and_strip_driver_lto(dropped_tokens, 0)?;
         return Ok(strip_reld_only_flags(expanded));
     }
@@ -1224,21 +1699,29 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
     let linker = discover_linker(engine)?;
 
     let (mut forwarded, dropped) = forwarded_args_for_engine(argv, engine)?;
-    // If `--nix-rpath=off` was stripped, the bridge must not derive Nix RUNPATH flags either:
-    // the bridge now honors what it strips, rather than re-deriving something the caller asked
-    // it not to set.
-    let nix_rpath_off = dropped
-        .iter()
-        .rev()
-        .find_map(|entry| {
-            entry
-                .strip_prefix("--nix-rpath=")
-                .or_else(|| entry.strip_prefix("--nix-rpath "))
-        })
-        .is_some_and(|value| value == "off");
-    if !nix_rpath_off {
-        // A routed link must keep the Nix store RUNPATH the native engine would have derived.
-        forwarded.extend(nix_rpath_flags(&forwarded));
+    if let Some(emulation) = route.mingw_emulation {
+        // No `-m i386pe*` on argv (`Route`'s doc comment on `mingw_emulation` explains when this
+        // happens): tell `ld.lld`'s MinGW driver which PE/COFF flavor to emit.
+        forwarded.splice(0..0, [OsString::from("-m"), OsString::from(emulation)]);
+    }
+    if engine.format == BridgeTarget::Elf {
+        // If `--nix-rpath=off` was stripped, the bridge must not derive Nix RUNPATH flags either:
+        // the bridge now honors what it strips, rather than re-deriving something the caller asked
+        // it not to set. Nix RUNPATH derivation is ELF-specific (nixpkgs' `ld-wrapper.sh` targets
+        // ELF `DT_RUNPATH`); other formats have no such convention.
+        let nix_rpath_off = dropped
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                entry
+                    .strip_prefix("--nix-rpath=")
+                    .or_else(|| entry.strip_prefix("--nix-rpath "))
+            })
+            .is_some_and(|value| value == "off");
+        if !nix_rpath_off {
+            // A routed link must keep the Nix store RUNPATH the native engine would have derived.
+            forwarded.extend(nix_rpath_flags(&forwarded));
+        }
     }
     let child_args = child_command_line(&linker, engine, forwarded);
 
@@ -1401,6 +1884,7 @@ mod tests {
         let route = Route {
             engine: &COFF_LLD_ENGINE,
             reason: SelectionReason::Default,
+            mingw_emulation: None,
         };
 
         log_successful_invocation(&argv, route).unwrap();
@@ -1742,7 +2226,7 @@ mod tests {
     fn elf_defaults_to_native_reld() {
         let route = select_route_with_env(
             &[OsString::from("ld.reld"), OsString::from("foo.o")],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             None,
         )
         .unwrap();
@@ -1759,7 +2243,7 @@ mod tests {
                 OsString::from("-flto"),
                 OsString::from("foo.o"),
             ],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             Some("reld"),
             true,
             false,
@@ -1777,7 +2261,7 @@ mod tests {
                 OsString::from("ld.reld"),
                 OsString::from("--validate-output"),
             ],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             Some("lld"),
             true,
             false,
@@ -1790,7 +2274,7 @@ mod tests {
     fn ignore_policy_does_not_suppress_unknown_override() {
         let error = select_route_with_policy(
             &[OsString::from("ld.reld"), OsString::from("foo.o")],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             Some("bogus"),
             true,
             false,
@@ -1814,7 +2298,7 @@ mod tests {
                     OsString::from(flag),
                     OsString::from("foo.o"),
                 ],
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -1829,7 +2313,7 @@ mod tests {
         for flag in ["--icf=all", "--icf=safe"] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -1838,7 +2322,7 @@ mod tests {
 
         let native = select_route_with_env(
             &[OsString::from("ld.reld"), OsString::from("--icf=none")],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             None,
         )
         .unwrap();
@@ -1850,7 +2334,7 @@ mod tests {
         for flag in ["--discard-all", "-x", "--fix-cortex-a53-843419"] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -1871,7 +2355,7 @@ mod tests {
         ] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -1891,7 +2375,7 @@ mod tests {
         ] {
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -1911,7 +2395,7 @@ mod tests {
         ] {
             let route = select_route_with_env(
                 &argv.iter().map(OsString::from).collect::<Vec<_>>(),
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -1924,7 +2408,7 @@ mod tests {
         ] {
             let route = select_route_with_env(
                 &argv.iter().map(OsString::from).collect::<Vec<_>>(),
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -2005,7 +2489,7 @@ mod tests {
     fn sym_info_forces_native_and_conflicts_with_lld_route() {
         let native = select_route_with_env(
             &[OsString::from("ld.reld"), OsString::from("--sym-info=x")],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             None,
         )
         .unwrap();
@@ -2019,7 +2503,7 @@ mod tests {
                 OsString::from("--sym-info=x"),
                 OsString::from("--icf=all"),
             ],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             None,
         )
         .unwrap_err();
@@ -2039,7 +2523,7 @@ mod tests {
                 OsString::from("ld.reld"),
                 OsString::from(format!("@{}", response.path().display())),
             ],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             None,
         )
         .unwrap();
@@ -2062,7 +2546,7 @@ mod tests {
 
         for target in [BridgeTarget::Coff, BridgeTarget::MachO] {
             let argv = [OsString::from("reld"), response_arg.clone()];
-            let route = select_route_with_env(&argv, target, None).unwrap();
+            let route = select_route_with_env(&argv, target.into(), None).unwrap();
             assert_eq!(route.engine, Engine::default_for(target));
             assert_eq!(
                 forwarded_args_for_engine(argv, route.engine).unwrap().0,
@@ -2107,7 +2591,7 @@ mod tests {
             OsString::from(format!("@{}", outer.path().display())),
         ];
 
-        let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+        let route = select_route_with_env(&argv, BridgeTarget::Elf.into(), None).unwrap();
         assert_eq!(route.engine.name, "lld");
         assert_eq!(
             forwarded_args_for_engine(argv, route.engine).unwrap().0,
@@ -2123,7 +2607,7 @@ mod tests {
     fn explicit_engine_flag_takes_precedence_over_environment() {
         let route = select_route_with_env(
             &[OsString::from("ld.reld"), OsString::from("--engine=lld")],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             Some("reld"),
         )
         .unwrap();
@@ -2133,9 +2617,12 @@ mod tests {
 
     #[test]
     fn environment_can_force_elf_lld() {
-        let route =
-            select_route_with_env(&[OsString::from("ld.reld")], BridgeTarget::Elf, Some("lld"))
-                .unwrap();
+        let route = select_route_with_env(
+            &[OsString::from("ld.reld")],
+            BridgeTarget::Elf.into(),
+            Some("lld"),
+        )
+        .unwrap();
         assert_eq!(route.engine.name, "lld");
         assert_eq!(route.reason, SelectionReason::OverrideEnv);
     }
@@ -2148,7 +2635,7 @@ mod tests {
                 OsString::from("--engine=reld"),
                 OsString::from("-flto"),
             ],
-            BridgeTarget::Elf,
+            BridgeTarget::Elf.into(),
             None,
         )
         .unwrap_err();
@@ -2282,7 +2769,7 @@ mod tests {
             assert!(requested(&["reld", flag]).is_empty(), "flag {flag}");
             let route = select_route_with_env(
                 &[OsString::from("ld.reld"), OsString::from(flag)],
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -2337,7 +2824,7 @@ mod tests {
             assert!(requested(argv).is_empty(), "argv {argv:?}");
             let route = select_route_with_env(
                 &argv.iter().map(OsString::from).collect::<Vec<_>>(),
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -2364,7 +2851,7 @@ mod tests {
         ] {
             let route = select_route_with_env(
                 &argv.iter().map(OsString::from).collect::<Vec<_>>(),
-                BridgeTarget::Elf,
+                BridgeTarget::Elf.into(),
                 None,
             )
             .unwrap();
@@ -2387,7 +2874,7 @@ mod tests {
                 OsString::from("ld.reld"),
                 OsString::from(input.to_str().unwrap()),
             ];
-            let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+            let route = select_route_with_env(&argv, BridgeTarget::Elf.into(), None).unwrap();
             assert_eq!(route.engine.name, "lld", "input {}", input.display());
             assert_eq!(
                 route.reason,
@@ -2404,7 +2891,7 @@ mod tests {
             OsString::from("ld.reld"),
             OsString::from(elf_input.path().to_str().unwrap()),
         ];
-        let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+        let route = select_route_with_env(&argv, BridgeTarget::Elf.into(), None).unwrap();
         assert_eq!(route.engine.name, "reld");
     }
 
@@ -2434,7 +2921,7 @@ mod tests {
             ];
             argv.extend(tokens.iter().map(OsString::from));
 
-            let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+            let route = select_route_with_env(&argv, BridgeTarget::Elf.into(), None).unwrap();
             assert_eq!(route.engine.name, "lld", "flag {name}");
 
             let (forwarded, dropped) =
@@ -2463,7 +2950,7 @@ mod tests {
             OsString::from(format!("@{}", response.path().display())),
             OsString::from("foo.o"),
         ];
-        let route = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap();
+        let route = select_route_with_env(&argv, BridgeTarget::Elf.into(), None).unwrap();
         assert_eq!(route.engine.name, "lld");
         let (forwarded, dropped) = forwarded_args_for_engine(argv, route.engine).unwrap();
         assert_eq!(
@@ -2485,7 +2972,7 @@ mod tests {
                 OsString::from(format!("--{name}")),
                 OsString::from("--icf=all"),
             ];
-            let error = select_route_with_env(&argv, BridgeTarget::Elf, None).unwrap_err();
+            let error = select_route_with_env(&argv, BridgeTarget::Elf.into(), None).unwrap_err();
             let message = error.to_string();
             assert!(
                 message.contains("No bundled ELF engine supports"),
@@ -2538,5 +3025,231 @@ mod tests {
                 "{name} must be in exactly one of STRIPPED_RELD_FLAGS or NATIVE_CONTROL_RELD_FLAGS"
             );
         }
+    }
+
+    // --- reld#184: TargetProbe-driven engine selection ------------------------------------
+
+    /// Builds a 20-byte ELF header the way `target_probe`'s own tests do.
+    fn elf_header(class: u8, data: u8, machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 20];
+        bytes[0..4].copy_from_slice(&object::elf::ELFMAG);
+        bytes[4] = class;
+        bytes[5] = data;
+        bytes[6] = 1; // EI_VERSION
+        let (e_type, e_machine) = if data == object::elf::ELFDATA2MSB.0 {
+            (1_u16.to_be_bytes(), machine.to_be_bytes())
+        } else {
+            (1_u16.to_le_bytes(), machine.to_le_bytes())
+        };
+        bytes[16..18].copy_from_slice(&e_type);
+        bytes[18..20].copy_from_slice(&e_machine);
+        bytes
+    }
+
+    /// Builds a 20-byte COFF object header with the machine field at offset 0.
+    fn coff_header(machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 20];
+        bytes[0..2].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    fn argv_with_prog(prog: &str, args: &[&str]) -> Vec<OsString> {
+        std::iter::once(OsString::from(prog))
+            .chain(args.iter().map(|arg| OsString::from(*arg)))
+            .collect()
+    }
+
+    #[test]
+    fn target_probe_picks_engine_before_format() {
+        use object::elf::ELFCLASS32;
+        use object::elf::ELFCLASS64;
+        use object::elf::ELFDATA2LSB;
+        use object::elf::ELFDATA2MSB;
+        use object::elf::EM_ARM;
+        use object::elf::EM_PPC64;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let argv_cases: &[(&[&str], &str, &str)] = &[
+            (&["-m", "i386pep"], "lld-mingw", "target:pe-mingw"),
+            (&["-m", "elf_i386"], "lld", "target:i386"),
+            (
+                &[
+                    "-arch",
+                    "arm64",
+                    "-platform_version",
+                    "macos",
+                    "11.0",
+                    "14.0",
+                ],
+                "ld64.lld",
+                "target:mach-o",
+            ),
+            (&["/OUT:a.exe"], "lld-link", "target:coff"),
+            (&["-m", "elf_x86_64", "x.o"], "reld", "default"),
+        ];
+        for &(args, engine, reason) in argv_cases {
+            let target = resolve_link_target(ExplicitFormat::None, args, None, BridgeTarget::Elf);
+            let argv = argv_with_prog("reld", args);
+            let route = select_route_with_env(&argv, target, None).unwrap();
+            assert_eq!(route.engine.name, engine, "args {args:?}");
+            assert_eq!(route.reason.label(), reason, "args {args:?}");
+        }
+
+        let arm_elf = dir.path().join("arm.o");
+        std::fs::write(&arm_elf, elf_header(ELFCLASS32.0, ELFDATA2LSB.0, EM_ARM.0)).unwrap();
+        let ppc64_elf = dir.path().join("ppc64.o");
+        std::fs::write(
+            &ppc64_elf,
+            elf_header(ELFCLASS64.0, ELFDATA2MSB.0, EM_PPC64.0),
+        )
+        .unwrap();
+        let bitcode = dir.path().join("bitcode.o");
+        std::fs::write(&bitcode, b"BC\xC0\xDE\0\0\0\0").unwrap();
+
+        let input_cases: &[(&Path, &str, &str)] = &[
+            (arm_elf.as_path(), "lld", "target:arm"),
+            (ppc64_elf.as_path(), "lld", "target:ppc64-be"),
+            (bitcode.as_path(), "lld", "input:bitcode"),
+        ];
+        for &(path, engine, reason) in input_cases {
+            let path_str = path.to_str().unwrap();
+            let args = [path_str];
+            let target = resolve_link_target(ExplicitFormat::None, &args, None, BridgeTarget::Elf);
+            let argv = argv_with_prog("reld", &args);
+            let route = select_route_with_env(&argv, target, None).unwrap();
+            assert_eq!(route.engine.name, engine, "path {}", path.display());
+            assert_eq!(route.reason.label(), reason, "path {}", path.display());
+        }
+
+        let script = dir.path().join("script.ld");
+        std::fs::write(
+            &script,
+            b"SECTIONS { .foo : { *(.foo) } } INSERT AFTER .text;",
+        )
+        .unwrap();
+        let script_str = script.to_str().unwrap();
+        let script_args = ["-T", script_str];
+        let target =
+            resolve_link_target(ExplicitFormat::None, &script_args, None, BridgeTarget::Elf);
+        let argv = argv_with_prog("reld", &script_args);
+        let route = select_route_with_env(&argv, target, None).unwrap();
+        assert_eq!(route.engine.name, "lld");
+        assert_eq!(route.reason.label(), "input:linker-script-insert");
+    }
+
+    #[test]
+    fn explicit_flavor_and_engine_override_beats_the_probe() {
+        let mingw_args = ["-m", "i386pep"];
+        let coff_target =
+            resolve_link_target(ExplicitFormat::Coff, &mingw_args, None, BridgeTarget::Elf);
+        assert_eq!(coff_target.format(), BridgeTarget::Coff);
+        let argv = argv_with_prog("reld-link", &mingw_args);
+        let route = select_route_with_env(&argv, coff_target, None).unwrap();
+        assert_eq!(route.engine.name, "lld-link");
+
+        let macho_args = ["-o", "a.out"];
+        let macho_target =
+            resolve_link_target(ExplicitFormat::MachO, &macho_args, None, BridgeTarget::Elf);
+        assert_eq!(macho_target.format(), BridgeTarget::MachO);
+
+        let gnu_mingw =
+            resolve_link_target(ExplicitFormat::Gnu, &mingw_args, None, BridgeTarget::Elf);
+        assert_eq!(gnu_mingw.format(), BridgeTarget::MinGw);
+
+        let gnu_out =
+            resolve_link_target(ExplicitFormat::Gnu, &["/OUT:x"], None, BridgeTarget::Elf);
+        assert_eq!(gnu_out.format(), BridgeTarget::Elf);
+
+        let override_flag = resolve_link_target(
+            ExplicitFormat::None,
+            &["--engine=lld", "-m", "i386pep"],
+            None,
+            BridgeTarget::Elf,
+        );
+        assert_eq!(override_flag.format(), BridgeTarget::Elf);
+        let argv = argv_with_prog("ld.reld", &["--engine=lld", "-m", "i386pep"]);
+        let route = select_route_with_env(&argv, override_flag, None).unwrap();
+        assert_eq!(route.engine.name, "lld");
+        assert_eq!(route.reason, SelectionReason::OverrideFlag);
+
+        let env_override = resolve_link_target(
+            ExplicitFormat::None,
+            &["-m", "elf_i386"],
+            Some("lld-link"),
+            BridgeTarget::Elf,
+        );
+        assert_eq!(env_override.format(), BridgeTarget::Coff);
+
+        let conflicting_override = resolve_link_target(
+            ExplicitFormat::None,
+            &["--engine=reld", "-m", "elf_i386"],
+            None,
+            BridgeTarget::Elf,
+        );
+        let argv = argv_with_prog("ld.reld", &["--engine=reld", "-m", "elf_i386"]);
+        let error = select_route_with_env(&argv, conflicting_override, None).unwrap_err();
+        assert!(
+            error.to_string().contains("target:i386"),
+            "unexpected message: {error}"
+        );
+
+        let no_args: &[&str] = &[];
+        let no_signal_coff =
+            resolve_link_target(ExplicitFormat::None, no_args, None, BridgeTarget::Coff);
+        assert_eq!(no_signal_coff.format(), BridgeTarget::Coff);
+        let no_signal_elf =
+            resolve_link_target(ExplicitFormat::None, no_args, None, BridgeTarget::Elf);
+        assert_eq!(no_signal_elf.format(), BridgeTarget::Elf);
+    }
+
+    #[test]
+    fn mingw_route_injects_emulation_only_when_absent() {
+        // IMAGE_FILE_MACHINE_AMD64.
+        const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+        let dir = tempfile::tempdir().unwrap();
+        let coff_input = dir.path().join("in.obj");
+        std::fs::write(&coff_input, coff_header(IMAGE_FILE_MACHINE_AMD64)).unwrap();
+        let coff_input_str = coff_input.to_str().unwrap();
+
+        let args = ["--engine=lld-mingw", coff_input_str];
+        let target = resolve_link_target(ExplicitFormat::Gnu, &args, None, BridgeTarget::Elf);
+        assert_eq!(target.format(), BridgeTarget::MinGw);
+        let argv = argv_with_prog("reld", &args);
+        let route = select_route_with_env(&argv, target, None).unwrap();
+        assert_eq!(route.engine.name, "lld-mingw");
+        assert_eq!(route.mingw_emulation, Some("i386pep"));
+
+        let args = ["--engine=lld-mingw", "-m", "i386pep", coff_input_str];
+        let target = resolve_link_target(ExplicitFormat::Gnu, &args, None, BridgeTarget::Elf);
+        let argv = argv_with_prog("reld", &args);
+        let route = select_route_with_env(&argv, target, None).unwrap();
+        assert_eq!(route.mingw_emulation, None);
+    }
+
+    #[test]
+    fn probe_skips_option_values() {
+        use object::elf::ELFCLASS32;
+        use object::elf::ELFCLASS64;
+        use object::elf::ELFDATA2LSB;
+        use object::elf::EM_ARM;
+        use object::elf::EM_X86_64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("out");
+        std::fs::write(&out_path, elf_header(ELFCLASS32.0, ELFDATA2LSB.0, EM_ARM.0)).unwrap();
+        let x86_path = dir.path().join("x86.o");
+        std::fs::write(
+            &x86_path,
+            elf_header(ELFCLASS64.0, ELFDATA2LSB.0, EM_X86_64.0),
+        )
+        .unwrap();
+
+        let out_str = out_path.to_str().unwrap();
+        let x86_str = x86_path.to_str().unwrap();
+        let args = ["-o", out_str, x86_str];
+        let probe = probe_link_target(&args).unwrap();
+        assert_eq!(probe.arch, Some(crate::target_probe::ProbedArch::X86_64));
     }
 }

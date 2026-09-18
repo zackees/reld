@@ -110,6 +110,7 @@ macOS backends (reld's own COFF/Mach-O codegen) and incremental linking:
 |---|---|---|---|
 | Linux | ELF | **Native** — inherited wild core | Already native |
 | Windows | PE/COFF | **Bridge** — delegates to `lld-link` (`rust-lld`) | Future (issue #7) |
+| Windows (MinGW) | PE/COFF | **Bridge** — delegates to `ld.lld -m i386pep` (`rust-lld`, engine `lld-mingw`) | Future (Phase 5) |
 | macOS | Mach-O | **Bridge** — delegates to `ld64.lld` (`rust-lld`) | Future (issue #8) |
 
 The bridge is a real, CI-proven delegation to the `lld` shipped with every Rust toolchain, not a
@@ -118,12 +119,14 @@ platforms today. It is not reld's own codegen; see
 [issue #17](https://github.com/zackees/reld/issues/17) for the full BR-1…BR-4 phase history and
 [DESIGN.md](DESIGN.md) for the architecture.
 
-**Windows GNU (`x86_64-pc-windows-gnu`) is compile-only, not a consumer link route.** The Phase 1
-CI matrix builds it, but reld does not yet drive the MinGW ABI (GNU `ld` dialect via `-m i386pep`,
-auto-import, `.rsrc`, `.CRT$X*`); there is no consumer-acceptance lane for it. That is the Phase 5
-MinGW work (`docs/plan/07-PHASE-5-WINGNU.md`), and the no-gaps gate (reld#123) routes it through a
-bundled `ld.lld -m i386pep` engine in Phase 3. Windows MSVC remains the advertised, consumer-tested
-Windows route until then.
+**Windows GNU (`x86_64-pc-windows-gnu`) is bridged, not native.** A GNU-style MinGW link (for
+example `clang --target=x86_64-w64-mingw32 --ld-path=reld`, which passes `-m i386pep`) routes to the
+bundled `lld-mingw` engine (`ld.lld -m i386pep`, lld's MinGW driver) on any host, Linux included
+(reld#184). The `cross-ship` workflow links a MinGW hello-world this way on Linux and runs it on
+Windows. There is no consumer-acceptance lane for it yet, and reld does not drive the MinGW ABI
+natively (auto-import, `.rsrc`, `.CRT$X*`); that is the Phase 5 MinGW work
+(`docs/plan/07-PHASE-5-WINGNU.md`). Windows MSVC remains the advertised, consumer-tested Windows
+route until then.
 
 ## Installing
 

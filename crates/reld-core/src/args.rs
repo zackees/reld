@@ -117,6 +117,9 @@ pub struct CommonArgs {
     pub(crate) version: std::borrow::Cow<'static, str>,
 
     has_flavor: bool,
+
+    /// The link target resolved by `Args::new` (reld#184). See `Args::link_target`.
+    link_target: crate::bridge::LinkTarget,
 }
 
 pub type WarningCallback = dyn Fn(Warning) + Send + Sync + 'static;
@@ -126,6 +129,10 @@ impl Args {
     /// only used to help decide what kind of argument parsing we'll be doing - i.e. what platform
     /// we're linking for. We split into two phases so that the caller can adjust defaults before
     /// the actual parsing occurs.
+    ///
+    /// Precedence for platform selection (reld#184): an explicit COFF/Mach-O `-flavor` or driver
+    /// name wins first, then `--engine`/`RELD_ENGINE`, then the `TargetProbe`, then GNU-syntax
+    /// default ELF, then the host. See `bridge::resolve_link_target` for the full precedence.
     pub fn new<F, S, I>(input: F) -> Result<Self>
     where
         F: Fn() -> I,
@@ -136,36 +143,47 @@ impl Args {
         // error is colored as asked.
         crate::diagnostic::apply_color_flags_from_argv(input());
 
-        let mut input = input();
+        let argv: Vec<String> = input().map(|arg| arg.as_ref().to_owned()).collect();
 
-        let prog_name = input.next().context("Missing argument 0 (program name)")?;
+        let argv0 = argv.first().context("Missing argument 0 (program name)")?;
 
         let mut has_flavor = false;
 
-        let platform = if input.next().is_some_and(|arg| arg.as_ref() == "-flavor") {
+        let (explicit, rest) = if argv.get(1).map(String::as_str) == Some("-flavor") {
             has_flavor = true;
 
-            let flavor = input
-                .next()
+            let flavor = argv
+                .get(2)
                 .context("-flavor requires an argument (gnu, darwin, or link)")?;
 
-            PlatformKind::from_flavor(flavor.as_ref())?
-        } else if let Some(platform) = PlatformKind::from_executable_name(prog_name.as_ref()) {
-            platform
+            (PlatformKind::from_flavor(flavor)?, &argv[3..])
         } else {
-            PlatformKind::host()
+            (PlatformKind::from_executable_name(argv0), &argv[1..])
         };
 
-        let mut args = match platform {
-            PlatformKind::Elf => Args::Elf(elf::ElfArgs::new()?),
-            PlatformKind::MachO => Args::MachO(macho::MachOArgs::new()?),
+        let host = PlatformKind::host();
+
+        let target = crate::bridge::resolve_link_target(
+            explicit,
+            rest,
+            std::env::var(crate::bridge::RELD_ENGINE_ENV).ok().as_deref(),
+            host,
+        );
+
+        let mut args = match target.format() {
+            crate::bridge::BridgeTarget::Elf => Args::Elf(elf::ElfArgs::new()?),
+            crate::bridge::BridgeTarget::MachO => Args::MachO(macho::MachOArgs::new()?),
             // Phase 3 will replace this parser with a native COFF argument model. Reusing the
             // common GNU parser here exposes version handling and the backend dispatch point.
-            PlatformKind::Coff => Args::Coff(elf::ElfArgs::new()?),
+            // MinGW links are always bridged, so the placeholder parser is never used for them.
+            crate::bridge::BridgeTarget::Coff | crate::bridge::BridgeTarget::MinGw => {
+                Args::Coff(elf::ElfArgs::new()?)
+            }
         };
 
         // Store whether we got a flavor arg to make parsing simpler.
         args.common_mut().has_flavor = has_flavor;
+        args.common_mut().link_target = target;
 
         Ok(args)
     }
@@ -243,20 +261,16 @@ impl Args {
     /// check this before calling `parse`, and if it returns `Some`, delegate to
     /// `crate::run_bridge` instead of parsing/linking natively.
     pub fn bridge_target(&self) -> Option<crate::bridge::BridgeTarget> {
-        match self {
-            Args::Coff(_) => Some(crate::bridge::BridgeTarget::Coff),
-            Args::MachO(_) => Some(crate::bridge::BridgeTarget::MachO),
-            Args::Elf(_) => None,
+        match self.link_target().format() {
+            crate::bridge::BridgeTarget::Elf => None,
+            format => Some(format),
         }
     }
 
-    /// Returns the object format selected by argv[0], `-flavor`, or the host default.
-    pub fn link_target(&self) -> crate::bridge::BridgeTarget {
-        match self {
-            Args::Elf(_) => crate::bridge::BridgeTarget::Elf,
-            Args::Coff(_) => crate::bridge::BridgeTarget::Coff,
-            Args::MachO(_) => crate::bridge::BridgeTarget::MachO,
-        }
+    /// The link target resolved from `-flavor`, argv[0], `--engine`/RELD_ENGINE, the
+    /// TargetProbe, or the host (reld#184).
+    pub fn link_target(&self) -> crate::bridge::LinkTarget {
+        self.common().link_target
     }
 
     pub(crate) fn print_emulation_info(&self, stdout: &mut dyn Write) -> Result<()> {
@@ -274,31 +288,31 @@ impl Args {
     }
 }
 
-enum PlatformKind {
-    Elf,
-    MachO,
-    Coff,
-}
+/// Associated functions that turn `-flavor`, argv[0], and the host OS into the
+/// `bridge::ExplicitFormat`/`bridge::BridgeTarget` values consumed by `bridge::resolve_link_target`.
+/// There's no per-instance state, so this is a namespace rather than an enum with per-platform
+/// variants.
+struct PlatformKind;
 
 impl PlatformKind {
-    fn host() -> Self {
+    fn host() -> crate::bridge::BridgeTarget {
         match crate::platforms::host::os() {
-            HostOs::Windows => PlatformKind::Coff,
-            HostOs::MacOs => PlatformKind::MachO,
+            HostOs::Windows => crate::bridge::BridgeTarget::Coff,
+            HostOs::MacOs => crate::bridge::BridgeTarget::MachO,
             HostOs::Linux
             | HostOs::Android
             | HostOs::FreeBsd
             | HostOs::Illumos
             | HostOs::Wasi
-            | HostOs::OtherUnix => PlatformKind::Elf,
+            | HostOs::OtherUnix => crate::bridge::BridgeTarget::Elf,
         }
     }
 
-    fn from_flavor(flavor: &str) -> Result<Self> {
+    fn from_flavor(flavor: &str) -> Result<crate::bridge::ExplicitFormat> {
         match flavor {
-            "gnu" | "ld" => Ok(PlatformKind::Elf),
-            "darwin" | "ld64" => Ok(PlatformKind::MachO),
-            "link" => Ok(PlatformKind::Coff),
+            "gnu" | "ld" => Ok(crate::bridge::ExplicitFormat::Gnu),
+            "darwin" | "ld64" => Ok(crate::bridge::ExplicitFormat::MachO),
+            "link" => Ok(crate::bridge::ExplicitFormat::Coff),
             _ => bail!(
                 "Unknown flavor '{}'. Valid flavors: gnu, darwin, link",
                 flavor
@@ -306,16 +320,18 @@ impl PlatformKind {
         }
     }
 
-    fn from_executable_name(name: &str) -> Option<Self> {
-        let base_name = Path::new(name).file_stem().and_then(|n| n.to_str())?;
+    fn from_executable_name(name: &str) -> crate::bridge::ExplicitFormat {
+        let Some(base_name) = Path::new(name).file_stem().and_then(|n| n.to_str()) else {
+            return crate::bridge::ExplicitFormat::None;
+        };
         // Windows driver copies retain `.reld` before the executable suffix.
         let base_name = base_name.strip_suffix(".reld").unwrap_or(base_name);
 
         match base_name {
-            "ld" => Some(PlatformKind::Elf),
-            "ld64" => Some(PlatformKind::MachO),
-            "reld-link" => Some(PlatformKind::Coff),
-            _ => None,
+            "ld" => crate::bridge::ExplicitFormat::Gnu,
+            "ld64" => crate::bridge::ExplicitFormat::MachO,
+            "reld-link" => crate::bridge::ExplicitFormat::Coff,
+            _ => crate::bridge::ExplicitFormat::None,
         }
     }
 }
@@ -391,6 +407,7 @@ impl Default for CommonArgs {
             warning_callback: Box::new(default_warning_callback),
             version: std::borrow::Cow::Borrowed("unknown version"),
             has_flavor: false,
+            link_target: crate::bridge::LinkTarget::from(crate::bridge::BridgeTarget::Elf),
         }
     }
 }
@@ -1561,5 +1578,68 @@ mod tests {
 
         assert!(Args::new(|| ["ld.reld", "-flavor", "invalid"].into_iter()).is_err());
         assert!(Args::new(|| ["ld.reld", "-flavor"].into_iter()).is_err());
+    }
+
+    #[test]
+    fn args_new_uses_target_probe() {
+        if std::env::var_os("RELD_ENGINE").is_some() {
+            return;
+        }
+
+        let args = Args::new(|| ["reld", "-m", "i386pep", "-o", "a.exe"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::MinGw
+        );
+        assert!(args.is_coff());
+
+        let args = Args::new(|| ["reld", "-flavor", "link", "-m", "i386pep"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::Coff
+        );
+
+        let args = Args::new(|| ["reld", "-flavor", "gnu", "-m", "i386pep"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::MinGw
+        );
+
+        let args = Args::new(|| ["ld", "-m", "elf_i386"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::Elf
+        );
+
+        let args = Args::new(|| ["reld", "-arch", "arm64"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::MachO
+        );
+
+        let args = Args::new(|| ["reld-link", "-m", "elf_x86_64"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::Coff
+        );
+
+        let args = Args::new(|| ["reld", "-flavor", "gnu", "--version"].into_iter()).unwrap();
+        assert_eq!(
+            args.link_target().format(),
+            crate::bridge::BridgeTarget::Elf
+        );
+    }
+
+    #[test]
+    fn unknown_flavor_still_errors() {
+        if std::env::var_os("RELD_ENGINE").is_some() {
+            return;
+        }
+
+        let err = Args::new(|| ["reld", "-flavor", "bogus"].into_iter()).unwrap_err();
+        assert!(
+            err.to_string().contains("Valid flavors"),
+            "unexpected error message: {err}"
+        );
     }
 }

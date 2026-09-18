@@ -26,6 +26,8 @@ A PR that enhances the native engine and does not touch routing is incomplete. R
 | Native conformance evidence | `crates/reld/tests/external_tests/mold_skip_tests.toml` (mold suite ratchet, #14), `crates/reld/tests/acceptance.rs`, `reld-difftest` |
 | Route expectations in CI | `ci/consumer_acceptance.py` (`expected_route`), `crates/reld/tests/nix_rpath.rs` |
 | Human-facing capability claims | `README.md` "Polylinker" table, `agents/docs/polylinker.md`, `DESIGN.md` §4.5 |
+| Link-target resolution (format / engine family) | `bridge.rs::resolve_link_target`, `bridge.rs::probe_link_target`, `target_probe.rs` |
+| Target emulation dispositions | `flag_table.rs` `-m <emulation>` rules |
 
 #123 replaces the scattered tables with one `FlagRule` table carrying a four-way `Disposition`
 (`Native`, `SatisfiedByConstruction`, `Requires(Capability)`, `Unsupported`) and generated
@@ -113,6 +115,67 @@ ELF-shaped `LLD_CAPABILITIES`; that is a bug to fix, not a pattern). Anything re
 of linking (the Nix RUNPATH derivation, identity comments) must be applied as an argv-level
 transform before engine selection so every engine sees the same request (#123 D6).
 
+## Target-keyed routing (reld#184)
+
+Engine selection does not stop at "which platform is the host": `bridge.rs::resolve_link_target`
+picks a link *target* (an object format, and within ELF an architecture) before it picks an
+engine, and the target can come from argv or from the inputs rather than from the host at all
+(cross-linking). The engines today are `reld` (native ELF), `lld` (`ld.lld`, ELF), `lld-link`
+(COFF, MSVC syntax), `ld64.lld` (Mach-O), and `lld-mingw` (PE/COFF from a GNU-style command line,
+run as `ld.lld -m i386pep`, i.e. lld's MinGW driver / rust-lld `-flavor gnu`).
+
+`resolve_link_target` tries, in order:
+
+1. An explicit format flavor — `-flavor link|darwin|ld64`, or the driver name `reld-link`/`ld64` —
+   fixes COFF or Mach-O outright. Nothing is probed.
+2. `--engine=<name>` or `RELD_ENGINE` naming a known engine uses that engine's format. The
+   override is still capability-checked against whatever the argv/inputs actually need (see below);
+   it does not suppress a loud error.
+3. Otherwise `bridge.rs::probe_link_target` calls `target_probe.rs::probe_target`, whose own
+   precedence is `-m <emulation>`, then `-arch`, then `/OUT:` / `-platform_version`, then
+   `OUTPUT_FORMAT` in a linker script, then the first object input's header, then bitcode. A
+   GNU-syntax invocation (`-flavor gnu|ld`, or driver name `ld`) only chooses between ELF and
+   MinGW at this step, so `-flavor gnu -m i386pep` is `lld-mingw`, exactly as `-m i386pep` alone is.
+4. GNU syntax with nothing else to go on falls back to ELF; every other syntax falls back to the
+   host's own format.
+
+Within ELF, the probe adds `Capability::ForeignArch` as a requirement when the probed architecture
+is outside `reld`'s native set (x86_64, aarch64, riscv64, loongarch64, ppc64 — all 64-bit,
+little-endian). i386, arm32, mips, s390/s390x, ppc/ppc64be, riscv32, x32, and big-endian aarch64
+therefore route to `lld` with reason `target:<arch>` (`target:i386`, `target:ppc64-be`, …) instead
+of failing with "Unsupported architecture". An explicit override is still checked against this:
+`--engine=reld -m elf_i386` is a loud error, not a silent narrowing.
+
+A linker-script input (or `-T` script) containing `INSERT AFTER`/`INSERT BEFORE` requires
+`Capability::LinkerScriptInsert` and routes to `lld` with reason `input:linker-script-insert`; no
+engine promises that grammar natively.
+
+When the probe — not the host — is the reason a link's format differs from what dispatch would
+otherwise assume, the `RELD_LOG_ENGINE` line's reason is `target:pe-mingw`, `target:coff`,
+`target:mach-o`, or `target:elf` (for example `reld: engine=lld-mingw (bridge,
+reason=target:pe-mingw)`), distinct from the `target:<arch>` reason used for a foreign-arch ELF
+route.
+
+For a MinGW link whose argv carries no `-m i386pe*` (only COFF inputs to go on), reld injects
+`-m <emulation>` derived from the probed architecture before forwarding to `lld-mingw`. Native
+host links are unaffected by any of this: clang and gcc pass `-m elf_x86_64` on an ordinary link,
+so the probe decides from argv alone, with no extra input I/O.
+
+**When the native engine gains an architecture**, do all four of:
+
+1. Add it to the native tuple set consulted by `ProbedTarget::foreign_arch_trigger`.
+2. Move its `-m` emulations in `flag_table.rs` from `Requires(Capability::ForeignArch)` to
+   `Native`. The `emulation_rules_agree_with_target_probe` test enforces that the flag table and
+   the probe's native set agree; it will fail until both sides move together.
+3. Flip the `bridge.rs` test `target_probe_picks_engine_before_format` and
+   `crates/reld/tests/bridge_route.rs` for that architecture from "routes to lld" to "stays
+   native".
+4. Follow the promotion checklist above (native conformance test, mold skip entry, route
+   expectations, regenerated claims).
+
+See [#184](https://github.com/zackees/reld/issues/184) for the TargetProbe/`lld-mingw` design and
+[#123](https://github.com/zackees/reld/issues/123) for the phased routing audit this extends.
+
 ## How a routing decision is surfaced, and why stderr is not free
 
 **Channels, in order of preference:**
@@ -164,3 +227,5 @@ so on stderr (name the engine and the signal) rather than exit 1 silently.
 - [ ] Nothing new writes to stderr on a successful link without `RELD_LOG_ENGINE`.
 - [ ] Reld-only flags I added are `NativeControl` or stripped; none can reach a child linker.
 - [ ] `RELD_LOG_ENGINE=1` output for the affected configuration is pasted in the PR.
+- [ ] If I changed which formats/architectures the native engine accepts, I updated the
+      TargetProbe native set, the `-m` flag rules, and the target routing tests.

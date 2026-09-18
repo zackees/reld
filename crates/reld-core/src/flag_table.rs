@@ -223,6 +223,56 @@ pub(crate) static FLAG_TABLE: &[FlagRule] = &[
         Disposition::Unsupported,
         &[Emitter::HandWritten],
     ),
+    // --- Target emulations (reld#184: TargetProbe keys the engine on the target) ---
+    rule(
+        &[
+            "-m elf_x86_64",
+            "-m aarch64linux",
+            "-m aarch64elf",
+            "-m elf64lriscv",
+            "-m elf64loongarch",
+            "-m elf64lppc",
+        ],
+        ValueMatch::Separate,
+        Disposition::Native,
+        &[Emitter::Clang, Emitter::Gcc],
+    ),
+    rule(
+        &[
+            "-m elf_i386",
+            "-m elf32_x86_64",
+            "-m aarch64linuxb",
+            "-m aarch64elfb",
+            "-m armelf",
+            "-m armelf_linux_eabi",
+            "-m armelfb",
+            "-m armelfb_linux_eabi",
+            "-m elf32lriscv",
+            "-m elf32loongarch",
+            "-m elf32ppc",
+            "-m elf32ppclinux",
+            "-m elf32lppc",
+            "-m elf32lppclinux",
+            "-m elf64ppc",
+            "-m elf32btsmip",
+            "-m elf32ebmip",
+            "-m elf32ltsmip",
+            "-m elf32elmip",
+            "-m elf32btsmipn32",
+            "-m elf32ltsmipn32",
+            "-m elf64btsmip",
+            "-m elf64ltsmip",
+            "-m elf_s390",
+            "-m elf64_s390",
+        ],
+        ValueMatch::Separate,
+        Disposition::Requires(Capability::ForeignArch),
+        &[Emitter::Clang, Emitter::Gcc],
+    ),
+    // `-m i386pep`, `-m i386pe`, `-m arm64pe`, and `-m thumb2pe` are deliberately absent from this
+    // table: they don't select a disposition for a flag reld's native ELF engine or lld's ELF
+    // driver could honor. They select the *object format* (PE/COFF, via MinGW), which routes to
+    // the `lld-mingw` engine in `bridge::resolve_link_target`, not to a flag-table capability.
 ];
 
 /// Renders the flag table as rows of `spelling | disposition | emitters`.
@@ -281,6 +331,49 @@ mod tests {
                 assert!(
                     rendered.contains(spelling),
                     "rendered table missing `{spelling}`"
+                );
+            }
+        }
+    }
+
+    /// Every `-m <emulation>` rule must agree with `target_probe`'s own emulation table: a
+    /// `Native` rule must be an emulation `target_probe` does not flag as foreign, a
+    /// `Requires(ForeignArch)` rule must be one it does flag, and every one of them must be an ELF
+    /// emulation (the table has no rules for the PE/COFF emulations, which route by object format
+    /// instead; see the comment above this section in `FLAG_TABLE`). This keeps the table and the
+    /// probe from drifting apart (reld#184).
+    #[test]
+    fn emulation_rules_agree_with_target_probe() {
+        for flag in FLAG_TABLE {
+            for spelling in flag.spellings {
+                let Some(name) = spelling.strip_prefix("-m ") else {
+                    continue;
+                };
+                let probed = crate::target_probe::probe_target(&["-m", name], &[] as &[&[u8]]);
+                let Some(probed) = probed else {
+                    panic!("target_probe cannot classify `{name}` (rule `{spelling}`)");
+                };
+                match flag.disposition {
+                    Disposition::Native => {
+                        assert!(
+                            probed.foreign_arch_trigger().is_none(),
+                            "rule `{spelling}` is Native but target_probe flags it as a foreign \
+                             arch"
+                        );
+                    }
+                    Disposition::Requires(Capability::ForeignArch) => {
+                        assert!(
+                            probed.foreign_arch_trigger().is_some(),
+                            "rule `{spelling}` is Requires(ForeignArch) but target_probe does not \
+                             flag it as a foreign arch"
+                        );
+                    }
+                    _ => {}
+                }
+                assert_eq!(
+                    probed.family(),
+                    Some(crate::target_probe::TargetFamily::Elf),
+                    "rule `{spelling}` is not classified as ELF by target_probe"
                 );
             }
         }

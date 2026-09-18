@@ -11,10 +11,12 @@ touching dispatch code. Full design: [`DESIGN.md`](../../DESIGN.md) §4.4–§4.
 
 `reld` is not one linker; it's a **polylinker** — a single binary that bundles multiple real
 linker engines per platform and routes each link request to whichever bundled engine can satisfy
-it. Two engines exist today: reld's own native engine (Linux/ELF) and the `lld` bridge
-(Windows/COFF via `lld-link`, macOS/Mach-O via `ld64.lld`). The framing generalizes: as more
-engines get bundled (e.g. `radlink` per `DESIGN.md` §7), routing decides per-link which one runs,
-rather than reld growing a fork of itself per engine.
+it. The engines today are reld's own native engine (Linux/ELF), `lld` (`ld.lld`, ELF), `lld-link`
+(Windows/COFF, MSVC syntax), `ld64.lld` (macOS/Mach-O), and `lld-mingw` (Windows/MinGW PE/COFF
+from a GNU-style command line, run as `ld.lld -m i386pep`, i.e. lld's MinGW driver — this
+includes cross links from Linux, e.g. `clang --target=x86_64-w64-mingw32 --ld-path=reld`). The
+framing generalizes: as more engines get bundled (e.g. `radlink` per `DESIGN.md` §7), routing
+decides per-link which one runs, rather than reld growing a fork of itself per engine.
 
 The point of the framing: a capability reld's fast default engine doesn't have (the leading
 example is LTO) doesn't have to mean "reject the flag." It can mean "hand this link to a bundled
@@ -26,8 +28,8 @@ an LTO-capable link.
 | Layer | Status |
 |---|---|
 | Bundling more than one real linker engine per platform | **Shipped.** Native engine (Linux) + lld bridge (Windows, macOS). |
-| Routing by platform/format, decided once at dispatch | **Shipped.** |
-| Capability table | **Shipped, initial set.** ELF native-vs-lld capabilities cover LTO, ICF, discard-all, and Cortex-A53 erratum 843419. Extend this table as new native gaps are routed. |
+| Routing by probed target (argv emulation/arch, script `OUTPUT_FORMAT`, input headers), with explicit flavor / `--engine` overrides, decided once at dispatch | **Shipped (reld#184).** |
+| Capability table | **Shipped, initial set.** ELF native-vs-lld capabilities cover LTO, ICF, discard-all, Cortex-A53 erratum 843419, foreign architectures outside reld's native ELF set (i386, arm32, mips, s390/s390x, ppc/ppc64be, riscv32, x32, big-endian aarch64), and linker-script `INSERT AFTER`/`INSERT BEFORE`. Extend this table as new native gaps are routed. |
 | Flag-aware router | **Shipped for ELF.** Direct argv and nested response-file flags are classified before native parsing. |
 | Fallback ordering when the default engine lacks a capability | **Shipped.** Native ELF is fastest/default; ELF `lld` is the capable fallback. |
 | `--engine=` / `RELD_ENGINE` explicit override | **Shipped.** A forced engine is still capability-validated. |
@@ -43,7 +45,9 @@ and the CI route expectations, and regenerate this table. The step-by-step proce
 decision tree for classifying a new flag, and the rules for how a routing decision may be
 surfaced (why stderr on a successful link is not free) are in
 [`routing-maintenance.md`](routing-maintenance.md). The full gap audit, phased design, and
-testing criteria are [#123](https://github.com/zackees/reld/issues/123).
+testing criteria are [#123](https://github.com/zackees/reld/issues/123); the target-probe-driven
+engine selection and the `lld-mingw` engine are
+[#184](https://github.com/zackees/reld/issues/184).
 
 ## The rule for new backends
 
