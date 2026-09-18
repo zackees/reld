@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 pub mod elf;
 pub mod macho;
+pub(crate) mod response_file;
 
 use crate::error::Warning;
 use crate::platform;
@@ -1311,72 +1312,7 @@ pub(crate) fn parse_number(s: &str) -> Result<u64> {
 pub(crate) fn read_args_from_file(path: &Path) -> Result<Vec<String>> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read arguments from file `{}`", path.display()))?;
-    arguments_from_string(&contents)
-}
-
-/// Parses arguments from a string, handling quoting, escapes etc.
-/// All arguments must be surrounded by a white space.
-fn arguments_from_string(input: &str) -> Result<Vec<String>> {
-    const QUOTES: [char; 2] = ['\'', '"'];
-
-    let mut out = Vec::new();
-    let mut chars = input.chars();
-    let mut heap = None;
-    let mut quote = None;
-    let mut expect_whitespace = false;
-
-    loop {
-        let Some(mut ch) = chars.next() else {
-            if let Some(quote) = quote.take() {
-                bail!("Missing closing '{quote}'");
-            }
-            if let Some(arg) = heap.take() {
-                out.push(arg);
-            }
-            break;
-        };
-
-        ensure!(
-            !expect_whitespace || ch.is_whitespace(),
-            "Expected white space after quoted argument"
-        );
-        expect_whitespace = false;
-
-        if QUOTES.contains(&ch) {
-            if let Some(qchr) = quote {
-                if qchr == ch {
-                    // close the argument
-                    if let Some(arg) = heap.take() {
-                        out.push(arg);
-                    }
-                    quote = None;
-                    expect_whitespace = true;
-                } else {
-                    // accept the other quoting character as normal char
-                    heap.get_or_insert(String::new()).push(ch);
-                }
-            } else {
-                // beginning of a new argument
-                ensure!(heap.is_none(), "Missing opening quote '{ch}'");
-                quote = Some(ch);
-            }
-        } else if ch.is_whitespace() {
-            if quote.is_none() {
-                if let Some(arg) = heap.take() {
-                    out.push(arg);
-                }
-            } else {
-                heap.get_or_insert(String::new()).push(ch);
-            }
-        } else {
-            if ch == '\\' {
-                ch = chars.next().context("Invalid escape")?;
-            }
-            heap.get_or_insert(String::new()).push(ch);
-        }
-    }
-
-    Ok(out)
+    Ok(response_file::tokenize_gnu(&contents))
 }
 
 fn parse_time_phase_options(input: &str) -> Result<Vec<CounterKind>> {

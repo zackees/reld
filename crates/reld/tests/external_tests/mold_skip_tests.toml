@@ -33,7 +33,6 @@ tests = [
   "relocatable-merge-sections.sh",         # `--relocatable-merge-sections`
   "repro.sh",                              # Note in this test's second half that it uses a custom environment variable called `MOLD_REPRO`. While Reld currently doesn't support `--repro`, it will eventually be moved to the "ignore" group once support is added.
   "require-defined.sh",                    # `--require-defined`
-  "response-file-quoting.sh",              # Response-file quoting: reld reports `Missing opening quote`
   "retain-symbols-file.sh",                # `--retain-symbols-file`
   "run.sh",                                # `mold -run`, which needs mold-wrapper.so
   "section-align.sh",                      # `--section-alignment`
@@ -204,6 +203,7 @@ tests = [
   "no-allow-shlib-undefined3.sh",   # Different message formats
   "no-allow-shlib-undefined4.sh",   # GNU ld and LLD also fail
   "plt-symbols.sh",                 # Reld currently doesn't create entries in the symbol table with the `$plt` suffix unless `--got-plt-syms` is specified
+  "response-file-quoting.sh",       # Different message formats: the quoted @file parses natively since reld#179, but the test greps `cannot open foobar:` and reld says ``Failed to open input file `foobar` ``
   "run-clang.sh",                   # This test checks the comment section to verify if it's linked with mold.
   "stdout.sh",
   "unresolved-symbols.sh",          # Different message formats
