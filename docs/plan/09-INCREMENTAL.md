@@ -15,6 +15,15 @@ and with two contradictions in our own `DESIGN.md` that must be resolved before 
 
 Raise these before writing incremental code. They are not implementation details.
 
+> **Resolved in `DESIGN.md` ([#10](https://github.com/zackees/reld/issues/10)).** Contradiction 1:
+> peak RSS is a win condition for the **cold** link (the CI path), and the warm path's resident
+> graph is reported separately and bounded (§2.3); the graph is a persisted artifact CI reloads
+> through `setup-soldr`, with the daemon as an accelerator over it (§2.2, §4.2). Contradiction 2:
+> archive semantics are in scope, and an edit that changes archive member selection or symbol
+> resolution falls back to a full link (§2.2, §4.2). The I6 debug-info question is settled too:
+> the warm path must emit usable DWARF and PDB (§2.2). The analysis below is kept as the record
+> of why.
+
 **Contradiction 1 — peak RSS vs. the daemon.** `DESIGN.md` §2.3 lists **peak RSS** as one of the
 five categories reld must win. But every fast incremental result in the literature comes from a
 **resident process holding the symbol graph and relocation reverse-index in memory**, and Zig's

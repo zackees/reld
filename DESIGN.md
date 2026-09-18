@@ -66,6 +66,33 @@ between invocations, and a changed input patches the graph rather than repopulat
 independent of total binary size. This is the number that matters; it is the only one a
 developer feels 200 times a day.
 
+**Cold and warm must both win.** The two serve different users, and neither is traded away for
+the other ([#10](https://github.com/zackees/reld/issues/10)):
+
+- **Cold relink is the CI path.** A GitHub Actions job has no resident process, so the first link
+  of a run is a cold link and must be fast on its own terms.
+- **Warm relink is the local dev loop.** A developer's machine keeps the graph hot between
+  edits.
+- **The graph outlives the daemon.** CI restores it through `setup-soldr` and expects to reload
+  the object graph from an artifact archive, so the graph is a persisted, relocatable artifact
+  first and a resident structure second. A daemon accelerates a graph that already exists on
+  disk; it is never the only place the graph lives. That makes **warm-from-artifact** — no
+  daemon, graph restored — a mode of its own, and the one CI actually runs.
+
+**Archive semantics are in scope.** wild's incremental design excludes them on the grounds that
+Rust does not use them; reld cannot, because C and C++ on three platforms make them
+unavoidable. This is the largest scope difference between reld and the design it forks. The
+incremental path treats archive member selection and symbol resolution as part of the graph,
+and any edit that changes either — a newly pulled archive member, the `malloc`-cascade case, a
+weak symbol gaining or losing a definition — falls back to a full link under §4.2's rule rather
+than being patched. The fast path covers the edits that leave both unchanged, which is the
+common case in a dev loop; the others stay correct and merely stop being fast.
+
+**The warm path emits usable debug info.** The dev loop is where people debug, so a warm relink
+that drops debug info does not count as a warm relink: DWARF on ELF and Mach-O, and PDB on
+Windows through llvm-ld's LLD writer (D5, decided in [#9](https://github.com/zackees/reld/issues/9)).
+How it is kept incremental is an I6 design question; *whether* is settled here.
+
 ### 2.3 Faster than `wild` in every category
 
 This is a target, and to be meaningful it needs a falsifiable definition. `reld` claims
@@ -75,7 +102,13 @@ success only when, on identical hardware and identical inputs, it is faster than
 1. **Cold link** — no cache, no daemon, first run
 2. **Warm full link** — daemon resident, all inputs changed
 3. **Warm incremental link** — daemon resident, one object changed
-4. **Peak RSS** — memory is a category too; winning on time by spending unbounded memory is not winning
+4. **Peak RSS** — memory is a category too; winning on time by spending unbounded memory is not winning.
+   Measured on the **cold** link, which is where reld and `wild` do the same work and where CI
+   pays for it. The warm path's resident graph is a deliberate trade — memory buys the
+   millisecond relink — so its RSS is reported separately and must stay bounded, not beat a cold
+   `wild` link that holds nothing between runs. The bound is set from measurements when I2 lands
+   rather than guessed now; an unbounded or unreported warm RSS still fails this category
+   ([#10](https://github.com/zackees/reld/issues/10))
 5. **Single-threaded** — the honest category, and the one mold *loses* to lld. Parallel scaling must not be the only story
 
 Category 3 is where the architecture should produce a step change rather than a percentage.
@@ -179,6 +212,11 @@ runtime-cost objection. `reld` is betting the same way, with eyes open:
 ### 4.2 Incremental model
 
 - Persistent daemon holding the symbol graph and section-contribution graph hot between edits
+- The graph serializes to a relocatable on-disk artifact that a fresh process can reload, so CI
+  can restore it from a cache without a daemon (§2.2); the daemon is an accelerator over that
+  artifact, not its only home
+- Archive member selection and symbol resolution are recorded in the graph, and an edit that
+  would change them is a full-link fallback, not a patch (§2.2)
 - Content-addressed input identity, so an unchanged object is never re-parsed
 - Patch-in-place layout: reassign only what moved
 - Fall back to a full link whenever the incremental path is uncertain — **correctness beats
