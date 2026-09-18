@@ -24,10 +24,9 @@
 //! resulting `endian` is overridden with Big/Little. `-EB`/`-EL` alone, with no other signal,
 //! yields `None`.
 //!
-//! This module is not yet wired into routing (reld#123 Phase 3, see reld#178): adding it does not
-//! change the behaviour of any link.
-
-#![cfg_attr(not(test), allow(dead_code))] // Wired into engine selection by the follow-up to reld#178 (reld#123 Phase 3).
+//! The result feeds `bridge::resolve_link_target` (object format / engine family) and
+//! `bridge::select_route` (the `ForeignArch` capability requirement); see
+//! agents/docs/routing-maintenance.md, "Target-keyed routing".
 
 use object::elf::DataEncoding;
 use object::elf::ELFCLASS32;
@@ -163,6 +162,121 @@ pub(crate) struct ProbedTarget {
     pub(crate) class: Option<Class>,
     pub(crate) endian: Option<Endian>,
     pub(crate) decided_by: Signal,
+}
+
+/// Which engine family a probed target belongs to (reld#184).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetFamily {
+    /// ELF, linked by the native engine or `ld.lld`.
+    Elf,
+    /// PE/COFF driven by a GNU-style command line (MinGW): `ld.lld -m i386pep`.
+    MinGwCoff,
+    /// PE/COFF driven by an MSVC-style command line (`/OUT:`): `lld-link`.
+    MsvcCoff,
+    /// Mach-O: `ld64.lld`.
+    MachO,
+}
+
+impl ProbedTarget {
+    /// Which engine family this target routes to. `None` only for LLVM bitcode: bitcode alone
+    /// does not pick a family (it is a hint used when nothing else identifies the format).
+    pub(crate) fn family(self) -> Option<TargetFamily> {
+        match self.format {
+            ObjectFormat::Elf => Some(TargetFamily::Elf),
+            ObjectFormat::MachO => Some(TargetFamily::MachO),
+            ObjectFormat::Coff => {
+                if self.decided_by == Signal::CoffOut {
+                    Some(TargetFamily::MsvcCoff)
+                } else {
+                    Some(TargetFamily::MinGwCoff)
+                }
+            }
+            ObjectFormat::LlvmBitcode => None,
+        }
+    }
+
+    /// The `Capability::ForeignArch` routing reason for an ELF target the native engine cannot
+    /// link, or `None` if the native engine supports it (or if `format` isn't ELF, or if any of
+    /// `arch`/`class`/`endian` is unknown: a `None` field counts as supported, never a reason to
+    /// route away, because we never route on missing information).
+    pub(crate) fn foreign_arch_trigger(self) -> Option<&'static str> {
+        if self.format != ObjectFormat::Elf {
+            return None;
+        }
+
+        let (Some(arch), Some(class), Some(endian)) = (self.arch, self.class, self.endian) else {
+            return None;
+        };
+
+        use Class::Bits32;
+        use Class::Bits64;
+        use Endian::Big;
+        use Endian::Little;
+        use ProbedArch::AArch64;
+        use ProbedArch::Arm;
+        use ProbedArch::I386;
+        use ProbedArch::LoongArch32;
+        use ProbedArch::LoongArch64;
+        use ProbedArch::Mips;
+        use ProbedArch::Mips64;
+        use ProbedArch::PowerPc;
+        use ProbedArch::PowerPc64;
+        use ProbedArch::RiscV32;
+        use ProbedArch::RiscV64;
+        use ProbedArch::S390;
+        use ProbedArch::S390x;
+        use ProbedArch::X86_64;
+
+        match (arch, class, endian) {
+            // The native engine's supported set: (arch, class, endian) tuples matching
+            // `crate::arch::Architecture` (EM_X86_64/EM_AARCH64/EM_RISCV/EM_LOONGARCH/EM_PPC64,
+            // little-endian, 64-bit).
+            (X86_64 | AArch64 | RiscV64 | LoongArch64 | PowerPc64, Bits64, Little) => None,
+
+            // Big-endian variants of the native arches. Unreachable in practice (none of these
+            // emulations or headers produce big-endian for these arches today), but kept so the
+            // match stays exhaustive as new signals are added.
+            (X86_64, Bits64, Big) => Some("target:x86_64-be"),
+            (AArch64, Bits64, Big) => Some("target:aarch64-be"),
+            (RiscV64, Bits64, Big) => Some("target:riscv64-be"),
+            (LoongArch64, Bits64, Big) => Some("target:loongarch64-be"),
+            (PowerPc64, Bits64, Big) => Some("target:ppc64-be"),
+
+            // 32-bit variants of the native 64-bit-only arches.
+            (X86_64, Bits32, _) => Some("target:x32"),
+            (AArch64, Bits32, _) => Some("target:aarch64-ilp32"),
+            (RiscV64, Bits32, _) => Some("target:riscv64-32"),
+            (LoongArch64, Bits32, _) => Some("target:loongarch64-32"),
+            (PowerPc64, Bits32, _) => Some("target:ppc64-32"),
+
+            // Arches not in the native set at all.
+            (I386, _, _) => Some("target:i386"),
+            (Arm, _, _) => Some("target:arm"),
+            (RiscV32, _, _) => Some("target:riscv32"),
+            (LoongArch32, _, _) => Some("target:loongarch32"),
+            (PowerPc, _, _) => Some("target:ppc"),
+            (Mips, _, _) => Some("target:mips"),
+            (Mips64, _, _) => Some("target:mips64"),
+            (S390, _, _) => Some("target:s390"),
+            (S390x, _, _) => Some("target:s390x"),
+        }
+    }
+
+    /// The `ld.lld` MinGW emulation name (`-m <name>`) for this COFF target, or `None` if
+    /// `format` isn't COFF or the architecture doesn't map to one of lld's MinGW emulations.
+    pub(crate) fn mingw_emulation(self) -> Option<&'static str> {
+        if self.format != ObjectFormat::Coff {
+            return None;
+        }
+
+        match self.arch {
+            Some(ProbedArch::X86_64) => Some("i386pep"),
+            Some(ProbedArch::I386) => Some("i386pe"),
+            Some(ProbedArch::AArch64) => Some("arm64pe"),
+            Some(ProbedArch::Arm) => Some("thumb2pe"),
+            _ => None,
+        }
+    }
 }
 
 /// `format`, `arch`, `class`, `endian` bundled together the way the individual signal probes
@@ -765,6 +879,80 @@ fn probe_bitcode(bytes: &[u8]) -> Option<FormatTuple> {
     Some((ObjectFormat::LlvmBitcode, arch, class, Some(Endian::Little)))
 }
 
+// --- Helpers for callers deciding whether/how much of an input to read (reld#184) -----------
+
+/// Whether `prefix` (the first bytes of an input file, callers pass 64) looks like it starts a
+/// text file rather than a known binary or object format. Callers use this to decide whether to
+/// read the whole file and look for `OUTPUT_FORMAT`/`INSERT`.
+///
+/// A prefix that ends mid-UTF-8-character is still text: `prefix` is a truncated read, not the
+/// whole file, so a multi-byte character split across the boundary is expected, not a sign of
+/// binary content.
+pub(crate) fn looks_like_text(prefix: &[u8]) -> bool {
+    if starts_with_known_binary_magic(prefix) || probe_coff_header(prefix).is_some() {
+        return false;
+    }
+
+    match std::str::from_utf8(prefix) {
+        Ok(_) => true,
+        Err(err) => err.error_len().is_none(),
+    }
+}
+
+/// Whether the (lossily-decoded) text of a GNU linker script contains an `INSERT AFTER <sec>` or
+/// `INSERT BEFORE <sec>` command. The native script parser
+/// (`crates/reld-core/src/linker_script.rs`) has no `INSERT` support, so such scripts must route
+/// to `lld` instead.
+pub(crate) fn script_uses_insert(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let stripped = strip_block_comments(&text);
+
+    let mut previous_was_insert = false;
+    for token in tokenize_script(&stripped) {
+        if previous_was_insert && (token == "AFTER" || token == "BEFORE") {
+            return true;
+        }
+        previous_was_insert = token == "INSERT";
+    }
+
+    false
+}
+
+/// Strips `/* ... */` comments from `text`. An unterminated comment runs to end of file.
+fn strip_block_comments(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+
+    loop {
+        let Some(start) = rest.find("/*") else {
+            result.push_str(rest);
+            break;
+        };
+
+        result.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+
+        let Some(end) = after_open.find("*/") else {
+            // Unterminated comment: the rest of the file is inside it.
+            break;
+        };
+
+        rest = &after_open[end + 2..];
+    }
+
+    result
+}
+
+/// Splits `text` on ASCII whitespace and the delimiter characters a GNU linker script uses
+/// around commands (`;{}(),=`), dropping empty tokens.
+fn tokenize_script(text: &str) -> Vec<&str> {
+    text.split(|c: char| {
+        c.is_ascii_whitespace() || matches!(c, ';' | '{' | '}' | '(' | ')' | ',' | '=')
+    })
+    .filter(|token| !token.is_empty())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,5 +1375,324 @@ mod tests {
         ];
 
         run_cases(&cases);
+    }
+
+    #[test]
+    fn target_family_classifies_every_signal() {
+        struct FamilyCase {
+            label: &'static str,
+            args: Vec<&'static str>,
+            inputs: Vec<Vec<u8>>,
+            expected: Option<TargetFamily>,
+        }
+
+        let cases = [
+            FamilyCase {
+                label: "-m i386pep",
+                args: vec!["-m", "i386pep"],
+                inputs: vec![],
+                expected: Some(TargetFamily::MinGwCoff),
+            },
+            FamilyCase {
+                label: "-m elf_i386",
+                args: vec!["-m", "elf_i386"],
+                inputs: vec![],
+                expected: Some(TargetFamily::Elf),
+            },
+            FamilyCase {
+                label: "-arch arm64",
+                args: vec!["-arch", "arm64"],
+                inputs: vec![],
+                expected: Some(TargetFamily::MachO),
+            },
+            FamilyCase {
+                label: "/OUT:foo.exe",
+                args: vec!["/OUT:foo.exe"],
+                inputs: vec![],
+                expected: Some(TargetFamily::MsvcCoff),
+            },
+            FamilyCase {
+                label: "COFF AMD64 input header with no args",
+                args: vec![],
+                inputs: vec![coff_header(IMAGE_FILE_MACHINE_AMD64)],
+                expected: Some(TargetFamily::MinGwCoff),
+            },
+            FamilyCase {
+                label: "raw bitcode",
+                args: vec![],
+                inputs: vec![vec![0x42, 0x43, 0xC0, 0xDE, 0, 0, 0, 0]],
+                expected: None,
+            },
+            FamilyCase {
+                label: "OUTPUT_FORMAT(pe-x86-64) text input",
+                args: vec![],
+                inputs: vec![b"OUTPUT_FORMAT(pe-x86-64)\n".to_vec()],
+                expected: Some(TargetFamily::MinGwCoff),
+            },
+        ];
+
+        for case in cases {
+            let input_refs: Vec<&[u8]> = case.inputs.iter().map(Vec::as_slice).collect();
+            let target = probe_target(&case.args, &input_refs);
+            assert_eq!(
+                target.and_then(|target| target.family()),
+                case.expected,
+                "case {}",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_arch_trigger_matches_native_set() {
+        struct TriggerCase {
+            label: &'static str,
+            args: Vec<&'static str>,
+            inputs: Vec<Vec<u8>>,
+            expected: Option<&'static str>,
+        }
+
+        let cases = [
+            TriggerCase {
+                label: "elf_x86_64 is native",
+                args: vec!["-m", "elf_x86_64"],
+                inputs: vec![],
+                expected: None,
+            },
+            TriggerCase {
+                label: "aarch64linux is native",
+                args: vec!["-m", "aarch64linux"],
+                inputs: vec![],
+                expected: None,
+            },
+            TriggerCase {
+                label: "elf64lriscv is native",
+                args: vec!["-m", "elf64lriscv"],
+                inputs: vec![],
+                expected: None,
+            },
+            TriggerCase {
+                label: "elf64loongarch is native",
+                args: vec!["-m", "elf64loongarch"],
+                inputs: vec![],
+                expected: None,
+            },
+            TriggerCase {
+                label: "elf64lppc is native",
+                args: vec!["-m", "elf64lppc"],
+                inputs: vec![],
+                expected: None,
+            },
+            TriggerCase {
+                label: "-m elf_i386",
+                args: vec!["-m", "elf_i386"],
+                inputs: vec![],
+                expected: Some("target:i386"),
+            },
+            TriggerCase {
+                label: "EM_ARM input",
+                args: vec![],
+                inputs: vec![elf_header(ELFCLASS32.0, ELFDATA2LSB.0, EM_ARM.0)],
+                expected: Some("target:arm"),
+            },
+            TriggerCase {
+                label: "big-endian EM_PPC64 ELFCLASS64 input",
+                args: vec![],
+                inputs: vec![elf_header(ELFCLASS64.0, ELFDATA2MSB.0, EM_PPC64.0)],
+                expected: Some("target:ppc64-be"),
+            },
+            TriggerCase {
+                label: "EM_MIPS BE32 input",
+                args: vec![],
+                inputs: vec![elf_header(ELFCLASS32.0, ELFDATA2MSB.0, EM_MIPS.0)],
+                expected: Some("target:mips"),
+            },
+            TriggerCase {
+                label: "-m elf64_s390",
+                args: vec!["-m", "elf64_s390"],
+                inputs: vec![],
+                expected: Some("target:s390x"),
+            },
+            TriggerCase {
+                label: "-m elf32lriscv",
+                args: vec!["-m", "elf32lriscv"],
+                inputs: vec![],
+                expected: Some("target:riscv32"),
+            },
+            TriggerCase {
+                label: "-m elf32_x86_64",
+                args: vec!["-m", "elf32_x86_64"],
+                inputs: vec![],
+                expected: Some("target:x32"),
+            },
+            TriggerCase {
+                label: "ELF with unknown machine",
+                args: vec![],
+                inputs: vec![elf_header(ELFCLASS64.0, ELFDATA2LSB.0, 0xFFFF)],
+                expected: None,
+            },
+            TriggerCase {
+                label: "-m i386pep is not ELF",
+                args: vec!["-m", "i386pep"],
+                inputs: vec![],
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            let input_refs: Vec<&[u8]> = case.inputs.iter().map(Vec::as_slice).collect();
+            let target =
+                probe_target(&case.args, &input_refs).expect("case should produce a target");
+            assert_eq!(
+                target.foreign_arch_trigger(),
+                case.expected,
+                "case {}",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn mingw_emulation_per_arch() {
+        struct EmulationCase {
+            label: &'static str,
+            args: Vec<&'static str>,
+            expected: Option<&'static str>,
+        }
+
+        let cases = [
+            EmulationCase {
+                label: "i386pep",
+                args: vec!["-m", "i386pep"],
+                expected: Some("i386pep"),
+            },
+            EmulationCase {
+                label: "i386pe",
+                args: vec!["-m", "i386pe"],
+                expected: Some("i386pe"),
+            },
+            EmulationCase {
+                label: "arm64pe",
+                args: vec!["-m", "arm64pe"],
+                expected: Some("arm64pe"),
+            },
+            EmulationCase {
+                label: "thumb2pe",
+                args: vec!["-m", "thumb2pe"],
+                expected: Some("thumb2pe"),
+            },
+            EmulationCase {
+                label: "ELF target is not COFF",
+                args: vec!["-m", "elf_x86_64"],
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            let target = probe_target(&case.args, &[]).expect("case should produce a target");
+            assert_eq!(
+                target.mingw_emulation(),
+                case.expected,
+                "case {}",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn script_uses_insert_detection() {
+        struct InsertCase {
+            label: &'static str,
+            script: &'static str,
+            expected: bool,
+        }
+
+        let cases = [
+            InsertCase {
+                label: "INSERT AFTER at top level",
+                script: "SECTIONS { .foo : { *(.foo) } } INSERT AFTER .text;",
+                expected: true,
+            },
+            InsertCase {
+                label: "same text inside a block comment",
+                script: "/* SECTIONS { .foo : { *(.foo) } } INSERT AFTER .text; */",
+                expected: false,
+            },
+            InsertCase {
+                label: "INSERT_ME is not the INSERT command",
+                script: "INSERT_ME = 1;",
+                expected: false,
+            },
+            InsertCase {
+                label: "lowercase insert after is not the GNU ld command",
+                script: "insert after .text",
+                expected: false,
+            },
+            InsertCase {
+                label: "INSERT BEFORE glued to a closing brace",
+                script: "}INSERT BEFORE .data",
+                expected: true,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                script_uses_insert(case.script.as_bytes()),
+                case.expected,
+                "case {}",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_text_rejects_binaries() {
+        struct TextCase {
+            label: &'static str,
+            prefix: Vec<u8>,
+            expected: bool,
+        }
+
+        let cases = [
+            TextCase {
+                label: "ELF header",
+                prefix: elf_header(ELFCLASS64.0, ELFDATA2LSB.0, EM_X86_64.0),
+                expected: false,
+            },
+            TextCase {
+                label: "COFF header",
+                prefix: coff_header(IMAGE_FILE_MACHINE_AMD64),
+                expected: false,
+            },
+            TextCase {
+                label: "raw LLVM bitcode",
+                prefix: vec![0x42, 0x43, 0xC0, 0xDE, 0, 0, 0, 0],
+                expected: false,
+            },
+            TextCase {
+                label: "archive magic",
+                prefix: b"!<arch>\n".to_vec(),
+                expected: false,
+            },
+            TextCase {
+                label: "plain text",
+                prefix: b"OUTPUT_FORMAT(elf64-x86-64)\n".to_vec(),
+                expected: true,
+            },
+            TextCase {
+                label: "text prefix truncated mid 2-byte UTF-8 char",
+                prefix: vec![b'c', b'a', b'f', 0xC3],
+                expected: true,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                looks_like_text(&case.prefix),
+                case.expected,
+                "case {}",
+                case.label
+            );
+        }
     }
 }

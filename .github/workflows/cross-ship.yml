@@ -11,8 +11,11 @@ name: Cross ship (build off-platform, run on-platform)
 # Blessed cross-from-Linux targets per soldr/ci/canonical-targets.json:
 #   x86_64-pc-windows-msvc  (win-x64,  xwin + auto CC_/CXX_/AR_ injection)
 #   aarch64-apple-darwin    (mac-arm64, zig + catalogue Apple SDK)
-# windows-gnu is intentionally NOT cross-built from Linux (soldr blesses MSVC
-# on Windows; windows-gnu builds on a Windows host with the MinGW bundle).
+# windows-gnu IS cross-built from Linux, via soldr's mingw-w64-cross
+# toolchain. Its leg carries extra weight: it also proves that reld itself,
+# built for the Linux host, links a MinGW PE hello-world on Linux
+# (`clang --target=x86_64-w64-mingw32 --ld-path=reld`, reld#184, the #123
+# Phase 3 exit), and that the resulting exe runs on the Windows runner.
 #
 # NOTE: validated — this workflow ran green on main across all six jobs
 # (https://github.com/zackees/reld/actions/runs/35276124820) and is no longer a
@@ -141,6 +144,70 @@ jobs:
             aarch64-apple-darwin)   file "package/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
           esac
 
+      # reld#184 (#123 Phase 3 exit): prove reld itself, built for the Linux
+      # host (no --target: this reld runs on ubuntu, not on the mingw
+      # target), links a MinGW PE when handed to clang as --ld-path. Only
+      # runs for windows-gnu; the exe is shipped to host-run to prove it also
+      # executes on the Windows runner.
+      - name: Link a MinGW hello-world with reld (linux host, reld#184)
+        if: matrix.name == 'windows-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          soldr build --package reld --bin reld --release --locked
+          host_reld="$PWD/target/release/reld"
+          test -x "$host_reld"
+
+          # clang resolves the MinGW sysroot off the x86_64-w64-mingw32-gcc it
+          # finds on PATH, so locate the soldr-provisioned cross gcc and
+          # prepend its directory.
+          mingw_gcc="$(command -v x86_64-w64-mingw32-gcc || true)"
+          if [ -z "$mingw_gcc" ]; then
+            # `|| true`: under `set -o pipefail`, find's non-zero exit on an
+            # unreadable directory (or SIGPIPE from `head`) must not abort.
+            mingw_gcc="$( { find "$HOME" /opt -type f -name x86_64-w64-mingw32-gcc -perm -u+x 2>/dev/null || true; } | head -n1 || true)"
+          fi
+          if [ -z "$mingw_gcc" ]; then
+            echo "::error::could not locate x86_64-w64-mingw32-gcc (soldr-provisioned mingw toolchain) on PATH or under $HOME or /opt"
+            exit 1
+          fi
+          export PATH="$(dirname "$mingw_gcc"):$PATH"
+
+          mkdir -p mingw-hello
+          cat > mingw-hello/hello.c <<'EOF'
+          #include <stdio.h>
+          int main(void){puts("hello from reld (mingw)");return 0;}
+          EOF
+
+          command -v clang >/dev/null || { echo "::error::clang not found on ubuntu-24.04 (ships clang; not apt-installing)"; exit 1; }
+
+          # soldr's mingw package uses a conda layout: headers and import libs
+          # live under <root>/x86_64-w64-mingw32/sysroot/usr, which clang's
+          # MinGW driver doesn't probe (it expects <root>/x86_64-w64-mingw32/
+          # include). Point it there explicitly when that layout is present.
+          sysroot_flags=()
+          mingw_sysroot="$(dirname "$(dirname "$mingw_gcc")")/x86_64-w64-mingw32/sysroot/usr"
+          if [ -d "$mingw_sysroot/include" ]; then
+            sysroot_flags=(-isystem "$mingw_sysroot/include" -L"$mingw_sysroot/lib")
+          fi
+
+          RELD_LOG_ENGINE=1 RELD_INVOCATION_LOG="$PWD/mingw-hello/invocations.jsonl" \
+            clang --target=x86_64-w64-mingw32 --ld-path="$host_reld" \
+            "${sysroot_flags[@]}" \
+            mingw-hello/hello.c -o mingw-hello/hello.exe
+
+          file mingw-hello/hello.exe | grep -q 'PE32+'
+          # Proves reld handled the link (lld-mingw engine), not a fallback
+          # system linker.
+          grep -q '"engine":"lld-mingw"' mingw-hello/invocations.jsonl
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.name == 'windows-gnu'
+        with:
+          name: reld-mingw-hello
+          path: mingw-hello/hello.exe
+          if-no-files-found: error
+
       # Report setup-soldr's caching outcome — reld#59 wants this as the
       # success metric for "how well setup-soldr caching works".
       - name: Report soldr cache metrics
@@ -197,6 +264,9 @@ jobs:
       # This job is the only part of the workflow on scarce runners, so it does
       # exactly one thing the Linux build job cannot: execute the binary on the
       # real OS (reld#174). The format check already happened in `cross-build`.
+      # For windows-gnu it does one more thing (reld#184): run the MinGW
+      # hello-world that reld itself linked on the Linux host, proving the PE
+      # that reld's lld-mingw engine produced actually executes here.
       #
       # `-flavor gnu --version` selects the native ELF argument model on any
       # host, so reld's own code answers — `Reld … (compatible with GNU
@@ -223,6 +293,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
           Write-Output $bridge
           if ($bridge -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
+
+      # reld#184: the mingw hello-world that reld's lld-mingw engine linked
+      # on the Linux host in `cross-build`. Downloaded separately from
+      # `package/reld.exe` because it's a different product of the same job.
+      - uses: actions/download-artifact@v4
+        if: matrix.name == 'windows-gnu'
+        with:
+          name: reld-mingw-hello
+          path: mingw-hello
+
+      - name: Run reld-linked MinGW hello-world (reld#184)
+        if: matrix.name == 'windows-gnu'
+        shell: pwsh
+        run: |
+          $out = & .\mingw-hello\hello.exe 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "reld-linked hello.exe exited with $LASTEXITCODE" }
+          Write-Output $out
+          if ($out -notmatch 'hello from reld \(mingw\)') { throw "unexpected output from reld-linked hello.exe" }
 
       # On Apple Silicon the kernel kills an arm64 executable with a missing or
       # invalid code signature at exec, which no format check can see. Running
