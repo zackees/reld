@@ -638,8 +638,17 @@ fn expand_test_arg_placeholders(arg: &str, config: &Config) -> String {
     )
 }
 
+/// Crate root at run time. Archived test binaries (nextest `--workspace-remap`) run on a
+/// different checkout path than they were built on, so prefer the runtime value that cargo and
+/// nextest both set, and fall back to the compile-time path.
 fn base_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    static VALUE: OnceLock<PathBuf> = OnceLock::new();
+    VALUE.get_or_init(|| {
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    })
 }
 
 fn build_dir() -> PathBuf {

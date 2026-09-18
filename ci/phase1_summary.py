@@ -1,4 +1,8 @@
-"""Publish deterministic Phase-1 test counts and reference-linker versions."""
+"""Publish deterministic Phase-1 test counts and reference-linker versions.
+
+Counts both libtest `test result: ok. N passed; ...` summaries and
+`cargo nextest run` `Summary [...] N tests run: ...` summaries.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,9 @@ RUST_RESULT = re.compile(
     r"(?P<failed>\d+) failed; (?P<skip>\d+) ignored"
 )
 DIFFTEST_RESULT = re.compile(r"(?P<run>\d+) seeds, 0 differential failures")
+NEXTEST_RESULT = re.compile(
+    r"Summary \[\s*[\d.]+s\]\s+(?P<run>\d+)(?:/\d+)? tests? run:(?P<rest>[^\n]*)"
+)
 ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -25,6 +32,10 @@ def counts(text: str) -> tuple[int, int]:
         skipped += int(match.group("skip"))
     for match in DIFFTEST_RESULT.finditer(text):
         run += int(match.group("run"))
+    for match in NEXTEST_RESULT.finditer(text):
+        run += int(match.group("run"))
+        skip_match = re.search(r"(?P<skip>\d+) skipped", match.group("rest"))
+        skipped += int(skip_match.group("skip")) if skip_match else 0
     return run, skipped
 
 

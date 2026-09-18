@@ -7,6 +7,16 @@ use crate::error::Result;
 use std::fs::read_dir;
 use std::path::Path;
 
+/// Crate root at run time. Archived test binaries (nextest `--workspace-remap`) run on a
+/// different checkout path than they were built on, so prefer the runtime value that cargo and
+/// nextest both set, and fall back to the compile-time path.
+fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 #[test]
 fn check_sources_format() -> Result {
     use std::process::Command;
@@ -39,7 +49,8 @@ fn check_sources_format() -> Result {
     }
 
     let extensions = ["c", "cc", "h"];
-    let sources_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let manifest = manifest_dir();
+    let sources_path = manifest
         .parent()
         .unwrap()
         .join("reld")
@@ -101,7 +112,8 @@ fn check_toml_format() -> Result {
         return Ok(());
     }
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let manifest = manifest_dir();
+    let root = manifest.parent().unwrap();
 
     let taplo_out = Command::new("taplo")
         .arg("format")
@@ -200,7 +212,8 @@ fn check_text_files() -> Result {
         Ok(())
     }
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let manifest = manifest_dir();
+    let root = manifest.parent().unwrap();
 
     let mut problems = Vec::new();
     verify_path(root, &mut problems)?;
@@ -215,7 +228,7 @@ fn check_text_files() -> Result {
 /// Checks that we don't put ELF-specific code in files where it shouldn't be.
 #[test]
 fn check_elf_specific_code() -> Result {
-    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src_dir = manifest_dir().join("src");
 
     // Files where we don't allow ELF-specific code.
     const DISALLOWED: &[&str] = &[
