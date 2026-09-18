@@ -269,7 +269,22 @@ COMMANDS = {
 }
 
 
+def _utf8_console() -> None:
+    """Make stdout and stderr UTF-8 with replacement, whatever the console's code page.
+
+    A Windows runner's Python defaults stdout to cp1252. `_run_logged` echoes child output line by
+    line, and nextest prints characters cp1252 cannot encode, so the echo itself raised
+    `UnicodeEncodeError` and killed the job mid-run (reld#130) — after the child had succeeded.
+    The child pipe was already decoded leniently; this makes the other end of the echo match.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     parser = argparse.ArgumentParser(prog="ci.windows_ci")
     parser.add_argument("command", choices=COMMANDS)
     args = parser.parse_args(argv)

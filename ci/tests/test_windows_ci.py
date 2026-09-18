@@ -116,3 +116,26 @@ def test_native_tests_requires_the_phase1_archive_env(
 
     with pytest.raises(WindowsCiError):
         windows_ci.native_tests()
+
+
+def test_echoing_non_ascii_child_output_survives_a_cp1252_console(monkeypatch, tmp_path):
+    # The windows-msvc leg died here (reld#130): nextest printed characters cp1252 cannot encode,
+    # and echoing them to a cp1252 stdout raised after the child had already succeeded.
+    import io
+    import sys
+
+    raw = io.BytesIO()
+    console = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", console)
+    monkeypatch.setattr(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+
+    windows_ci._utf8_console()
+    log = tmp_path / "out.log"
+    windows_ci._run_logged(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write('PASS \\u2714 ok\\n'.encode())"],
+        log,
+    )
+    console.flush()
+
+    assert "✔" in log.read_text(encoding="utf-8")
+    assert "✔".encode("utf-8") in raw.getvalue()
