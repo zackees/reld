@@ -651,6 +651,12 @@ impl<'data> SectionRules<'data> {
             return SectionRuleOutcome::Discard;
         }
 
+        // lld marks the section `InputSection::discarded` after consuming it for non-relocatable
+        // links (reld#180).
+        if section_header.is_dependent_libraries() {
+            return SectionRuleOutcome::Discard;
+        }
+
         if let Some(hash) = section_name_prefix_hash(section_name)
             && let Some(rule) = self
                 .rules

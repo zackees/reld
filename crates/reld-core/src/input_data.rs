@@ -22,6 +22,7 @@ use crate::macho_stub_library::parse_defined_library;
 use crate::parsing::ParsedInputObject;
 use crate::platform;
 use crate::platform::Args;
+use crate::platform::ObjectFile as _;
 use crate::platform::Platform;
 use crate::timing_phase;
 use crate::verbose_timing_phase;
@@ -33,6 +34,7 @@ use rayon::Scope;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
@@ -177,6 +179,10 @@ struct TemporaryState<'data, P: Platform, F: FileSystem> {
     inputs_arena: &'data Arena<InputFile<F::Input>>,
 
     file_system: Arc<F>,
+
+    /// Modifiers used when resolving `.deplibs` specifiers (`SHT_LLVM_DEPENDENT_LIBRARIES`) into
+    /// extra library inputs. See `FileLoader::load_inputs` for how this is derived.
+    deplib_modifiers: Modifiers,
 }
 
 struct LoadedFile<'data, P: Platform, I: InputFileData> {
@@ -185,7 +191,13 @@ struct LoadedFile<'data, P: Platform, I: InputFileData> {
 }
 
 enum LoadedFileState<'data, P: Platform, I: InputFileData> {
-    Loaded(&'data InputFile<I>, InputRecord<'data, P>),
+    /// A regular, non-archive input file. The `Vec<FileLoadIndex>` holds the load indexes of any
+    /// dependent libraries (`.deplibs`) requested by this object; see `dependent_library_input`.
+    Loaded(
+        &'data InputFile<I>,
+        InputRecord<'data, P>,
+        Vec<FileLoadIndex>,
+    ),
     Archive(&'data InputFile<I>, Vec<InputRecord<'data, P>>),
     ThinArchive(Vec<&'data InputFile<I>>, Vec<InputRecord<'data, P>>),
     LinkerScript(&'data InputFile<I>, LoadedLinkerScriptState<'data>),
@@ -315,6 +327,28 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
                 });
         }
 
+        let initial_count = initial_work.len();
+
+        // Modifiers used when resolving `.deplibs` specifiers into extra library inputs.
+        // ld.lld resolves dependent libraries using whichever `-Bstatic`/`-Bdynamic` and
+        // `--as-needed` state was in effect at the point the specifier was encountered while
+        // parsing input files, which for the common case of specifiers on the last few inputs on
+        // the command line, is close enough to the state in effect at the end of the command
+        // line. We approximate that here, since by the time we're loading files, the modifiers
+        // that were active for each particular relocatable object are no longer tracked
+        // separately from the object itself.
+        let deplib_modifiers = {
+            let modifiers = inputs
+                .last()
+                .map_or_else(Modifiers::default, |input| input.modifiers);
+            Modifiers {
+                whole_archive: false,
+                archive_semantics: false,
+                temporary: false,
+                ..modifiers
+            }
+        };
+
         let temporary_state = TemporaryState {
             args,
             path_to_load_index: Mutex::new(path_to_load_index),
@@ -322,6 +356,7 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
             files: SegQueue::new(),
             inputs_arena: self.inputs_arena,
             file_system: Arc::clone(&self.file_system),
+            deplib_modifiers,
         };
 
         // Open files, mmap them and identify their type from separate threads.
@@ -346,7 +381,7 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
             );
             *entry = Some(file.state);
         }
-        self.extract_all(&mut files_by_index, plugin)
+        self.extract_all(&mut files_by_index, plugin, initial_count)
     }
 
     /// Checks that the modification timestamp on all our input files hasn't changed since we opened
@@ -376,14 +411,17 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
 
     /// Extract all files and linker scripts from `files`. Extraction order is the same as the order
     /// on the original command-line. This is roughly FileLoadIndex order, except that (a) if a file
-    /// is loaded multiple times, it will only appear the first time it's encountered and (b) when a
+    /// is loaded multiple times, it will only appear the first time it's encountered, (b) when a
     /// linker script is loaded, its files appear at the point at which the linker script appeared
     /// on the command-line, even though the FileLoadIndex for files loaded by linker scripts is
-    /// later.
+    /// later, and (c) dependent libraries pulled in via `.deplibs` are extracted after all of the
+    /// `initial_count` command-line inputs (and anything they recursively pulled in), in the order
+    /// in which they were discovered, mirroring ld.lld appending them to the end of the input list.
     fn extract_all<P: Platform>(
         &mut self,
         files: &mut [Option<LoadedFileState<'data, P, F::Input>>],
         plugin: &mut Option<LinkerPlugin<'data>>,
+        initial_count: usize,
     ) -> Result<LoadedInputs<'data, P>> {
         let mut loaded = LoadedInputs {
             objects: Vec::with_capacity(files.len()),
@@ -392,8 +430,25 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
             lto_objects: Vec::new(),
         };
 
+        let mut pending = VecDeque::new();
+
+        // Pass 1: the original command-line inputs, in order.
+        for i in 0..initial_count {
+            self.extract_file(FileLoadIndex(i), files, &mut loaded, plugin, &mut pending)?;
+        }
+
+        // Pass 2: dependent libraries discovered while extracting the command-line inputs above.
+        // Extracting one can itself enqueue further dependent libraries, e.g. if the resolved file
+        // is a linker script (glibc's `libm.so` is a `GROUP` script) or another object with its own
+        // `.deplibs`, so we drain the queue rather than iterating a fixed range.
+        while let Some(index) = pending.pop_front() {
+            self.extract_file(index, files, &mut loaded, plugin, &mut pending)?;
+        }
+
+        // Pass 3: safety net for any other index we haven't reached above. Already-extracted
+        // entries have been replaced with `None` by `core::mem::take` and are cheap no-ops here.
         for i in 0..files.len() {
-            self.extract_file(FileLoadIndex(i), files, &mut loaded, plugin)?;
+            self.extract_file(FileLoadIndex(i), files, &mut loaded, plugin, &mut pending)?;
         }
 
         Ok(loaded)
@@ -405,15 +460,17 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
         files: &mut [Option<LoadedFileState<'data, P, F::Input>>],
         loaded: &mut LoadedInputs<'data, P>,
         plugin: &mut Option<LinkerPlugin<'data>>,
+        pending: &mut VecDeque<FileLoadIndex>,
     ) -> Result {
         match core::mem::take(&mut files[index.0]) {
             None => {}
-            Some(LoadedFileState::Loaded(input_file, parse_result)) => {
+            Some(LoadedFileState::Loaded(input_file, parse_result, deplib_indexes)) => {
                 if parse_result.is_dynamic_object() {
                     self.has_dynamic = true;
                 }
                 loaded.add_record(parse_result, plugin);
                 self.loaded_files.push(input_file);
+                pending.extend(deplib_indexes);
             }
             Some(LoadedFileState::Archive(input_file, parsed_parts)) => {
                 loaded.add_records(parsed_parts, plugin);
@@ -431,7 +488,7 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
                     .push(loaded_linker_script_state.script);
 
                 for i in loaded_linker_script_state.file_indexes {
-                    self.extract_file(i, files, loaded, plugin)?;
+                    self.extract_file(i, files, loaded, plugin, pending)?;
                 }
             }
             Some(LoadedFileState::StubLibrary(input_file, defined_stub_library)) => {
@@ -635,7 +692,9 @@ fn process_fat_macho_object<'data, P: Platform, F: FileSystem>(
         FileKind::Archive => process_archive(file, &input_ref, native_file, state),
         FileKind::MachOObject | FileKind::MachODylib => {
             let parsed = state.process_input(input_ref, native_file, kind)?;
-            Ok(LoadedFileState::Loaded(file, parsed))
+            // Mach-O objects never carry `.deplibs` (that's an ELF/LLVM-specific section), so
+            // there are never any dependent libraries to record here.
+            Ok(LoadedFileState::Loaded(file, parsed, Vec::new()))
         }
         _ => bail!("Unsupported file type {kind} found in FAT object"),
     }
@@ -737,7 +796,48 @@ impl<'data, P: Platform, F: FileSystem> TemporaryState<'data, P, F> {
                     path = absolute_path.to_string_lossy().to_string()
                 );
                 let parsed = self.process_input(input_ref, file.as_ref(), kind)?;
-                Ok(LoadedFileState::Loaded(input_file, parsed))
+
+                let mut deplib_indexes = Vec::new();
+
+                // ld.lld only honours `.deplibs` (`SHT_LLVM_DEPENDENT_LIBRARIES`) while parsing a
+                // relocatable object that isn't itself being combined with `-r`/`--relocatable`,
+                // and it doesn't honour them for objects extracted with `--start-lib` semantics
+                // (`archive_semantics`) either. Archive members and thin-archive entries never
+                // reach this arm (they're handled by `process_archive`/`process_thin_archive`), so
+                // they're naturally excluded here too.
+                //
+                // Known limitations: archive members, lazy objects and LTO bitcode inputs can also
+                // carry `.deplibs` (lld reads them once such a member is extracted); here we only
+                // honour `.deplibs` for objects that are unconditionally loaded from the
+                // command-line or a linker script. There's also no `--no-dependent-libraries`
+                // switch yet; when one is added to the Args trait it should gate this block.
+                if !self.args.should_output_partial_object()
+                    && !input_file.modifiers.archive_semantics
+                    && let InputRecord::Object(Ok(obj)) = &parsed
+                {
+                    for spec in obj.object.dependent_libraries()? {
+                        let Some(input) = dependent_library_input(
+                            spec,
+                            self.deplib_modifiers,
+                            self.args,
+                            self.file_system.as_ref(),
+                        ) else {
+                            bail!(
+                                "{}: unable to find library from dependent library specifier: {}",
+                                absolute_path.display(),
+                                String::from_utf8_lossy(spec)
+                            );
+                        };
+
+                        deplib_indexes.push(self.load_input(
+                            &input,
+                            scope,
+                            Some(absolute_path.clone()),
+                        )?);
+                    }
+                }
+
+                Ok(LoadedFileState::Loaded(input_file, parsed, deplib_indexes))
             }
         }
     }
@@ -988,6 +1088,61 @@ fn search_for_file(
     None
 }
 
+/// Resolves a `.deplibs` specifier (from an ELF object's `SHT_LLVM_DEPENDENT_LIBRARIES` section)
+/// into an extra input to load, following ld.lld's `addDependentLibrary` (lld/ELF/Driver.cpp):
+///
+/// ```text
+/// if (!ctx.arg.dependentLibraries) return;
+/// if (auto s = searchLibraryBaseName(ctx, specifier)) addFile(*s, /*withLOption=*/true);   // -l<spec>
+/// else if (auto s = findFromSearchPaths(ctx, specifier)) addFile(*s, true);               // <dir>/<spec>
+/// else if (fs::exists(specifier)) addFile(specifier, false);                               // path as given
+/// else ErrAlways(ctx) << f << ": unable to find library from dependent library specifier: " << specifier;
+/// ```
+///
+/// i.e. we first try to resolve `spec` as though it had been passed as `-l<spec>` (so e.g. `m`
+/// resolves to `libm.so`/`libm.a`), then as a bare filename on the library search path, then as a
+/// path relative to the current directory (or absolute). Returns `None` if none of those resolve,
+/// or if `spec` isn't valid UTF-8, in which case the caller is expected to report lld's wording of
+/// the error, naming the object that referenced the specifier.
+fn dependent_library_input(
+    spec: &[u8],
+    modifiers: Modifiers,
+    args: &impl platform::Args,
+    file_system: &impl FileSystem,
+) -> Option<Input> {
+    let spec_str = std::str::from_utf8(spec).ok()?;
+
+    // As though `-l<spec>` had been passed on the command line.
+    let lib_input = Input {
+        spec: InputSpec::Lib(Box::from(spec_str)),
+        search_first: None,
+        modifiers,
+    };
+    if lib_input.path(args, file_system).is_ok() {
+        return Some(lib_input);
+    }
+
+    // As a bare filename on the library search path.
+    if search_for_file(file_system, args.lib_search_path(), None, spec_str).is_some() {
+        return Some(Input {
+            spec: InputSpec::Search(Box::from(spec_str)),
+            search_first: None,
+            modifiers,
+        });
+    }
+
+    // As a path, relative to the current directory or absolute.
+    if file_system.file_type(Path::new(spec_str)).is_ok() {
+        return Some(Input {
+            spec: InputSpec::File(Box::from(Path::new(spec_str))),
+            search_first: None,
+            modifiers,
+        });
+    }
+
+    None
+}
+
 const FILE_INDEX_BITS: u32 = 8;
 pub(crate) const MAX_FILES_PER_GROUP: u32 = 1 << FILE_INDEX_BITS;
 
@@ -1166,4 +1321,49 @@ mod tests {
 
         assert_eq!(error.to_string(), "member 3 failed");
     }
+}
+
+/// Exercises the resolution order documented on `dependent_library_input`: `-l<spec>` first,
+/// then a bare filename on the search path, then nothing.
+///
+/// Uses `OsFileSystem` against real files in a temp directory (rather than a hand-rolled
+/// `FileSystem` test double) since `dependent_library_input` calls through to `Input::path`,
+/// which is generic over `impl FileSystem`, and the ELF `ElfArgs` type (which already has
+/// a usable `Default` impl - see `layout::test_no_disallowed_overlaps`) as a real
+/// `impl platform::Args`, so no test-only double is needed for either.
+#[test]
+fn dependent_library_input_resolves_in_lld_order() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+    // Resolves via the `-l<spec>` (`InputSpec::Lib`) path, matching lld's
+    // `searchLibraryBaseName`.
+    std::fs::write(dir.path().join("libfoo.a"), b"").unwrap();
+
+    // Not a valid `-l` match (there's no `libfoo.x.*`), but found as a bare filename on the
+    // search path, matching lld's `findFromSearchPaths`.
+    std::fs::write(dir.path().join("foo.x"), b"").unwrap();
+
+    let mut args = crate::args::elf::ElfArgs::default();
+    args.lib_search_path.push(Box::from(dir.path()));
+
+    let file_system = crate::OsFileSystem::new();
+    let modifiers = Modifiers::default();
+
+    match dependent_library_input(b"foo", modifiers, &args, &file_system) {
+        Some(Input {
+            spec: InputSpec::Lib(name),
+            ..
+        }) => assert_eq!(&*name, "foo"),
+        other => panic!("expected InputSpec::Lib, got {other:?}"),
+    }
+
+    match dependent_library_input(b"foo.x", modifiers, &args, &file_system) {
+        Some(Input {
+            spec: InputSpec::Search(name),
+            ..
+        }) => assert_eq!(&*name, "foo.x"),
+        other => panic!("expected InputSpec::Search, got {other:?}"),
+    }
+
+    assert!(dependent_library_input(b"does-not-exist", modifiers, &args, &file_system).is_none());
 }
