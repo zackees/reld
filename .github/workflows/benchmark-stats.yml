@@ -34,8 +34,80 @@ permissions:
   contents: read
 
 jobs:
+  # Cross-compile the Windows and macOS release front doors on ubuntu via the
+  # blessed soldr front door (reld#59 leg 2 / reld#168), mirroring cross-ship.yml's
+  # cross-build job. No compiler toolchain is installed here — setup-soldr's
+  # `cross-targets` runs `soldr prepare`, which owns compiler/linker/SDK/sysroot
+  # selection. The Linux benchmark leg keeps building natively: it is cheap, and
+  # it is the native-engine measurement.
+  cross-build-benchmark-driver:
+    name: Cross-build reld front door (linux -> ${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: >-
+          ${{ fromJSON(
+            (github.event_name == 'schedule' || inputs.platforms == 'all' || startsWith(github.ref_name, 'perf/all/'))
+            && '[{"name":"windows-msvc","target":"x86_64-pc-windows-msvc","bin":"reld-link","artifact":"benchmark-driver-windows-msvc","executable":"reld-link.exe"},{"name":"macos-arm64","target":"aarch64-apple-darwin","bin":"reld","artifact":"benchmark-driver-macos-arm64","executable":"ld64.reld"}]'
+            || (inputs.platforms == 'windows' || startsWith(github.ref_name, 'perf/windows/'))
+            && '[{"name":"windows-msvc","target":"x86_64-pc-windows-msvc","bin":"reld-link","artifact":"benchmark-driver-windows-msvc","executable":"reld-link.exe"}]'
+            || (inputs.platforms == 'macos' || startsWith(github.ref_name, 'perf/macos/'))
+            && '[{"name":"macos-arm64","target":"aarch64-apple-darwin","bin":"reld","artifact":"benchmark-driver-macos-arm64","executable":"ld64.reld"}]'
+            || '[]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Soldr (prepare cross toolchain)
+        id: setup
+        uses: zackees/setup-soldr@main
+        with:
+          version: 0.9.18
+          cross-targets: ${{ matrix.target }}
+          linker: fast
+          cache: true
+          cache-preset: full
+          prebuild-deps: soldr-cook
+
+      - name: Cross-compile reld front door via blessed front door
+        shell: bash
+        run: |
+          set -euxo pipefail
+          soldr build --package reld --bin ${{ matrix.bin }} --release --locked \
+            --target "${{ matrix.target }}"
+          mkdir -p package
+          built="$(find "target/${{ matrix.target }}/release" -maxdepth 1 -type f \
+            \( -name '${{ matrix.bin }}' -o -name '${{ matrix.bin }}.exe' \) -print -quit)"
+          test -n "$built"
+          cp "$built" "package/${{ matrix.executable }}"
+
+      - name: Verify cross artifact format
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s "package/${{ matrix.executable }}"
+          file "package/${{ matrix.executable }}"
+          case "${{ matrix.target }}" in
+            x86_64-pc-windows-msvc) file "package/${{ matrix.executable }}" | grep -q 'PE32' ;;
+            aarch64-apple-darwin)   file "package/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/${{ matrix.executable }}
+          if-no-files-found: error
+
   benchmark:
     name: Generate ${{ matrix.target }} benchmark
+    needs: cross-build-benchmark-driver
+    # cross-build-benchmark-driver's matrix is empty when only the Linux leg was
+    # requested, which reports skipped rather than success; run regardless (reld#168).
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -135,24 +207,36 @@ jobs:
           uv run --no-sync python -m ci.benchmark_baseline
           --output target/issue74-baseline/reld
 
-      - name: Build Windows COFF reld front door
+      - name: Download Windows COFF reld front door (cross-built)
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-driver-windows-msvc
+          path: target/release
+
+      - name: Verify downloaded Windows COFF reld front door
         if: runner.os == 'Windows'
         shell: bash
-        env:
-          CARGO_COMMAND: cargo
-        run: uv run --no-sync python -m ci.windows_ci build-benchmark-driver
-
-      - name: Build macOS Mach-O reld front door
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          CARGO_COMMAND: cargo
         run: |
           set -euo pipefail
-          $CARGO_COMMAND build --release -p reld --bin reld
-          bash ci/install-driver-shims.sh release
+          test -f target/release/reld-link.exe
+          echo "Using cross-built COFF bridge driver: target/release/reld-link.exe"
+
+      - name: Download macOS Mach-O reld front door (cross-built)
+        if: runner.os == 'macOS'
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-driver-macos-arm64
+          path: target/release
+
+      - name: Verify downloaded macOS Mach-O reld front door
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x target/release/ld64.reld
           test -x target/release/ld64.reld
-          echo "Using Mach-O bridge driver: target/release/ld64.reld"
+          echo "Using cross-built Mach-O bridge driver: target/release/ld64.reld"
 
       - name: Run benchmark
         shell: bash

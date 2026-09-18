@@ -61,7 +61,6 @@ def test_benchmark_workflow_gates_expected_linker_coverage():
     assert "pwsh" not in text.lower()
     assert "powershell" not in text.lower()
     assert "uv run --no-sync python -m ci.windows_ci install-benchmark-linkers" in text
-    assert "uv run --no-sync python -m ci.windows_ci build-benchmark-driver" in text
     assert "uv run --no-sync python -m ci.benchmark_runner" in text
     assert "uv run --no-sync python -m ci.free_runner_disk" in text
     assert '"GITHUB_ACTIONS=$GITHUB_ACTIONS"' in text
@@ -114,3 +113,32 @@ def test_benchmark_workflow_provisions_uv_and_has_no_bare_python_invocations():
     for line in text.splitlines():
         stripped = line.strip()
         assert not stripped.startswith(("python ", "python3 "))
+
+
+def test_benchmark_workflow_cross_builds_windows_and_macos_drivers():
+    text = WORKFLOW.read_text()
+
+    # reld#168: the Windows and macOS legs must not compile the product themselves. The
+    # front door is cross-built once on cheap ubuntu runners (mirrors cross-ship.yml) and
+    # shipped in as an artifact; only the Linux leg still builds natively.
+    assert "cross-build-benchmark-driver:" in text
+    assert "needs: cross-build-benchmark-driver" in text
+    assert "zackees/setup-soldr@main" in text
+    assert "soldr build --package reld --bin ${{ matrix.bin }}" in text
+    assert '"bin":"reld-link"' in text
+    assert '"bin":"reld"' in text
+    assert "benchmark-driver-windows-msvc" in text
+    assert "benchmark-driver-macos-arm64" in text
+    assert "name: benchmark-driver-windows-msvc" in text
+    assert "name: benchmark-driver-macos-arm64" in text
+
+    # The old on-host product builds for Windows/macOS must be gone; the Linux leg's own
+    # native build (no --bin flag) is untouched and must not be matched by these checks.
+    assert "uv run --no-sync python -m ci.windows_ci build-benchmark-driver" not in text
+    assert "Build Windows COFF reld front door" not in text
+    assert "Build macOS Mach-O reld front door" not in text
+    assert "$CARGO_COMMAND build --release -p reld --bin reld" not in text
+    assert "Download Windows COFF reld front door" in text
+    assert "Download macOS Mach-O reld front door" in text
+    assert "actions/download-artifact@v4" in text
+    assert text.count("if-no-files-found: error") == 3
