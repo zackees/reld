@@ -6,7 +6,12 @@
 //#Object:runtime.c
 //#ReferenceLinkers:
 //#Mode:dynamic
-//#Shared:copy-relocation-relro-lib.c
+// Direct (non-PIC) access is what forces a copy relocation. Default codegen reaches the data
+// through the GOT; x86_64's GOTPCRELX relaxation happened to turn that into a copy relocation,
+// but aarch64 keeps the GOT, so without this the test only exercised copy relocations on x86_64
+// (found by the aarch64 leg, reld#194). The library stays PIC through its per-file args.
+//#CompArgs:-fno-pic -fno-pie
+//#Shared:copy-relocation-relro-lib.c:-fPIC
 //#ExpectSym:ro_value section=".data.rel.ro"
 //#ExpectSym:rw_value section=".bss"
 

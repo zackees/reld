@@ -39,11 +39,11 @@
 //#Config:llvm-dynamic:default
 //#SkipArch: ppc64le
 //#CompArgs:-C debuginfo=2
-//#DiffIgnore:debug_info.missing_unit #13 arch=aarch64,riscv64,loongarch64
+//#DiffIgnore:debug_info.missing_unit #13 arch=riscv64,loongarch64
 // RISC-V BFD keeps multiple .dynsym symbols.
 //#DiffIgnore:dynsym.* #13 arch=riscv64
 //#DiffIgnore:.dynamic.DT_JMPREL #13
-//#DiffIgnore:.dynamic.DT_PLTGOT #13 arch=aarch64,riscv64,loongarch64
+//#DiffIgnore:.dynamic.DT_PLTGOT #13 arch=riscv64,loongarch64
 //#DiffIgnore:.dynamic.DT_PLTREL #13
 
 fn foo() {

@@ -1,5 +1,5 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.data #13 arch=aarch64,loongarch64
+//#DiffIgnore:section.data #13 arch=loongarch64
 
 //#Config:gcc-tls-desc:default
 //#CompArgs:-mtls-dialect=gnu2 -fPIC -O2
@@ -40,8 +40,13 @@
 //#RequiresCompilerFlags:-mtls-dialect=gnu2
 //#Arch: x86_64
 
-//#Config:clang-tls-desc-desc:clang-tls-desc
-//#CompArgs:-mtls-dialect=desc -fPIC
+// Based on the gcc desc variant, not clang-tls-desc: RequiresCompilerFlags accumulates, and the
+// parent's x86-only `-mtls-dialect=gnu2` requirement would otherwise fail on aarch64.
+//#Config:clang-tls-desc-desc:gcc-tls-desc-desc
+//#Compiler:clang
+// TLS descriptors are aarch64's default dialect, and clang before 19 rejects `-mtls-dialect=` for
+// aarch64, so no dialect flag: this still exercises clang's TLSDESC codegen there.
+//#CompArgs:-fPIC
 //#SkipArch: x86_64,riscv64
 
 //#Config:clang-tls-desc-shared:clang-tls-desc
@@ -49,8 +54,9 @@
 //#Shared:tlsdesc-obj.c
 //#Arch: x86_64
 
-//#Config:clang-tls-desc-shared-desc:clang-tls-desc-shared
-//#CompArgs:-mtls-dialect=desc -fPIC
+//#Config:clang-tls-desc-shared-desc:gcc-tls-desc-shared-desc
+//#Compiler:clang
+//#CompArgs:-fPIC
 //#SkipArch: x86_64,riscv64
 
 int get_value();

@@ -1,7 +1,6 @@
 //#AbstractConfig:default
 //#LinkerDriver:gcc
-//#DiffIgnore:section.rodata.alignment #13 arch=aarch64,riscv64,loongarch64
-//#DiffIgnore:rel.match_failed.R_AARCH64_TLSGD_ADR_PAGE21 #13
+//#DiffIgnore:section.rodata.alignment #13 arch=riscv64,loongarch64
 
 //#Config:gcc:default
 //#CompArgs:-fpic
@@ -23,8 +22,11 @@
 //#Object:tls-variant-2.c:-ftls-model=global-dynamic -mtls-dialect=trad
 //#Object:tls-variant-3.c:-ftls-model=initial-exec -mtls-dialect=trad
 //#SkipArch: x86_64,riscv64,ppc64le
+//#DiffIgnore:rel.match_failed.R_AARCH64_TLSGD_ADR_PAGE21 #13 arch=aarch64
 
 //#Config:gcc-shared-tls-trad:default
+// Each linker's output names its own build of the helper .so (`*.reld.so` vs `*.ld.so`).
+//#DiffIgnore:.dynamic.DT_NEEDED #13 arch=aarch64
 //#CompArgs:-fpic
 //#Shared:tls-variant-1.c,tls-variant-2.c:-ftls-model=global-dynamic -mtls-dialect=trad,tls-variant-3.c:-ftls-model=initial-exec -mtls-dialect=trad
 //#SkipArch: x86_64

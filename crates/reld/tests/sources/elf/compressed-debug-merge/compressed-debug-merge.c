@@ -3,7 +3,7 @@
 //#Compiler:clang
 //#CompArgs:-g -gdwarf-5
 //#Object:runtime.c
-//#DiffIgnore:section.eh_frame.type #13
+//#DiffIgnore:section.eh_frame.type #13 arch=x86_64
 
 //#Config:zlib:default
 //#LinkArgs:--compress-debug-sections=zlib

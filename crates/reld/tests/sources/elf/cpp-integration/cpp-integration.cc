@@ -1,6 +1,5 @@
 //#AbstractConfig:default
 // On aarch64, GNU ld puts the copy relocation for this symbol in .data.rel.ro rather than .bss.
-//#DiffIgnore:dynsym.__stack_chk_guard.section #13 arch=aarch64
 //#Object:cpp-integration-2.cc
 //#DiffMatchAny:true
 
@@ -17,6 +16,7 @@
 //#LinkerDriver:g++
 //#LinkArgs:-no-pie -Wl,-z,now
 //#ReferenceLinkers:bfd,lld
+//#DiffIgnore:dynsym.__stack_chk_guard.section #13 arch=aarch64
 // TODO(#13): Reld omits the empty .data section emitted by both reference linkers.
 
 //#Config:static-no-relax:default

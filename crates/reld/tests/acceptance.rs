@@ -848,6 +848,12 @@ const ALL_ARCHITECTURES: &[Architecture] = &[
 ];
 
 impl Architecture {
+    /// Architectures with a native CI acceptance leg (reld#194). The others stay compiled but are
+    /// not claimed as supported; see README.md "ELF architecture support".
+    fn is_ci_verified(&self) -> bool {
+        matches!(self, Architecture::X86_64 | Architecture::AArch64)
+    }
+
     fn emulation_name(&self) -> &'static str {
         match self {
             Architecture::X86_64 => "x86_64",
@@ -6541,6 +6547,22 @@ fn check_unexpected_intermediate_output(
     Ok(())
 }
 
+/// Explains why `arch` is being skipped on `host_arch`, distinguishing architectures that have a
+/// native CI acceptance leg (reld#194) from those that are compiled but never verified.
+fn architecture_ignore_reason(arch: Architecture, host_arch: Architecture) -> String {
+    if arch.is_ci_verified() {
+        format!(
+            "Architecture disabled: {arch} is verified on its own native CI leg, not on this \
+             {host_arch} host (reld#194)"
+        )
+    } else {
+        format!(
+            "Architecture unverified: {arch} has no CI acceptance leg; fixtures compile but reld \
+             does not claim {arch} support (reld#194)"
+        )
+    }
+}
+
 fn run_integration_test(
     arch: Architecture,
     program_inputs: &ProgramInputs,
@@ -6555,7 +6577,7 @@ fn run_integration_test(
 
     if arch != host_arch && !test_config.qemu_arch.contains(&arch) {
         return Ok(libtest_mimic::Completion::ignored_with(
-            "Architecture disabled",
+            architecture_ignore_reason(arch, host_arch),
         ));
     }
 

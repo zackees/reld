@@ -45,6 +45,8 @@
 //#Config:gcc-indirect-external:default
 //#CompArgs:-fPIE -mno-direct-extern-access
 //#RequiresCompilerFlags:-mno-direct-extern-access
+// -mno-direct-extern-access is an x86 GCC option.
+//#Arch: x86_64
 // TODO(#13): Reld omits the empty .rodata section emitted by BFD.
 
 int main() { return 42; }

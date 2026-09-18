@@ -1,12 +1,15 @@
 """Publish deterministic Phase-1 test counts and reference-linker versions.
 
 Counts both libtest `test result: ok. N passed; ...` summaries and
-`cargo nextest run` `Summary [...] N tests run: ...` summaries.
+`cargo nextest run` `Summary [...] N tests run: ...` summaries. Also tallies
+why libtest/libtest-mimic tests were skipped, so the published summary shows
+a reason breakdown (e.g. unverified architectures) instead of a bare count.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 import re
 from pathlib import Path
@@ -22,6 +25,11 @@ NEXTEST_RESULT = re.compile(
     r"Summary \[\s*[\d.]+s\]\s+(?P<run>\d+)(?:/\d+)? tests? run:(?P<rest>[^\n]*)"
 )
 ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+IGNORE_REASON = re.compile(
+    r"^test (?P<name>\S+) \.\.\. ignored(?:, (?P<reason>.+?))?\s*$", re.MULTILINE
+)
+NO_REASON_GIVEN = "(no reason given)"
+MAX_REASON_LENGTH = 160
 
 
 def counts(text: str) -> tuple[int, int]:
@@ -37,6 +45,31 @@ def counts(text: str) -> tuple[int, int]:
         skip_match = re.search(r"(?P<skip>\d+) skipped", match.group("rest"))
         skipped += int(skip_match.group("skip")) if skip_match else 0
     return run, skipped
+
+
+def skip_reasons(text: str) -> collections.Counter[str]:
+    text = ANSI_CSI.sub("", text)
+    reasons: collections.Counter[str] = collections.Counter()
+    for match in IGNORE_REASON.finditer(text):
+        reason = match.group("reason")
+        reasons[reason.strip() if reason else NO_REASON_GIVEN] += 1
+    return reasons
+
+
+def _format_reason(reason: str) -> str:
+    if len(reason) > MAX_REASON_LENGTH:
+        reason = f"{reason[:MAX_REASON_LENGTH]}..."
+    return reason.replace("|", "\\|")
+
+
+def _render_skip_reasons(reasons: collections.Counter[str]) -> str:
+    if not reasons:
+        return ""
+    rows = "\n".join(
+        f"| {_format_reason(reason)} | {count} |"
+        for reason, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0]))
+    )
+    return f"Skipped by reason:\n\n| Reason | Tests |\n|---|---:|\n{rows}\n\n"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -69,6 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         exact_totals[Path(path)] = int(value)
 
     run = skipped = 0
+    reasons: collections.Counter[str] = collections.Counter()
     missing_logs: list[Path] = []
     for log in args.log:
         if not log.is_file():
@@ -76,7 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise SystemExit(f"{args.job}: missing expected test log: {log}")
             missing_logs.append(log)
             continue
-        current_run, current_skipped = counts(log.read_text(encoding="utf-8", errors="replace"))
+        text = log.read_text(encoding="utf-8", errors="replace")
+        current_run, current_skipped = counts(text)
+        reasons.update(skip_reasons(text))
         if log in exact_totals:
             actual = current_run + current_skipped
             expected = exact_totals.pop(log)
@@ -100,7 +136,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     missing_note = ""
     if missing_logs:
         missing_note = f"\nMissing downstream logs: {', '.join(map(str, missing_logs))}\n"
-    summary = f"### Phase 1: {args.job}{status}\n\n| Tests run | Tests skipped |\n|---:|---:|\n| {run} | {skipped} |\n{missing_note}\nPinned reference versions:\n\n```text\n{versions}\n```\n"
+    reason_section = _render_skip_reasons(reasons)
+    summary = f"### Phase 1: {args.job}{status}\n\n| Tests run | Tests skipped |\n|---:|---:|\n| {run} | {skipped} |\n{missing_note}\n{reason_section}Pinned reference versions:\n\n```text\n{versions}\n```\n"
     print(summary)
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary_path).open("a", encoding="utf-8") as handle:

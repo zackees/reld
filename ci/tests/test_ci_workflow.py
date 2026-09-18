@@ -28,13 +28,14 @@ def test_ci_caches_linux_reference_linkers():
     # Linker downloads are cache-gated via actions/cache keyed on pinned versions.
     assert "actions/cache@v4" in text
     assert "reld-linker-cache" in text
-    assert "key: linkers-${{ runner.os }}-mold${{ env.MOLD_VERSION }}" in text
+    assert "key: linkers-${{ runner.os }}-${{ runner.arch }}-mold${{ env.MOLD_VERSION }}" in text
 
     # The heavy download work is delegated to the Python cache-gated script.
     assert "uv run --no-sync python ci/linker_setup.py" in text
     assert "--cache-dir" in text
     assert "--install-debs" in text
     assert "--link-clang" in text
+    assert '--arch "${{ matrix.arch }}"' in text
 
 
 def test_ci_cross_compiles_release_on_linux():
@@ -150,6 +151,40 @@ def test_phase1_msvc_and_macos_compile_on_linux_and_only_replay_on_target():
     assert f'PHASE1_NATIVE_FILTER: "{windows_ci.PHASE1_NATIVE_FILTER}"' in text
 
 
+def test_phase1_native_runs_aarch64_acceptance_on_a_native_arm_runner():
+    text = WORKFLOW.read_text()
+    native = _job_blocks(text)["phase1-native"]
+
+    # The aarch64 leg is a native ubuntu-24.04-arm runner (mirrors release.yml),
+    # not an emulated/cross-compiled leg, targeting the arm64 Ubuntu ports archive.
+    assert "linux-gnu aarch64" in native
+    assert "os: ubuntu-24.04-arm" in native
+    assert "target: aarch64-unknown-linux-gnu" in native
+    assert "musl_target: aarch64-unknown-linux-musl" in native
+    assert "ports.ubuntu.com/ubuntu-ports" in native
+    assert "--job linux-gnu-aarch64" in native
+
+    # It runs the wild ELF acceptance suite (reld#194's scope) and the LTO
+    # reference fixtures, parameterized on matrix.arch rather than hard-coded
+    # to x86_64.
+    assert '$CARGO_COMMAND test -p reld --test acceptance 2>&1 | tee acceptance-tests.log' in native
+    assert "elf/${{ matrix.arch }}/wrap-lto/clang" in native
+    assert "elf/x86_64/wrap-lto/clang" not in native
+
+
+def test_phase1_x86_64_linux_summary_is_unchanged():
+    text = WORKFLOW.read_text()
+
+    # The x86_64 leg's published summary arguments are byte-for-byte unchanged
+    # by the aarch64 leg's addition (only the cache key differs, per its own test).
+    assert (
+        "ci/phase1_summary.py --job linux-gnu\n"
+        "          --log platform-tests.log --log acceptance-tests.log --log difftest.log"
+    ) in text
+    assert "--minimum-run 507" in text
+    assert "--exact-log-total difftest.log=100 --exact-log-total external-tests.log=407" in text
+
+
 def test_phase1_summary_only_relaxes_missing_log_validation_after_failure():
     text = WORKFLOW.read_text()
 
@@ -160,4 +195,4 @@ def test_phase1_summary_only_relaxes_missing_log_validation_after_failure():
     assert "if: failure()" in text
     assert "PHASE1_UPSTREAM_FAILED=true" in text
     assert "PHASE1_UPSTREAM_FAILED: ${{ failure() }}" not in text
-    assert text.count("--upstream-failed") == 4
+    assert text.count("--upstream-failed") == 5

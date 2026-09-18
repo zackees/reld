@@ -4,6 +4,9 @@
 //#SkipArch: ppc64le
 //#CompArgs:-fPIC -ftls-model=global-dynamic
 //#LinkArgs:-shared -z now
+// On aarch64 reld reaches the copied data through .rela.dyn where GNU ld routes it through a PLT.
+//#DiffIgnore:.dynamic.DT_RELA #13 arch=aarch64
+//#DiffIgnore:.dynamic.DT_RELAENT #13 arch=aarch64
 //#RunEnabled:false
 
 // We use a large alignment here so that it's almost certain that padding will need to be added
