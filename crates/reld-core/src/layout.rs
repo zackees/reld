@@ -1437,6 +1437,11 @@ pub(crate) struct GraphResources<'data, 'scope, P: Platform> {
 
     errors: Mutex<Vec<Error>>,
 
+    /// Undefined-symbol references collected while scanning relocations. These are grouped by
+    /// symbol and reported, one diagnostic per symbol, by `report_undefined_symbols` once
+    /// activation has finished. See `check_for_undefined`.
+    undefined_references: Mutex<Vec<PendingUndefinedReference>>,
+
     pub(crate) per_symbol_flags: &'scope AtomicPerSymbolFlags<'scope>,
 
     /// Sections that we'll keep, even if their total size is zero.
@@ -1462,6 +1467,17 @@ pub(crate) struct GraphResources<'data, 'scope, P: Platform> {
     delay_processing: ArrayQueue<GroupState<'data, P>>,
 
     pub(crate) layout_resources_ext: P::LayoutResourcesExt<'data>,
+}
+
+/// One undefined-symbol reference recorded while scanning relocations, pending grouping by symbol
+/// once all objects have been activated. See `check_for_undefined` and `report_undefined_symbols`.
+struct PendingUndefinedReference {
+    symbol_id: SymbolId,
+    visibility: Visibility,
+    /// Orders references within a symbol's group the way `lld` does: by the file that contains the
+    /// reference, then by section and offset within that file.
+    sort_key: (FileId, usize, u64),
+    reference: crate::diagnostic::UndefinedReference,
 }
 
 pub(crate) struct FinaliseLayoutResources<'scope, 'data, P: Platform> {
@@ -2346,6 +2362,7 @@ fn find_required_sections<'data, A: Arch>(
         output_sections,
         worker_slots,
         errors: Mutex::new(Vec::new()),
+        undefined_references: Mutex::new(Vec::new()),
         per_symbol_flags,
         must_keep_sections: output_sections.new_section_map(),
         has_static_tls: AtomicBool::new(false),
@@ -2362,6 +2379,8 @@ fn find_required_sections<'data, A: Arch>(
     rayon::in_place_scope(|scope| {
         queue_initial_group_processing::<A>(groups_in, symbol_db, resources_ref, scope);
     });
+
+    report_undefined_symbols(&resources, symbol_db);
 
     let mut errors: Vec<Error> = take(resources.errors.lock().unwrap().as_mut());
     // TODO: Figure out good way to report more than one error.
@@ -2398,6 +2417,69 @@ fn find_required_sections<'data, A: Arch>(
         has_variant_pcs: resources.has_variant_pcs.load(atomic::Ordering::Relaxed),
         thunk_layout_builder: resources.thunk_layout_builder,
     })
+}
+
+/// Groups the undefined-symbol references recorded by `check_for_undefined` by symbol and reports
+/// one diagnostic per symbol, following `lld`'s layout. Ordering is deterministic: symbols are
+/// grouped in `SymbolId` order and, within a group, references are ordered by the file, section
+/// and offset that produced them.
+fn report_undefined_symbols<'data, P: Platform>(
+    resources: &GraphResources<'data, '_, P>,
+    symbol_db: &SymbolDb<'data, P>,
+) {
+    let mut pending: Vec<PendingUndefinedReference> =
+        take(resources.undefined_references.lock().unwrap().as_mut());
+
+    if pending.is_empty() {
+        return;
+    }
+
+    pending.sort_by_key(|entry| (entry.symbol_id, entry.sort_key));
+
+    let mut messages = Vec::new();
+    let mut pending = pending.into_iter().peekable();
+
+    while let Some(first) = pending.next() {
+        let symbol_id = first.symbol_id;
+        let mut visibility = first.visibility;
+        let mut refs = vec![first.reference];
+
+        while let Some(next) = pending.next_if(|next| next.symbol_id == symbol_id) {
+            visibility = visibility.max(next.visibility);
+            refs.push(next.reference);
+        }
+
+        let prefix = match visibility {
+            Visibility::Hidden => "hidden ",
+            Visibility::Protected => "protected ",
+            Visibility::Default => "",
+        };
+
+        let total_references = refs.len();
+        let shown = crate::diagnostic::MAX_UNDEFINED_REFERENCES.min(total_references);
+
+        messages.push(crate::diagnostic::undefined_symbol_message(
+            prefix,
+            &symbol_db.symbol_name_for_display(symbol_id),
+            &refs[..shown],
+            total_references,
+        ));
+    }
+
+    if symbol_db.args.should_error_on_unresolved_symbols() {
+        // Report every symbol but the last immediately, then leave the last for the caller to
+        // return as the link-ending error, matching lld printing one `error:` per symbol.
+        if let Some(last) = messages.pop() {
+            for message in &messages {
+                crate::diagnostic::emit(crate::diagnostic::Severity::Error, message);
+            }
+            resources.report_error(Error::with_message(last));
+        }
+    } else {
+        for message in messages {
+            symbol_db.warning(message);
+        }
+    }
 }
 
 fn queue_initial_group_processing<'data, 'scope, A: Arch>(
@@ -3789,7 +3871,9 @@ fn create_internal_symbol_resolution<'data, P: Platform>(
     ))
 }
 
-/// Emits an undefined symbol error or warning if applicable.
+/// Records an undefined-symbol reference for later reporting if applicable. References are
+/// grouped by symbol and turned into `lld`-layout diagnostics by `report_undefined_symbols`, once
+/// all objects have been activated.
 pub(crate) fn check_for_undefined<A: Arch>(
     object: &ObjectLayoutState<A::Platform>,
     section: &<A::Platform as Platform>::SectionHeader,
@@ -3805,23 +3889,102 @@ pub(crate) fn check_for_undefined<A: Arch>(
         return Ok(());
     }
 
-    let symbol_name = symbol_db.symbol_name_for_display(symbol_id);
     let source_info = A::get_source_info(object.object, &object.relocations, section, rel_offset)
         .context("Failed to get source info")?;
+    let source = source_info
+        .0
+        .map(|details| crate::diagnostic::source_location(&details.path, details.line));
 
-    if symbol_db.args.should_error_on_unresolved_symbols() {
-        resources.report_error(error!(
-            "Undefined symbol {symbol_name}, referenced by {}\n    {}",
-            source_info, object.input,
-        ));
-    } else {
-        resources.symbol_db.warning(format!(
-            "Undefined symbol {symbol_name}, referenced by {}\n    {}",
-            source_info, object.input,
-        ));
-    }
+    let section_index = object
+        .object
+        .enumerate_sections()
+        .find(|(_, candidate)| std::ptr::eq(*candidate, section))
+        .map(|(index, _)| index);
+
+    let location = match section_index {
+        Some(index) => {
+            enclosing_symbol_name(object, index, rel_offset, symbol_db).unwrap_or_else(|| {
+                crate::diagnostic::section_offset_location(
+                    &object.object.section_display_name(index),
+                    rel_offset,
+                )
+            })
+        }
+        None => crate::diagnostic::section_offset_location("", rel_offset),
+    };
+
+    let (object_name, archive) = match &object.input.entry {
+        Some(entry) => (
+            String::from_utf8_lossy(entry.identifier.as_slice()).into_owned(),
+            Some(object.input.file.filename.display().to_string()),
+        ),
+        None => (object.input.file.filename.display().to_string(), None),
+    };
+
+    let visibility = object.object.symbol(local_sym_index)?.visibility();
+
+    let sort_key = (
+        object.file_id,
+        section_index.map_or(usize::MAX, |index| index.0),
+        rel_offset,
+    );
+
+    resources
+        .undefined_references
+        .lock()
+        .unwrap()
+        .push(PendingUndefinedReference {
+            symbol_id,
+            visibility,
+            sort_key,
+            reference: crate::diagnostic::UndefinedReference {
+                source,
+                object: object_name,
+                location,
+                archive,
+            },
+        });
 
     Ok(())
+}
+
+/// Finds the name of the symbol that encloses `rel_offset` within `section_index`, the way `lld`
+/// does: scan the file's symbol table in order, skip undefined, zero-sized and unnamed symbols,
+/// and return the first symbol whose range contains the offset. Errors from reading individual
+/// symbols are treated as a non-match rather than failing the link.
+fn enclosing_symbol_name<P: Platform>(
+    object: &ObjectLayoutState<P>,
+    section_index: object::SectionIndex,
+    rel_offset: u64,
+    symbol_db: &SymbolDb<P>,
+) -> Option<String> {
+    for (index, sym) in object.object.enumerate_symbols() {
+        if sym.is_undefined() || sym.size() == 0 || !sym.has_name() {
+            continue;
+        }
+
+        let Ok(Some(sym_section)) = object.object.symbol_section(sym, index) else {
+            continue;
+        };
+
+        if sym_section != section_index {
+            continue;
+        }
+
+        let Ok(start) = object.object.symbol_offset_in_section(sym, section_index) else {
+            continue;
+        };
+
+        if start <= rel_offset && rel_offset - start < sym.size() {
+            return Some(
+                symbol_db
+                    .symbol_name_for_display(object.symbol_id_range.input_to_id(index))
+                    .to_string(),
+            );
+        }
+    }
+
+    None
 }
 
 fn should_emit_undefined_error<P: Platform>(
@@ -5728,13 +5891,15 @@ impl<'data, P: Platform> DynamicLayoutState<'data, P> {
                         if should_report {
                             let symbol_name =
                                 resources.symbol_db.symbol_name_for_display(symbol_id);
+                            let message = crate::diagnostic::shlib_undefined_message(
+                                &symbol_name,
+                                &self.input,
+                            );
 
                             if args.should_error_on_unresolved_symbols() {
-                                bail!("undefined reference to `{symbol_name}` from {self}");
+                                bail!("{message}");
                             }
-                            resources.symbol_db.warning(format!(
-                                "undefined reference to `{symbol_name}` from {self}"
-                            ));
+                            resources.symbol_db.warning(message);
                         }
                     }
                 }

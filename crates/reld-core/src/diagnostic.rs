@@ -207,6 +207,85 @@ pub fn emit(severity: Severity, message: &dyn Display) {
     eprintln!("{}", render(severity, message));
 }
 
+/// One reference to an undefined symbol, in the pieces `ld.lld` prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UndefinedReference {
+    /// `file:line` from debug info, already rendered by [`source_location`]. `None` without DWARF.
+    pub(crate) source: Option<String>,
+    /// The referencing object as lld's `getObjMsg` names it: the path given for a plain object,
+    /// or the member name for an archive member.
+    pub(crate) object: String,
+    /// The enclosing defined symbol (display name) or `<section>+0x<offset>`.
+    pub(crate) location: String,
+    /// The archive path when `object` is an archive member.
+    pub(crate) archive: Option<String>,
+}
+
+/// lld prints at most this many references per undefined symbol (`maxUndefReferences`).
+pub(crate) const MAX_UNDEFINED_REFERENCES: usize = 3;
+
+/// Formats a `file:line` location the way lld's `createFileLineMsg` does: the file name alone
+/// when it already equals the full path, otherwise the file name followed by the full path in
+/// parentheses.
+pub(crate) fn source_location(path: &std::path::Path, line: u64) -> String {
+    let full = path.display().to_string();
+    let file = path
+        .file_name()
+        .map_or_else(|| full.clone(), |name| name.to_string_lossy().into_owned());
+    if file == full {
+        format!("{file}:{line}")
+    } else {
+        format!("{file}:{line} ({full}:{line})")
+    }
+}
+
+/// Formats a location with no debug info as `<section>+0x<offset>`, matching lld's fallback.
+pub(crate) fn section_offset_location(section: &str, offset: u64) -> String {
+    format!("{section}+0x{offset:x}")
+}
+
+/// Builds the body of an `undefined symbol` diagnostic, mirroring lld's `reportUndefinedSymbol`:
+/// the symbol name and visibility, then up to [`MAX_UNDEFINED_REFERENCES`] references, then a
+/// count of any references left unshown.
+pub(crate) fn undefined_symbol_message(
+    visibility_prefix: &str,
+    name: &dyn Display,
+    references: &[UndefinedReference],
+    total_references: usize,
+) -> String {
+    let mut message = format!("undefined {visibility_prefix}symbol: {name}");
+    let shown = references.len().min(MAX_UNDEFINED_REFERENCES);
+    for reference in &references[..shown] {
+        message.push_str("\n>>> referenced by ");
+        if let Some(source) = &reference.source {
+            message.push_str(source);
+            // Width of "referenced by ", so the object:(location) that follows lines up under it.
+            message.push_str("\n>>>");
+            message.push_str(&" ".repeat(15));
+        }
+        message.push_str(&format!("{}:({})", reference.object, reference.location));
+        if let Some(archive) = &reference.archive {
+            message.push_str(&format!(" in archive {archive}"));
+        }
+    }
+    if total_references > shown {
+        message.push_str(&format!(
+            "\n>>> referenced {} more times",
+            total_references - shown
+        ));
+    }
+    message
+}
+
+/// Builds the body of the `--no-allow-shlib-undefined` diagnostic, mirroring lld's Writer.cpp
+/// wording.
+pub(crate) fn shlib_undefined_message(name: &dyn Display, shared_object: &dyn Display) -> String {
+    format!(
+        "undefined reference: {name}\n>>> referenced by {shared_object} \
+         (disallowed by --no-allow-shlib-undefined)"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +444,105 @@ mod tests {
                 "--color-diagnostics=nope"
             ]),
             Some(ColorChoice::Never)
+        );
+    }
+
+    fn reference(source: Option<&str>, object: &str, location: &str) -> UndefinedReference {
+        UndefinedReference {
+            source: source.map(str::to_owned),
+            object: object.to_owned(),
+            location: location.to_owned(),
+            archive: None,
+        }
+    }
+
+    #[test]
+    fn undefined_symbol_with_source_and_function_matches_lld() {
+        let references = [reference(Some("a.c:3"), "a.o", "main")];
+        let expected = format!(
+            "undefined symbol: foo(int)\n>>> referenced by a.c:3\n>>>{}a.o:(main)",
+            " ".repeat(15)
+        );
+        assert_eq!(
+            undefined_symbol_message("", &"foo(int)", &references, 1),
+            expected
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_without_debug_info_names_object_and_function() {
+        let references = [reference(None, "a.o", "main")];
+        assert_eq!(
+            undefined_symbol_message("", &"foo", &references, 1),
+            "undefined symbol: foo\n>>> referenced by a.o:(main)"
+        );
+    }
+
+    #[test]
+    fn archive_members_and_section_offsets() {
+        let references = [UndefinedReference {
+            source: None,
+            object: "b.o".to_owned(),
+            location: section_offset_location(".text", 0x1c),
+            archive: Some("libx.a".to_owned()),
+        }];
+        assert_eq!(
+            undefined_symbol_message("", &"foo", &references, 1),
+            "undefined symbol: foo\n>>> referenced by b.o:(.text+0x1c) in archive libx.a"
+        );
+    }
+
+    #[test]
+    fn hidden_visibility_is_named() {
+        let message = undefined_symbol_message("hidden ", &"foo", &[], 0);
+        assert!(message.starts_with("undefined hidden symbol: foo"));
+    }
+
+    #[test]
+    fn references_beyond_three_are_counted() {
+        let references = [
+            reference(None, "r0.o", "main"),
+            reference(None, "r1.o", "main"),
+            reference(None, "r2.o", "main"),
+            reference(None, "r3.o", "main"),
+            reference(None, "r4.o", "main"),
+        ];
+        assert_eq!(
+            undefined_symbol_message("", &"foo", &references, 5),
+            "undefined symbol: foo\n\
+             >>> referenced by r0.o:(main)\n\
+             >>> referenced by r1.o:(main)\n\
+             >>> referenced by r2.o:(main)\n\
+             >>> referenced 2 more times"
+        );
+    }
+
+    #[test]
+    fn source_location_matches_create_file_line_msg() {
+        assert_eq!(
+            source_location(std::path::Path::new("/tmp/x/a.c"), 3),
+            "a.c:3 (/tmp/x/a.c:3)"
+        );
+        assert_eq!(source_location(std::path::Path::new("a.c"), 3), "a.c:3");
+    }
+
+    #[test]
+    fn shlib_undefined_matches_lld() {
+        assert_eq!(
+            shlib_undefined_message(&"foo", &"libbar.so"),
+            "undefined reference: foo\n>>> referenced by libbar.so \
+             (disallowed by --no-allow-shlib-undefined)"
+        );
+    }
+
+    #[test]
+    fn undefined_messages_carry_no_escape_bytes() {
+        let references = [reference(Some("a.c:3"), "a.o", "main")];
+        let message = undefined_symbol_message("", &"foo(int)", &references, 1);
+        assert!(!message.contains('\x1b'), "{message}");
+        assert_eq!(
+            format_diagnostic(Severity::Error, &message, false),
+            format!("reld: error: {message}")
         );
     }
 }
