@@ -276,6 +276,10 @@ impl Config {
             TrackedIgnore::new("segment.NOTE.*", 13),
             // TODO: RISC-V
             TrackedIgnore::new("segment.LOAD.RW.alignment", 13),
+            // TODO: Latest lld sometimes doesn’t create a .note.gnu.property section even when
+            // Reld does. Still observed by the linux-gnu x86_64 acceptance run (reld#186).
+            TrackedIgnore::new("segment.GNU_PROPERTY.alignment", 13),
+            TrackedIgnore::new("segment.GNU_PROPERTY.flags", 13),
             // TODO: We consider SFrame sections experimental and disabled by default.
             TrackedIgnore::new("segment.GNU_SFRAME.alignment", 13),
             TrackedIgnore::new("segment.GNU_SFRAME.flags", 13),
