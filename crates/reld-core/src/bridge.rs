@@ -521,7 +521,10 @@ const NATIVE_CONTROL_RELD_FLAGS: &[&str] = &[
 /// this never lowercases either side.
 fn matches_reld_only_flag(arg: &str, name: &str) -> bool {
     arg.strip_prefix("--").is_some_and(|rest| {
-        rest == name || rest.strip_prefix(name).is_some_and(|value| value.starts_with('='))
+        rest == name
+            || rest
+                .strip_prefix(name)
+                .is_some_and(|value| value.starts_with('='))
     })
 }
 
@@ -641,7 +644,10 @@ fn collect_requested_capabilities(
             })
         } else if arg == "-ztext"
             || arg == "-z=text"
-            || (arg == "-z" && args.peek().is_some_and(|next| next.to_str() == Some("text")))
+            || (arg == "-z"
+                && args
+                    .peek()
+                    .is_some_and(|next| next.to_str() == Some("text")))
         {
             // `-z text` errors on DT_TEXTREL text relocations; the native engine
             // never errors on them (it just sets DT_TEXTREL), so delegate to lld.
@@ -649,10 +655,7 @@ fn collect_requested_capabilities(
                 capability: Capability::TextRelocs,
                 trigger: "flag:-z text",
             })
-        } else if !arg.is_empty()
-            && !arg.starts_with('-')
-            && is_llvm_bitcode_file(Path::new(arg))
-        {
+        } else if !arg.is_empty() && !arg.starts_with('-') && is_llvm_bitcode_file(Path::new(arg)) {
             Some(Requirement {
                 capability: Capability::Lto,
                 trigger: "input:bitcode",
@@ -2377,10 +2380,8 @@ mod tests {
         // lld: the native engine has no LTO implementation (#123 Phase 0).
         let raw_bitcode =
             TempFile::create_with_contents("raw-bitcode", b"BC\xC0\xDE\x35\x14\x00\x00");
-        let wrapped_bitcode = TempFile::create_with_contents(
-            "wrapped-bitcode",
-            b"\xDE\xC0\x17\x0B\x00\x00\x00\x00",
-        );
+        let wrapped_bitcode =
+            TempFile::create_with_contents("wrapped-bitcode", b"\xDE\xC0\x17\x0B\x00\x00\x00\x00");
         for input in [raw_bitcode.path(), wrapped_bitcode.path()] {
             let argv = [
                 OsString::from("ld.reld"),
