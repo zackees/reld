@@ -215,16 +215,6 @@ def sqlite_bridge() -> None:
         raise WindowsCiError("sqlite-bridge e2e output did not contain 'linked SQLite' marker")
 
 
-def build_benchmark_driver() -> None:
-    workspace = _workspace()
-    _run(
-        _cargo("build", "--release", "-p", "reld", "--bin", "reld-link"),
-        env=_msvc_path_env(),
-    )
-    driver = _require_file(workspace / "target" / "release" / "reld-link.exe", "reld-link.exe")
-    print(f"Using COFF bridge driver: {driver}")
-
-
 def self_host() -> None:
     workspace = _workspace()
     reld_link = _require_file(workspace / "target" / "debug" / "reld-link.exe", "reld-link.exe")
@@ -245,7 +235,6 @@ COMMANDS = {
     "install-benchmark-linkers": install_benchmark_linkers,
     "native-tests": native_tests,
     "sqlite-bridge": sqlite_bridge,
-    "build-benchmark-driver": build_benchmark_driver,
     "self-host": self_host,
 }
 
