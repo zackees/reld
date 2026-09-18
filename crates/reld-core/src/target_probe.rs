@@ -167,7 +167,12 @@ pub(crate) struct ProbedTarget {
 
 /// `format`, `arch`, `class`, `endian` bundled together the way the individual signal probes
 /// produce them, before we know which `Signal` will end up being attached to them.
-type FormatTuple = (ObjectFormat, Option<ProbedArch>, Option<Class>, Option<Endian>);
+type FormatTuple = (
+    ObjectFormat,
+    Option<ProbedArch>,
+    Option<Class>,
+    Option<Endian>,
+);
 
 fn format_tuple(
     format: ObjectFormat,
