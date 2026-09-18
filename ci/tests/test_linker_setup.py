@@ -16,6 +16,7 @@ from ci.linker_setup import (
     download_path,
     is_satisfied,
     needs_download,
+    normalize_arch,
     provision,
     resolve_artifacts,
     sha256_file,
@@ -36,6 +37,56 @@ def test_resolve_artifacts_uses_env_versions() -> None:
     assert "libtinfo5_6.3-2ubuntu0.3_amd64.deb" in by_name["libtinfo5"].url
     assert by_name["mold"].dest_name == "mold"
     assert by_name["wild"].dest_name == "ld.wild"
+
+
+def test_resolve_artifacts_aarch64_urls() -> None:
+    by_name = {a.name: a for a in resolve_artifacts(ENV, "aarch64")}
+    assert set(by_name) == {"mold", "wild", "libtinfo5"}
+    assert "mold-2.41.0-aarch64-linux.tar.gz" in by_name["mold"].url
+    assert "wild-linker-0.9.0-aarch64-unknown-linux-gnu.tar.gz" in by_name["wild"].url
+    assert "ports.ubuntu.com/ubuntu-ports/" in by_name["libtinfo5"].url
+    assert "_arm64.deb" in by_name["libtinfo5"].url
+
+
+def test_resolve_artifacts_x86_64_default_is_unchanged() -> None:
+    assert resolve_artifacts(ENV) == resolve_artifacts(ENV, "x86_64")
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [
+        ("x86_64", "x86_64"),
+        ("amd64", "x86_64"),
+        ("AMD64", "x86_64"),
+        ("aarch64", "aarch64"),
+        ("arm64", "aarch64"),
+        ("ARM64", "aarch64"),
+    ],
+)
+def test_normalize_arch(machine: str, expected: str) -> None:
+    assert normalize_arch(machine) == expected
+
+
+def test_normalize_arch_rejects_unsupported() -> None:
+    with pytest.raises(SystemExit):
+        normalize_arch("riscv64")
+
+
+def test_provision_refuses_unpinned_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_if_called(url, dest):
+        pytest.fail("_download must not be called for an unpinned digest")
+
+    monkeypatch.setattr("ci.linker_setup._download", fail_if_called)
+    art = Artifact(
+        name="mold",
+        url="https://x/mold.tar.gz",
+        sha256="PIN-ME-aarch64-mold",
+        kind="tarball",
+        dest_name="mold",
+        member_suffix="bin/mold",
+    )
+    with pytest.raises(SystemExit, match="not pinned yet"):
+        provision(art, tmp_path)
 
 
 def test_url_suffix() -> None:

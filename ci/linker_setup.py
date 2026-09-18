@@ -1,6 +1,7 @@
 """Cache-gated provisioning of the Linux reference linkers used by CI.
 
-The Phase-1 Linux job pins a set of reference linkers (mold, wild) plus the
+The Phase-1 Linux jobs (``x86_64`` on ``ubuntu-24.04`` and ``aarch64`` on
+``ubuntu-24.04-arm``) each pin a set of reference linkers (mold, wild) plus the
 `libtinfo5` runtime that clang's LTO plugin needs. Downloading and extracting
 those artifacts is the "heavy price" paid on every CI run. This module makes
 that work *cache-gated*:
@@ -24,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -32,6 +34,53 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CHUNK = 1 << 20
+PLACEHOLDER_PREFIX = "PIN-ME-"
+
+_ARCH_ASSETS: dict[str, dict[str, str]] = {
+    "x86_64": {
+        "mold_url": (
+            "https://github.com/rui314/mold/releases/download/v{v}/"
+            "mold-{v}-x86_64-linux.tar.gz"
+        ),
+        "mold_sha256": "a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d",
+        "wild_url": (
+            "https://github.com/davidlattimore/wild/releases/download/{v}/"
+            "wild-linker-{v}-x86_64-unknown-linux-gnu.tar.gz"
+        ),
+        "wild_sha256": "deb6ee0e5caec798053ec4aafaba042e20a8edf91f08cb4d36268571cc628d3b",
+        "libtinfo5_url": (
+            "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/"
+            "libtinfo5_{v}_amd64.deb"
+        ),
+        "libtinfo5_sha256": "4df4288404108f1a156d014e8764a064e977e34e6d44931ab60451694c03c90d",
+    },
+    "aarch64": {
+        "mold_url": (
+            "https://github.com/rui314/mold/releases/download/v{v}/"
+            "mold-{v}-aarch64-linux.tar.gz"
+        ),
+        "mold_sha256": "946de2774b06a71346bd59b55fddba610b65b8d93c3a4a1559cc84e103472710",
+        "wild_url": (
+            "https://github.com/davidlattimore/wild/releases/download/{v}/"
+            "wild-linker-{v}-aarch64-unknown-linux-gnu.tar.gz"
+        ),
+        "wild_sha256": "8855a347b9dfbc762e2492125ee82d09313124da3be616b1cd027a14eddfe8c0",
+        "libtinfo5_url": (
+            "https://ports.ubuntu.com/ubuntu-ports/pool/universe/n/ncurses/"
+            "libtinfo5_{v}_arm64.deb"
+        ),
+        "libtinfo5_sha256": "a87dad04d7291e8648947d600cead7d5cf054191854b940142c5ece8b260172c",
+    },
+}
+
+
+def normalize_arch(machine: str) -> str:
+    """Map a raw ``platform.machine()``-style string to a reference-linker arch."""
+    if machine in ("x86_64", "amd64", "AMD64"):
+        return "x86_64"
+    if machine in ("aarch64", "arm64", "ARM64"):
+        return "aarch64"
+    raise SystemExit(f"unsupported reference-linker arch {machine!r}")
 
 
 @dataclass(frozen=True)
@@ -54,45 +103,38 @@ class Artifact:
     member_suffix: str = ""
 
 
-def resolve_artifacts(env: dict[str, str]) -> list[Artifact]:
+def resolve_artifacts(env: dict[str, str], arch: str = "x86_64") -> list[Artifact]:
     """Build the concrete artifact list from the pinned version env vars.
 
     Versions come from the workflow ``env:`` block (single source of truth); the
-    SHA-256 digests are pinned here and pair with those exact versions.
+    SHA-256 digests are pinned here and pair with those exact versions. ``arch``
+    selects the per-CPU asset table (``"x86_64"`` or ``"aarch64"``).
     """
     mold_version = env["MOLD_VERSION"]
     wild_version = env["WILD_VERSION"]
     libtinfo5_version = env["LIBTINFO5_VERSION"]
+    assets = _ARCH_ASSETS[arch]
     return [
         Artifact(
             name="mold",
-            url=(
-                f"https://github.com/rui314/mold/releases/download/v{mold_version}/"
-                f"mold-{mold_version}-x86_64-linux.tar.gz"
-            ),
-            sha256="a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d",
+            url=assets["mold_url"].format(v=mold_version),
+            sha256=assets["mold_sha256"],
             kind="tarball",
             dest_name="mold",
             member_suffix="bin/mold",
         ),
         Artifact(
             name="wild",
-            url=(
-                f"https://github.com/davidlattimore/wild/releases/download/{wild_version}/"
-                f"wild-linker-{wild_version}-x86_64-unknown-linux-gnu.tar.gz"
-            ),
-            sha256="deb6ee0e5caec798053ec4aafaba042e20a8edf91f08cb4d36268571cc628d3b",
+            url=assets["wild_url"].format(v=wild_version),
+            sha256=assets["wild_sha256"],
             kind="tarball",
             dest_name="ld.wild",
             member_suffix="wild",
         ),
         Artifact(
             name="libtinfo5",
-            url=(
-                "https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/"
-                f"libtinfo5_{libtinfo5_version}_amd64.deb"
-            ),
-            sha256="4df4288404108f1a156d014e8764a064e977e34e6d44931ab60451694c03c90d",
+            url=assets["libtinfo5_url"].format(v=libtinfo5_version),
+            sha256=assets["libtinfo5_sha256"],
             kind="deb",
         ),
     ]
@@ -194,6 +236,9 @@ def provision(artifact: Artifact, cache_dir: Path) -> str:
     if is_satisfied(artifact, cache_dir):
         return "hit"
 
+    if artifact.sha256.startswith(PLACEHOLDER_PREFIX):
+        raise SystemExit(f"{artifact.name}: sha256 for {artifact.url} is not pinned yet")
+
     cached = download_path(artifact, cache_dir)
     if needs_download(artifact, cache_dir):
         print(f"downloading {artifact.name} from {artifact.url}")
@@ -253,13 +298,18 @@ def main() -> int:
         action="store_true",
         help="do not append the cache bin dir to GITHUB_PATH",
     )
+    parser.add_argument(
+        "--arch",
+        default=platform.machine(),
+        help="runner CPU arch to provision reference linkers for (default: platform.machine())",
+    )
     args = parser.parse_args()
 
     cache_dir: Path = args.cache_dir
     (cache_dir / "bin").mkdir(parents=True, exist_ok=True)
     (cache_dir / "downloads").mkdir(parents=True, exist_ok=True)
 
-    artifacts = resolve_artifacts(dict(os.environ))
+    artifacts = resolve_artifacts(dict(os.environ), normalize_arch(args.arch))
     for artifact in artifacts:
         outcome = provision(artifact, cache_dir)
         print(f"{artifact.name}: {outcome}")

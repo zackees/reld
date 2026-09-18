@@ -128,6 +128,22 @@ natively (auto-import, `.rsrc`, `.CRT$X*`); that is the Phase 5 MinGW work
 (`docs/plan/07-PHASE-5-WINGNU.md`). Windows MSVC remains the advertised, consumer-tested Windows
 route until then.
 
+### ELF architecture support
+
+reld inherits wild's ELF backend for five architectures. Only the ones with a native CI
+acceptance leg are claimed:
+
+| Architecture | Status | Evidence |
+|---|---|---|
+| x86_64 | **Verified** | wild's ELF acceptance suite, `Phase 1 / linux-gnu x86_64` (ubuntu-24.04) |
+| aarch64 | **Verified** | wild's ELF acceptance suite, `Phase 1 / linux-gnu aarch64` (ubuntu-24.04-arm) |
+| riscv64 | Unverified | compiles; fixtures are reported as `Architecture unverified` |
+| loongarch64 | Unverified | compiles; fixtures are reported as `Architecture unverified` |
+| ppc64le | Unverified | compiles; fixtures are reported as `Architecture unverified` |
+
+Unverified means the code is kept building and its fixtures are kept, but no CI job runs
+them, so reld makes no correctness claim for those targets ([#194](https://github.com/zackees/reld/issues/194)).
+
 ## Installing
 
 Versioned, per-platform binaries are published on the

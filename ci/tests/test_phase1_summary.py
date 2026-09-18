@@ -1,9 +1,11 @@
+import collections
 from pathlib import Path
 
 import pytest
 
 from ci.phase1_summary import counts
 from ci.phase1_summary import main
+from ci.phase1_summary import skip_reasons
 
 
 def test_counts_rust_and_mimic_results() -> None:
@@ -173,3 +175,80 @@ def test_successful_path_requires_versions_file(tmp_path: Path) -> None:
                 str(tmp_path / "versions.txt"),
             ]
         )
+
+
+def test_skip_reasons_counts_libtest_mimic_ignores() -> None:
+    text = """
+test elf/riscv64/a/default ... ignored, Architecture unverified: riscv64 has no CI acceptance leg (reld#194)
+test elf/riscv64/c/default ... ignored, Architecture unverified: riscv64 has no CI acceptance leg (reld#194)
+test elf/x86_64/b/default ... ignored, Architecture disabled: x86_64 is verified on its own native CI leg (reld#194)
+test foo ... ignored
+test bar ... ok
+"""
+    assert skip_reasons(text) == collections.Counter(
+        {
+            "Architecture unverified: riscv64 has no CI acceptance leg (reld#194)": 2,
+            "Architecture disabled: x86_64 is verified on its own native CI leg (reld#194)": 1,
+            "(no reason given)": 1,
+        }
+    )
+
+
+def test_skip_reasons_strip_ansi() -> None:
+    text = "test foo ... \x1b[33mignored\x1b[0m\n"
+    assert skip_reasons(text) == collections.Counter({"(no reason given)": 1})
+
+
+def test_summary_lists_skip_reasons(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    versions = tmp_path / "versions.txt"
+    versions.write_text("lld 18\n")
+    log = tmp_path / "acceptance-tests.log"
+    log.write_text(
+        """
+test elf/riscv64/a/default ... ignored, Architecture unverified: riscv64 has no CI acceptance leg (reld#194)
+test elf/riscv64/c/default ... ignored, Architecture unverified: riscv64 has no CI acceptance leg (reld#194)
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out
+"""
+    )
+
+    assert (
+        main(
+            [
+                "--job",
+                "linux-aarch64",
+                "--log",
+                str(log),
+                "--versions",
+                str(versions),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Skipped by reason:" in output
+    assert "| 2 |" in output or "Architecture unverified: riscv64 has no CI acceptance leg (reld#194) | 2 |" in output
+
+
+def test_summary_without_ignore_lines_has_no_reason_section(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    versions = tmp_path / "versions.txt"
+    versions.write_text("lld 18\n")
+    log = tmp_path / "platform-tests.log"
+    log.write_text("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
+
+    assert (
+        main(
+            [
+                "--job",
+                "linux-gnu",
+                "--log",
+                str(log),
+                "--versions",
+                str(versions),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Skipped by reason:" not in output

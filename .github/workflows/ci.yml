@@ -138,10 +138,23 @@ jobs:
             kind: linux-gnu
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            musl_target: x86_64-unknown-linux-musl
+            ubuntu_archive: https://archive.ubuntu.com/ubuntu/
+          - name: linux-gnu aarch64
+            kind: linux-gnu
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            musl_target: aarch64-unknown-linux-musl
+            # arm64 packages are only published on Ubuntu's ports archive, not the
+            # primary x86_64-only archive.ubuntu.com mirror.
+            ubuntu_archive: https://ports.ubuntu.com/ubuntu-ports/
           - name: windows-gnu x86_64
             kind: windows-gnu
             os: windows-2022
             target: x86_64-pc-windows-gnu
+            arch: x86_64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -178,13 +191,13 @@ jobs:
           set -euxo pipefail
           rustup toolchain install "${NIGHTLY_TOOLCHAIN}" \
             --profile minimal \
-            --target x86_64-unknown-linux-musl \
+            --target ${{ matrix.musl_target }} \
             --component rustc-codegen-cranelift-preview
-          rustup toolchain list | grep -q "^${NIGHTLY_TOOLCHAIN}-x86_64-unknown-linux-gnu"
+          rustup toolchain list | grep -q "^${NIGHTLY_TOOLCHAIN}-${{ matrix.target }}"
           printf 'fn main() {}\n' > "${RUNNER_TEMP}/nightly-smoke.rs"
           rustup run "${NIGHTLY_TOOLCHAIN}" rustc \
             -Zcodegen-backend=cranelift \
-            --target x86_64-unknown-linux-musl \
+            --target ${{ matrix.musl_target }} \
             "${RUNNER_TEMP}/nightly-smoke.rs" \
             -o "${RUNNER_TEMP}/nightly-smoke"
           "${RUNNER_TEMP}/nightly-smoke"
@@ -202,7 +215,7 @@ jobs:
           # GitHub's Azure mirror can accept the connection and then stall
           # indefinitely while fetching package indexes. Use Ubuntu's HTTPS
           # archive directly and keep network failures bounded.
-          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|${{ matrix.ubuntu_archive }}|' /etc/apt/sources.list.d/ubuntu.sources
           APT_OPTIONS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=30)
           curl -fsSL -o "${RUNNER_TEMP}/llvm-snapshot.gpg.key" https://apt.llvm.org/llvm-snapshot.gpg.key
           echo '8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d  '${RUNNER_TEMP}'/llvm-snapshot.gpg.key' | sha256sum --check
@@ -223,7 +236,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/reld-linker-cache
-          key: linkers-${{ runner.os }}-mold${{ env.MOLD_VERSION }}-wild${{ env.WILD_VERSION }}-libtinfo${{ env.LIBTINFO5_VERSION }}
+          key: linkers-${{ runner.os }}-${{ runner.arch }}-mold${{ env.MOLD_VERSION }}-wild${{ env.WILD_VERSION }}-libtinfo${{ env.LIBTINFO5_VERSION }}
 
       - name: Provision cached Linux reference linkers
         if: matrix.kind == 'linux-gnu'
@@ -236,7 +249,8 @@ jobs:
           uv run --no-sync python ci/linker_setup.py \
             --cache-dir "${RUNNER_TEMP}/reld-linker-cache" \
             --install-debs \
-            --link-clang
+            --link-clang \
+            --arch "${{ matrix.arch }}"
 
       - name: Verify and smoke Linux reference linkers
         if: matrix.kind == 'linux-gnu'
@@ -255,7 +269,10 @@ jobs:
           clang --version | grep -q "${CLANG_VERSION}"
           printf 'int fixture(void) { return 0; }\n' | clang -shared -nostdlib -flto -x c - -fuse-ld=bfd -o "${RUNNER_TEMP}/plugin-smoke.so"
           printf 'int fixture(void) { return 0; }\n' | clang -c -x c - -Wa,--crel,--allow-experimental-crel -o "${RUNNER_TEMP}/crel-smoke.o"
-          printf '.global _start\n.text\n_start:\n  mov $60, %%rax\n  xor %%rdi, %%rdi\n  syscall\n' > "${RUNNER_TEMP}/smoke.S"
+          case "${{ matrix.arch }}" in
+            x86_64) printf '.global _start\n.text\n_start:\n  mov $60, %%rax\n  xor %%rdi, %%rdi\n  syscall\n' > "${RUNNER_TEMP}/smoke.S" ;;
+            aarch64) printf '.global _start\n.text\n_start:\n  mov x8, #93\n  mov x0, #0\n  svc #0\n' > "${RUNNER_TEMP}/smoke.S" ;;
+          esac
           clang -c "${RUNNER_TEMP}/smoke.S" -o "${RUNNER_TEMP}/smoke.o"
           for linker in ld.bfd ld.lld mold ld.wild; do
             "${linker}" -e _start "${RUNNER_TEMP}/smoke.o" -o "${RUNNER_TEMP}/smoke-${linker}"
@@ -326,10 +343,10 @@ jobs:
           {
             result=0
             for test_name in \
-              elf/x86_64/wrap-lto/clang \
-              elf/x86_64/lto-integration/clang \
-              elf/x86_64/rust-integration-dynamic/lto \
-              elf/x86_64/rust-integration/linker-plugin-lto
+              elf/${{ matrix.arch }}/wrap-lto/clang \
+              elf/${{ matrix.arch }}/lto-integration/clang \
+              elf/${{ matrix.arch }}/rust-integration-dynamic/lto \
+              elf/${{ matrix.arch }}/rust-integration/linker-plugin-lto
             do
               $CARGO_COMMAND test -p reld --test acceptance -- \
                 "${test_name}" --exact --test-threads=1 || result=1
@@ -348,15 +365,17 @@ jobs:
           set -euxo pipefail
           $CARGO_COMMAND test -p reld --test acceptance 2>&1 | tee acceptance-tests.log
 
+      # The aarch64 leg's scope (reld#194) is the wild ELF acceptance suite; the
+      # seeded difftest and the mold corpus stay x86_64-only.
       - name: Linux differential tests
-        if: matrix.kind == 'linux-gnu'
+        if: matrix.kind == 'linux-gnu' && matrix.arch == 'x86_64'
         shell: bash
         run: |
           set -euxo pipefail
           $CARGO_COMMAND run --bin reld-difftest -- --seeds 100 --reference-linker bfd 2>&1 | tee difftest.log
 
       - name: Linux mold corpus
-        if: matrix.kind == 'linux-gnu'
+        if: matrix.kind == 'linux-gnu' && matrix.arch == 'x86_64'
         shell: bash
         env:
           RELD_TEST_CONFIG: ${{ github.workspace }}/test-config-ci.toml
@@ -382,13 +401,22 @@ jobs:
         run: printf 'PHASE1_UPSTREAM_FAILED=true\n' >> "${GITHUB_ENV}"
 
       - name: Publish Linux counts and skips
-        if: always() && matrix.kind == 'linux-gnu'
+        if: always() && matrix.kind == 'linux-gnu' && matrix.arch == 'x86_64'
         shell: bash
         run: >-
           uv run --no-sync python ci/phase1_summary.py --job linux-gnu
           --log platform-tests.log --log acceptance-tests.log --log difftest.log
           --log external-tests.log --versions versions.txt --minimum-run 507
           --exact-log-total difftest.log=100 --exact-log-total external-tests.log=407
+          --upstream-failed "$PHASE1_UPSTREAM_FAILED"
+
+      # --minimum-run is raised to the first green aarch64 run's count (reld#194).
+      - name: Publish Linux aarch64 counts and skips
+        if: always() && matrix.kind == 'linux-gnu' && matrix.arch == 'aarch64'
+        shell: bash
+        run: >-
+          uv run --no-sync python ci/phase1_summary.py --job linux-gnu-aarch64
+          --log platform-tests.log --log acceptance-tests.log --versions versions.txt --minimum-run 1
           --upstream-failed "$PHASE1_UPSTREAM_FAILED"
 
       - name: Publish Windows GNU counts and skips
