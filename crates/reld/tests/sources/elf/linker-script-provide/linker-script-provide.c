@@ -17,8 +17,9 @@
 //#NoSym:unreferenced_symbol
 //#DiffIgnore:.dynamic.* #13
 //#DiffIgnore:section.got #13
-// Absolute PROVIDE symbols get R_*_RELATIVE GOT relocations instead of none or GLOB_DAT: a real bug,
-// general to every arch but only visible to the oracle on aarch64, where GOTPCRELX relaxation does not hide it.
+// Absolute PROVIDE symbols get R_*_RELATIVE GOT relocations instead of none or GLOB_DAT.
+// A real bug on every arch, visible to the oracle only on aarch64, where GOTPCRELX
+// relaxation does not hide it.
 //#DiffIgnore:rel.missing-got-dynamic.shared-object #200 arch=aarch64
 //#DiffIgnore:section.rela.dyn #13
 //#DiffIgnore:segment.LOAD.RX.alignment #13
