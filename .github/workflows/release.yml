@@ -180,11 +180,11 @@ jobs:
 
   # Windows/macOS targets: cross-build on cheap ubuntu-24.04 runners through the
   # blessed soldr front door (reld#59 / cross-ship.yml), rather than scarce
-  # native macOS/Windows runners for the *build*. macOS packaging happens right
-  # here since no GitHub Actions job in this org runs on a macos-* runner
-  # (soldr#3071, soldr#3116) — the shipped binary's format is verified but it
-  # is never executed in CI. Windows artifacts are handed to
-  # `smoke-and-package-windows` for a native `--version` gate before packaging.
+  # native macOS/Windows runners for the *build*. Every cross target is also
+  # packaged here. macOS has no smoke job here (soldr#3071, soldr#3116), so its
+  # format is verified but it is not executed in this workflow. The Windows
+  # archives are handed to `smoke-windows`, which executes the packaged binary
+  # natively; `publish` is gated on that smoke.
   build-cross:
     name: Cross build (${{ matrix.name }})
     needs: preflight
@@ -248,33 +248,30 @@ jobs:
               file "staging/${{ matrix.executable }}" | grep -q 'Mach-O' ;;
           esac
 
-      - name: Package release archive (macOS)
-        if: contains(matrix.target, 'apple-darwin')
+      # Packaging is platform-independent Python that picks `.zip` from the
+      # triple, not the host, so every cross target is packaged here (reld#175).
+      # The Windows runners only have to execute what this produces.
+      - name: Package release archive
         run: |
           python3 ci/package_release.py \
             --version "${{ needs.preflight.outputs.version }}" \
             --triple "${{ matrix.target }}" \
+            --binary-ext "${{ contains(matrix.target, 'windows') && '.exe' || '' }}" \
             --input-dir staging \
             --output-dir dist
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: contains(matrix.target, 'apple-darwin')
         with:
           name: release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: contains(matrix.target, 'windows-msvc')
-        with:
-          name: cross-raw-${{ matrix.name }}
-          path: staging/*
-          if-no-files-found: error
-
-  # Native smoke gate for the two Windows legs (reld#148 AC #3), then package.
-  # No macOS equivalent exists: see the build-cross comment above.
-  smoke-and-package-windows:
-    name: Smoke + package (${{ matrix.name }})
+  # Native smoke gate for the two Windows legs (reld#148 AC #3). The only thing
+  # here that needs Windows is executing the binary, so that is all this job
+  # does: no checkout, no Python, no packaging (reld#175). It runs the reld.exe
+  # from inside the archive `publish` will ship, not a loose copy of it.
+  smoke-windows:
+    name: Smoke (${{ matrix.name }})
     needs: [preflight, build-cross]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -289,52 +286,48 @@ jobs:
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.preflight.outputs.checkout_ref }}
-
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: cross-raw-${{ matrix.name }}
-          path: staging
+          name: release-${{ matrix.target }}
+          path: dist
 
-      # On Windows, reld bridges `--version` (like every invocation) to
-      # `lld-link`, so it reports lld's version, not its own — see the README
-      # "reld --version and the lld bridge" note.
-      - name: Smoke deployed reld (windows)
+      # `-flavor gnu --version` selects reld's native argument model, so reld's
+      # own code answers `Reld … (compatible with GNU linkers)`. A bare
+      # `--version` bridges to `lld-link` (see the README "reld --version and
+      # the lld bridge" note), which only proves lld-link is on the runner; it
+      # is kept because that hand-off is part of the Windows product. The
+      # version token is not asserted: build.rs makes it depend on checkout
+      # depth and tags.
+      - name: Smoke the packaged reld.exe
         shell: pwsh
         run: |
-          $out = & ".\staging\reld.exe" --version 2>&1 | Out-String
+          $archive = Get-ChildItem dist -Filter "reld-v${{ needs.preflight.outputs.version }}-${{ matrix.target }}.zip"
+          if (-not $archive) { throw "expected release archive not found in dist/" }
+          Expand-Archive -Path $archive.FullName -DestinationPath extracted
+          $exe = Get-ChildItem extracted -Recurse -Filter reld.exe | Select-Object -First 1
+          if (-not $exe) { throw "reld.exe missing from $($archive.Name)" }
+
+          $native = & $exe.FullName -flavor gnu --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "reld -flavor gnu --version exited with $LASTEXITCODE" }
+          Write-Output $native
+          if ($native -notmatch '^Reld .*\(compatible with GNU linkers\)') {
+            throw "reld's own code did not answer -flavor gnu --version"
+          }
+
+          $bridge = & $exe.FullName --version 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
-          Write-Output $out
-          if ($out -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
-
-      - name: Package release archive
-        shell: bash
-        run: |
-          set -euxo pipefail
-          python ci/package_release.py \
-            --version "${{ needs.preflight.outputs.version }}" \
-            --triple "${{ matrix.target }}" \
-            --binary-ext ".exe" \
-            --input-dir staging \
-            --output-dir dist
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
+          Write-Output $bridge
+          if ($bridge -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
 
   publish:
     name: Publish release
-    needs: [preflight, build-native, build-cross, smoke-and-package-windows]
+    needs: [preflight, build-native, build-cross, smoke-windows]
     if: |
       always()
       && needs.preflight.result == 'success'
       && needs.build-native.result == 'success'
       && needs.build-cross.result == 'success'
-      && needs.smoke-and-package-windows.result == 'success'
+      && needs.smoke-windows.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
