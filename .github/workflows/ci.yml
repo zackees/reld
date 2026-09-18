@@ -600,14 +600,21 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          nextest_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
           case "${{ matrix.kind }}" in
             windows-msvc)
-              curl -fsSL --retry 3 "https://get.nexte.st/${NEXTEST_VERSION}/windows-tar" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+              # CARGO_HOME is a native Windows path (C:\Users\...\.cargo) on the
+              # Windows runner; Git Bash's GNU tar reads "C:" as a remote host
+              # spec, so convert it to a POSIX path before handing it to tar -C.
+              nextest_bin="$(cygpath -u "${nextest_bin}")"
+              nextest_url="https://get.nexte.st/${NEXTEST_VERSION}/windows-tar"
               ;;
             macos-arm64)
-              curl -fsSL --retry 3 "https://get.nexte.st/${NEXTEST_VERSION}/mac" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+              nextest_url="https://get.nexte.st/${NEXTEST_VERSION}/mac"
               ;;
           esac
+          mkdir -p "${nextest_bin}"
+          curl -fsSL --retry 3 "${nextest_url}" | tar zxf - -C "${nextest_bin}"
           cargo nextest --version | grep -q "${NEXTEST_VERSION}"
 
       - name: Windows MSVC native tests
