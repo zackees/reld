@@ -1,5 +1,5 @@
 //#AbstractConfig:default
-//#DiffIgnore:section.data #13 arch=aarch64,loongarch64
+//#DiffIgnore:section.data #13 arch=loongarch64
 
 //#Config:gcc-tls-desc:default
 //#CompArgs:-mtls-dialect=gnu2 -fPIC -O2
@@ -40,7 +40,10 @@
 //#RequiresCompilerFlags:-mtls-dialect=gnu2
 //#Arch: x86_64
 
-//#Config:clang-tls-desc-desc:clang-tls-desc
+// Based on the gcc desc variant, not clang-tls-desc: RequiresCompilerFlags accumulates, and the
+// parent's x86-only `-mtls-dialect=gnu2` requirement would otherwise fail on aarch64.
+//#Config:clang-tls-desc-desc:gcc-tls-desc-desc
+//#Compiler:clang
 //#CompArgs:-mtls-dialect=desc -fPIC
 //#SkipArch: x86_64,riscv64
 
@@ -49,7 +52,8 @@
 //#Shared:tlsdesc-obj.c
 //#Arch: x86_64
 
-//#Config:clang-tls-desc-shared-desc:clang-tls-desc-shared
+//#Config:clang-tls-desc-shared-desc:gcc-tls-desc-shared-desc
+//#Compiler:clang
 //#CompArgs:-mtls-dialect=desc -fPIC
 //#SkipArch: x86_64,riscv64
 

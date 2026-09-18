@@ -8,7 +8,6 @@
 // We're linking different .so files, so this is expected.
 //#DiffIgnore:.dynamic.DT_NEEDED #13
 // On aarch64, GNU ld seems to emit a GOT in the shared object even though it isn't needed.
-//#DiffIgnore:section.got #13 arch=aarch64
 //#ExpectSym:_start section=".text"
 //#ExpectSym:foo_ptr section=".data"
 //#DiffMatchAny:true

@@ -289,6 +289,14 @@ impl Config {
         match arch {
             ArchKind::Aarch64 => defaults.extend([
                 TrackedIgnore::new("section.ARM.attributes", 13),
+                // GNU ld on aarch64 always emits a .got; reld omits it when nothing needs one. Found
+                // by the aarch64 acceptance leg (reld#194) across 20 fixtures; structural, not a
+                // relocation difference (those are still checked by the rel.* keys).
+                TrackedIgnore::new("section.got", 13),
+                // Removed as unobserved on x86_64 in reld#186, then observed again on aarch64
+                // (reld#194), exactly as #13 predicted: needed here, scoped to this arch.
+                TrackedIgnore::new("section.bss.alignment", 13),
+                TrackedIgnore::new("section.plt", 13),
                 // Other linkers have a bigger initial PLT entry, thus the entsize is set to
                 // zero: https://sourceware.org/bugzilla/show_bug.cgi?id=26312
                 TrackedIgnore::new("section.plt.entsize", 13),

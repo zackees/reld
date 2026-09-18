@@ -1,6 +1,5 @@
 //#AbstractConfig:default
 // On aarch64, GNU ld puts the copy relocation for this symbol in .data.rel.ro rather than .bss.
-//#DiffIgnore:dynsym.__stack_chk_guard.section #13 arch=aarch64
 //#Object:cpp-integration-2.cc
 //#DiffMatchAny:true
 
