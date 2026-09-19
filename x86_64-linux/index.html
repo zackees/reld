@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>reld benchmarks</title>
+<style>
+body{background:#0d1117;color:#e6edf3;font:14px system-ui,sans-serif;margin:2rem auto;max-width:960px}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #30363d;padding:.4rem .6rem;text-align:right}
+th:first-child,td:first-child{text-align:left}img{max-width:100%}a{color:#58a6ff}
+td.na{color:#7d8590}td.pending{color:#bb8009}
+</style></head><body>
+<h1>reld &mdash; link benchmark</h1>
+<p>2026-09-19T13:28:25Z &middot; x86_64-linux &middot; Linux-6.17.0-1022-azure-x86_64-with-glibc2.39</p>
+<img src="benchmark-link.jpg" alt="benchmark chart">
+<table><thead><tr><th>Configuration</th><th>bfd</th><th>lld</th><th>mold</th><th>wild</th><th>reld (native/reld)</th></tr></thead><tbody><tr><td>no-LTO</td><td>2.3153s</td><td>0.5398s</td><td>0.4215s</td><td>0.4544s</td><td>0.3679s</td></tr><tr><td>ThinLTO</td><td>1.8427s</td><td>0.5244s</td><td>0.5099s</td><td>0.4292s</td><td>0.3480s</td></tr><tr><td>full-LTO</td><td>1.7166s</td><td>0.3983s</td><td>0.2875s</td><td>0.3812s</td><td>0.2726s</td></tr></tbody></table>
+<h2>Fixed linker startup</h2><p>Reported raw and never subtracted from final-link medians.</p>
+<table><thead><tr><th>Series</th><th>Seconds</th></tr></thead><tbody><tr><td>bfd</td><td>0.0015s</td></tr><tr><td>lld</td><td>0.0110s</td></tr><tr><td>mold</td><td>0.0021s</td></tr><tr><td>wild</td><td>0.0019s</td></tr><tr><td>reld (native/reld)</td><td>0.0018s</td></tr></tbody></table>
+<p><a href="https://github.com/zackees/reld">zackees/reld</a></p>
+</body></html>
