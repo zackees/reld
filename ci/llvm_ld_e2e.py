@@ -24,7 +24,9 @@ import tempfile
 from pathlib import Path
 
 SOURCE = "int mainCRTStartup(void) { return 42; }\n"
-LINK_ARGS = ["/entry:mainCRTStartup", "/subsystem:console", "/nodefaultlib"]
+# /Brepro: without it lld-link stamps the PE header with the link time, so two
+# links a second apart differ even when the linker behaves identically.
+LINK_ARGS = ["/entry:mainCRTStartup", "/subsystem:console", "/nodefaultlib", "/Brepro"]
 MACHINE_AMD64 = 0x8664
 
 

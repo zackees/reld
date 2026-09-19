@@ -19,6 +19,8 @@ on:
     paths:
       - .github/workflows/release.yml
       - ci/package_release.py
+      - ci/fetch_llvm_ld.py
+      - ci/llvm_ld.lock.json
   workflow_dispatch:
     inputs:
       tag:
@@ -80,7 +82,9 @@ jobs:
             TAG="${INPUT_TAG:-v$VERSION}"
             DRY_RUN="${INPUT_DRY_RUN:-true}"
             CHECKOUT_REF="$GITHUB_SHA"
-            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            # A PR validates its own pipeline, so it builds its own commit; a
+            # manual dispatch for an already-tagged version rebuilds that tag.
+            if [ "$EVENT_NAME" != "pull_request" ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
               CHECKOUT_REF="$TAG"
             fi
           fi
