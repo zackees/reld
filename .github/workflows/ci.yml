@@ -316,6 +316,27 @@ jobs:
           $CARGO_COMMAND test -p reld --bins 2>&1 | tee -a platform-tests.log
           $CARGO_COMMAND test -p reld --test acceptance-policy --test external-runner 2>&1 | tee -a platform-tests.log
 
+      # llvm-ld-coff (reld#96): the pinned prebuilt is downloaded once per lock-file change and cached,
+      # never compiled here.
+      - name: Restore llvm-ld-coff download cache
+        if: matrix.kind == 'linux-gnu'
+        uses: actions/cache@v4
+        with:
+          path: target/llvm-ld-cache
+          key: llvm-ld-coff-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/llvm_ld.lock.json') }}
+
+      # On Linux llvm-ld-coff is a Windows cross-linker: reld links a PE in-process through the
+      # pinned libllvm_ld.so, and the output must be byte-identical to the lld-link subprocess's.
+      - name: llvm-ld-coff in-process Windows cross-link (Linux)
+        if: matrix.kind == 'linux-gnu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          triple="$(uname -m)-unknown-linux-gnu"
+          uv run --no-sync python ci/fetch_llvm_ld.py --triple "$triple" --dest target/llvm-ld-coff
+          uv run --no-sync python ci/llvm_ld_e2e.py --reld-link target/debug/reld-link \
+            --library target/llvm-ld-coff/libllvm_ld.so --clang clang
+
       - name: Linux relocation malfunction oracle
         if: matrix.kind == 'linux-gnu'
         shell: bash
@@ -651,6 +672,20 @@ jobs:
         shell: bash
         run: uv run --no-sync python -m ci.windows_ci native-tests
 
+      # llvm_ld.dll next to reld-link.exe, as the release ships it, so the sqlite e2e and the
+      # self-host below are real links through llvm-ld-coff in-process (reld#96).
+      - name: Restore llvm-ld-coff download cache (Windows MSVC)
+        if: matrix.kind == 'windows-msvc'
+        uses: actions/cache@v4
+        with:
+          path: target/llvm-ld-cache
+          key: llvm-ld-coff-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/llvm_ld.lock.json') }}
+
+      - name: Stage llvm-ld-coff next to reld-link (Windows MSVC)
+        if: matrix.kind == 'windows-msvc'
+        shell: bash
+        run: uv run --no-sync python ci/fetch_llvm_ld.py --triple x86_64-pc-windows-msvc --dest target/debug
+
       - name: Windows MSVC reld bridge e2e (sqlite)
         if: matrix.kind == 'windows-msvc'
         shell: bash
@@ -660,6 +695,13 @@ jobs:
         if: matrix.kind == 'windows-msvc'
         shell: bash
         run: uv run --no-sync python -m ci.windows_ci self-host
+
+      - name: llvm-ld-coff in-process link (Windows MSVC)
+        if: matrix.kind == 'windows-msvc'
+        shell: bash
+        run: >-
+          uv run --no-sync python ci/llvm_ld_e2e.py --reld-link target/debug/reld-link.exe
+          --library target/debug/llvm_ld.dll --clang clang
 
       - name: macOS native tests
         if: matrix.kind == 'macos-arm64'

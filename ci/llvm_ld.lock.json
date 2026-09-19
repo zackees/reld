@@ -1,0 +1,39 @@
+{
+  "_comment": "Pinned prebuilt llvm-ld-coff (LLD's COFF linker as a library) per HOST triple; every build links Windows PE/COFF. Update by bumping version and every sha256 from the release's SHA256SUMS. See ci/fetch_llvm_ld.py and reld#96.",
+  "repository": "zackees/llvm-ld",
+  "version": "v0.1.0",
+  "assets": {
+    "aarch64-apple-darwin": {
+      "archive": "llvm-ld-coff-v0.1.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "5d59a93c9fc3d45ec360c8115cbf1e70f0a2691a7469d78444ca1699ee2402c5"
+    },
+    "aarch64-pc-windows-msvc": {
+      "archive": "llvm-ld-coff-v0.1.0-aarch64-pc-windows-msvc.zip",
+      "sha256": "c6cbe9b786aa737d26dcfaf56d4e5eba15e8a260c974e7a770259712c4134693"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "archive": "llvm-ld-coff-v0.1.0-aarch64-unknown-linux-gnu.tar.gz",
+      "sha256": "edacadfda751a8d8fe30ff2949702c8a4a05003cfb3f534a747291c20b635458"
+    },
+    "aarch64-unknown-linux-musl": {
+      "archive": "llvm-ld-coff-v0.1.0-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "3871cbbf519dd0ba58df67551f1a113412c4d0d0a8d1bbfdcedefb1b84ea35be"
+    },
+    "x86_64-apple-darwin": {
+      "archive": "llvm-ld-coff-v0.1.0-x86_64-apple-darwin.tar.gz",
+      "sha256": "c7039a4ee2736f817b89817ca6f6fadd9855e5298130e12dab19203a9e8ab2cd"
+    },
+    "x86_64-pc-windows-msvc": {
+      "archive": "llvm-ld-coff-v0.1.0-x86_64-pc-windows-msvc.zip",
+      "sha256": "ca2cc3dda936b3cd41e3a9738a70ba40656ed74d72cba8f1fdd185a30a734b4e"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "archive": "llvm-ld-coff-v0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "a1c35eda54feb47609fb3bf38fd010805a7e039599cb6d9d075a42faf1875282"
+    },
+    "x86_64-unknown-linux-musl": {
+      "archive": "llvm-ld-coff-v0.1.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "1b64f395478aab9681e3de61f01987e063ff3af1d9b6a08174b92764d5b2c7f1"
+    }
+  }
+}

@@ -86,7 +86,7 @@ which.workspace = true
 wait-timeout.workspace = true
 
 [features]
-default = ["fork", "plugins", "zstd"]
+default = ["fork", "llvm-ld", "plugins", "zstd"]
 
 # Compile pprof hooks in; collection remains opt-in through mimalloc's API or
 # documented environment controls.
@@ -97,6 +97,8 @@ mimalloc-pprof-profile = ["dep:mimalloc-pprof", "mimalloc-pprof/pprof"]
 mimalloc-pprof-dhat = ["dep:mimalloc-pprof"]
 
 fork = ["reld-core/fork"]
+
+llvm-ld = ["reld-core/llvm-ld"]
 
 zstd = ["reld-core/zstd"]
 

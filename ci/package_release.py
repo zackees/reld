@@ -25,6 +25,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--binary-ext", default="", help="Executable suffix, e.g. .exe")
     parser.add_argument("--input-dir", required=True, type=Path, help="Directory containing reld[.exe] and reld-link[.exe]")
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory to write the archive into")
+    parser.add_argument(
+        "--extra-dir",
+        type=Path,
+        help=(
+            "Directory whose files ship alongside the binaries, e.g. the llvm-ld-coff library and its "
+            "notices staged by ci/fetch_llvm_ld.py (reld#96). reld loads that library from next to "
+            "itself, so it must land in the same directory."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -44,6 +53,13 @@ def main() -> None:
         if not src.is_file():
             raise SystemExit(f"missing binary: {src}")
         shutil.copy2(src, payload_dir / name)
+
+    if args.extra_dir is not None:
+        for src in sorted(args.extra_dir.iterdir()):
+            if src.is_file():
+                if (payload_dir / src.name).exists():
+                    raise SystemExit(f"extra file {src.name} would overwrite a packaged file")
+                shutil.copy2(src, payload_dir / src.name)
 
     for name in LICENSE_FILES:
         src = REPO_ROOT / name

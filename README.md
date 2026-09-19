@@ -180,6 +180,21 @@ bridge architecture (see [DESIGN.md](DESIGN.md) and [issue #17](https://github.c
 not a bug in the release process; the release archive name and `SHA256SUMS` entry are the
 authoritative version identifiers on those platforms.
 
+### In-process Windows linking: llvm-ld-coff
+
+Windows COFF and MinGW links (`reld-link`, and any link TargetProbe identifies as PE/COFF) run
+**in-process** through [llvm-ld-coff](https://github.com/zackees/llvm-ld): LLD's COFF linker built
+as a shared library. It produces the same bytes as `lld-link` and avoids spawning a linker per
+link (about 6x faster on small links). It only ever links Windows PE/COFF; the Linux and macOS
+builds of it are Windows cross-linkers.
+
+reld never compiles it. Every release archive except musl ships the pinned prebuilt next to reld
+(`llvm_ld.dll`, `libllvm_ld.so`, or `libllvm_ld.dylib`, with its license notices), and reld
+loads it when it is there. `RELD_LLVM_LD=<path>` points at a different copy, and `RELD_LLVM_LD=off`
+disables it. Without it — a musl build, a triple with no prebuilt, or `off` — reld uses the
+subprocess bridge below, so nothing breaks when the library is absent.
+`RELD_LOG_ENGINE=1` shows which path a link took.
+
 ### Bridge dependency
 
 The Windows and macOS bridge resolves the concrete linker to delegate to in this order:
