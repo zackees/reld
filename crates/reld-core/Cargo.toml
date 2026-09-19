@@ -77,13 +77,18 @@ object = { workspace = true, features = ["write_std"] }
 tempfile.workspace = true
 
 [features]
-default = ["zstd"]
+# llvm-ld is default so its unit tests run under a plain `cargo test -p reld-core`.
+default = ["llvm-ld", "zstd"]
 
 # Support for running the linker as a subprocess.
 fork = []
 
 # Support for linker-plugins.
 plugins = ["libloading"]
+
+# Run COFF and MinGW links in-process through a prebuilt zackees/llvm-ld shared library, when
+# one is shipped next to reld (reld#96). Uses the already-approved libloading; no new dependency.
+llvm-ld = ["libloading"]
 
 # Enable support for emitting a perfetto trace.
 perfetto = ["perfetto-recorder/enable", "tracing/release_max_level_info"]

@@ -19,6 +19,8 @@ on:
     paths:
       - .github/workflows/release.yml
       - ci/package_release.py
+      - ci/fetch_llvm_ld.py
+      - ci/llvm_ld.lock.json
   workflow_dispatch:
     inputs:
       tag:
@@ -80,7 +82,9 @@ jobs:
             TAG="${INPUT_TAG:-v$VERSION}"
             DRY_RUN="${INPUT_DRY_RUN:-true}"
             CHECKOUT_REF="$GITHUB_SHA"
-            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            # A PR validates its own pipeline, so it builds its own commit; a
+            # manual dispatch for an already-tagged version rebuilds that tag.
+            if [ "$EVENT_NAME" != "pull_request" ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
               CHECKOUT_REF="$TAG"
             fi
           fi
@@ -164,13 +168,36 @@ jobs:
             echo "$out" | grep -Eq "^Reld ${VERSION} "
           fi
 
+      # llvm-ld-coff (reld#96): LLD's COFF linker as a library, loaded in-process for Windows
+      # (COFF/MinGW) links. Pinned prebuilt, never compiled here. musl reld is static and cannot
+      # load a shared library, so it keeps the lld-link subprocess bridge.
+      - name: Stage llvm-ld-coff
+        if: ${{ !contains(matrix.target, 'musl') }}
+        run: python3 ci/fetch_llvm_ld.py --triple "${{ matrix.target }}" --dest llvm-ld-coff
+
       - name: Package release archive
         run: |
+          extra=()
+          if [ -d llvm-ld-coff ]; then extra=(--extra-dir llvm-ld-coff); fi
           python3 ci/package_release.py \
             --version "${{ needs.preflight.outputs.version }}" \
             --triple "${{ matrix.target }}" \
             --input-dir staging \
-            --output-dir dist
+            --output-dir dist \
+            "${extra[@]}"
+
+      # Run the reld-link inside the finished archive, with no RELD_LLVM_LD override, so this
+      # proves the shipped layout: the library next to reld is found and used in-process.
+      - name: Smoke llvm-ld-coff in the packaged archive
+        if: ${{ !contains(matrix.target, 'musl') }}
+        run: |
+          set -euo pipefail
+          mkdir -p unpacked && tar -xzf dist/reld-v*.tar.gz -C unpacked
+          link="$(find unpacked -name reld-link -type f)"
+          out="$(RELD_LOG_ENGINE=1 "$link" --version 2>&1)"
+          echo "$out"
+          grep -q 'in-process llvm-ld-coff' <<<"$out" || { echo "::error::packaged reld-link did not use llvm-ld-coff in-process"; exit 1; }
+          grep -q 'LLD' <<<"$out"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -251,6 +278,9 @@ jobs:
       # Packaging is platform-independent Python that picks `.zip` from the
       # triple, not the host, so every cross target is packaged here (reld#175).
       # The Windows runners only have to execute what this produces.
+      - name: Stage llvm-ld-coff
+        run: python3 ci/fetch_llvm_ld.py --triple "${{ matrix.target }}" --dest llvm-ld-coff
+
       - name: Package release archive
         run: |
           python3 ci/package_release.py \
@@ -258,7 +288,8 @@ jobs:
             --triple "${{ matrix.target }}" \
             --binary-ext "${{ contains(matrix.target, 'windows') && '.exe' || '' }}" \
             --input-dir staging \
-            --output-dir dist
+            --output-dir dist \
+            --extra-dir llvm-ld-coff
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -314,10 +345,13 @@ jobs:
             throw "reld's own code did not answer -flavor gnu --version"
           }
 
+          $env:RELD_LOG_ENGINE = '1'
           $bridge = & $exe.FullName --version 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { throw "deployed reld exited with $LASTEXITCODE" }
           Write-Output $bridge
           if ($bridge -notmatch 'LLD') { throw "deployed reld --version missing the lld-link bridge marker" }
+          # llvm_ld.dll ships next to reld.exe (reld#96), so the COFF link runs in-process.
+          if ($bridge -notmatch 'in-process llvm-ld-coff') { throw "packaged reld did not use llvm-ld-coff in-process" }
 
   publish:
     name: Publish release

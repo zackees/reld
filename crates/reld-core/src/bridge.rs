@@ -1798,7 +1798,6 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
         bail!("Internal error: native engine passed to the subprocess bridge");
     }
     let engine = route.engine;
-    let linker = discover_linker(engine)?;
 
     let (mut forwarded, dropped) = forwarded_args_for_engine(argv, engine)?;
     if let Some(emulation) = route.mingw_emulation {
@@ -1825,6 +1824,15 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
             forwarded.extend(nix_rpath_flags(&forwarded));
         }
     }
+    #[cfg(feature = "llvm-ld")]
+    if let Some(exit_code) = try_llvm_ld_in_process(engine, &route, &forwarded, &dropped) {
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return Ok(());
+    }
+
+    let linker = discover_linker(engine)?;
     let child_args = child_command_line(&linker, engine, forwarded);
 
     if route_logging_enabled() {
@@ -1869,6 +1877,54 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
     }
 
     Ok(())
+}
+
+/// Offer a COFF or MinGW link to an in-process llvm-ld-coff (reld#96). Returns the exit code when llvm-ld
+/// ran the link, or `None` when the subprocess bridge should take it instead.
+///
+/// An explicit `RELD_BRIDGE_LINKER` names the linker to run, so it bypasses llvm-ld.
+#[cfg(feature = "llvm-ld")]
+fn try_llvm_ld_in_process(
+    engine: &Engine,
+    route: &Route,
+    forwarded: &[OsString],
+    dropped: &[String],
+) -> Option<i32> {
+    use crate::llvm_ld::Driver;
+    use crate::llvm_ld::Outcome;
+
+    let driver = if engine.name == COFF_LLD_ENGINE.name {
+        Driver::WinLink
+    } else if engine.name == MINGW_LLD_ENGINE.name {
+        Driver::MinGw
+    } else {
+        return None;
+    };
+    if std::env::var_os(RELD_BRIDGE_LINKER_ENV).is_some() {
+        return None;
+    }
+    match crate::llvm_ld::invoke(driver, forwarded) {
+        Outcome::Linked { exit_code, library } => {
+            if route_logging_enabled() {
+                eprintln!(
+                    "reld: engine={} (in-process llvm-ld-coff, reason={}) -> {}",
+                    engine.name,
+                    route.reason.label(),
+                    library.display()
+                );
+                if let Some(note) = stripped_options_note(engine.name, dropped) {
+                    eprintln!("{note}");
+                }
+            }
+            Some(exit_code)
+        }
+        Outcome::Unavailable { reason } => {
+            if route_logging_enabled() {
+                eprintln!("reld: llvm-ld-coff not used ({reason}); using the subprocess bridge");
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]
