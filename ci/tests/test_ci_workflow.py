@@ -41,6 +41,7 @@ def test_release_site_workflow_deploys_a_catalog_from_published_releases(tmp_pat
     assert "types: [completed]" in workflow
     assert "github.event.workflow_run.conclusion == 'success'" in workflow
     assert "github.event.workflow_run.event == 'push'" in workflow
+    assert "github.event.workflow_run.event == 'workflow_dispatch'" in workflow
     assert "gh api --paginate --slurp" in workflow
     assert "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa" in workflow
     assert "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e" in workflow
