@@ -299,7 +299,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "baseline_archive": {"path": str(args.baseline_archive.resolve()), "sha256": _sha256(args.baseline_archive)},
         "build_environment": {
             "inherited_environment": False,
-            "toolchain": "1.95.0",
+            "toolchain": "1.97.1",
             "cc": "/usr/bin/clang",
             "cxx": "/usr/bin/clang++",
             "features": ["fork", "plugins", "zstd"],

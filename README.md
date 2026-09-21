@@ -149,6 +149,10 @@ them, so reld makes no correctness claim for those targets ([#194](https://githu
 Versioned, per-platform binaries are published on the
 [GitHub Releases page](https://github.com/zackees/reld/releases) by
 [`release.yml`](.github/workflows/release.yml) whenever a `vX.Y.Z` tag is pushed to `main`.
+The [reld download site](https://zackees.github.io/reld/) exposes the same artifacts as a
+plain-HTTP, schema-v1 [`manifest.json`](https://zackees.github.io/reld/manifest.json) catalog:
+clients resolve a platform and then download its immutable GitHub Release URL without a GitHub
+API request. Each GitHub Release also carries its own `manifest.json` for version-pinned clients.
 `releases/latest` always resolves to the newest binary release — benchmark/corpus evidence
 releases (`linux-linker-competition-*`, `linux-linker-comparators-*`, `clang-link-corpus-*`) are
 kept as separate, non-`latest` prereleases so they can never be mistaken for a binary release.
@@ -321,7 +325,7 @@ Windows host:
 ```bash
 docker build -t reld-ci -f docker/ci/ubuntu.Dockerfile .
 docker run --rm -v "$PWD:/src" -w /src reld-ci \
-  bash -lc 'RELD_TEST_CONFIG=/src/test-config-ci.toml rustup run --install 1.95.0 cargo test --workspace'
+  bash -lc 'RELD_TEST_CONFIG=/src/test-config-ci.toml rustup run --install 1.97.1 cargo test --workspace'
 ```
 
 See [UPSTREAM.md](UPSTREAM.md) for the tracked source delta.

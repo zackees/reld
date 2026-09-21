@@ -52,7 +52,7 @@ name = "nix-rpath"
 path = "tests/nix_rpath.rs"
 
 [dependencies]
-reld-core = { path = "../reld-core", version = "0.1.0", default-features = false }
+reld-core = { path = "../reld-core", version = "0.2.0", default-features = false }
 
 # Exact crates.io dependency approved in #97. Production builds use the system
 # allocator; this dependency is compiled only for explicit diagnostic modes.

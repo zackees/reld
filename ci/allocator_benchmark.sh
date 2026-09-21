@@ -58,7 +58,7 @@ common_env=(
   "HOME=/tmp/reld-allocator-home"
   "CARGO_HOME=${state}/cargo-home"
   "RUSTUP_HOME=${RELD_PINNED_RUSTUP_HOME:-/usr/local/rustup}"
-  "RUSTUP_TOOLCHAIN=1.95.0"
+  "RUSTUP_TOOLCHAIN=1.97.1"
   "CC=/usr/bin/clang"
   "CXX=/usr/bin/clang++"
   "SOURCE_DATE_EPOCH=0"
@@ -66,7 +66,7 @@ common_env=(
 mkdir -p /tmp/reld-allocator-home
 mkdir -p "${state}/cargo-home"
 test "$(command -v cargo)" = "${RELD_PINNED_CARGO_BIN:-/usr/local/cargo/bin}/cargo"
-test -x "${RELD_PINNED_RUSTUP_HOME:-/usr/local/rustup}/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc"
+test -x "${RELD_PINNED_RUSTUP_HOME:-/usr/local/rustup}/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc"
 
 "${common_env[@]}" CARGO_TARGET_DIR="${state}/baseline-target" cargo build --locked --release --no-default-features --features fork,plugins,zstd --manifest-path "${baseline_source}/Cargo.toml" -p reld --bin reld
 "${common_env[@]}" CARGO_TARGET_DIR="${state}/candidate-target" cargo build --locked --release --no-default-features --features fork,plugins,zstd --manifest-path "${candidate_source}/Cargo.toml" -p reld --bin reld

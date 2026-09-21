@@ -5,7 +5,7 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 ## Current architecture and references
 
-- Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
+- Rust 1.97.1 is the MSRV; normal local and CI builds use the exact 1.97.1 pin, not floating
   `stable`.
 - Shared CI runs `python3 ci/check_dependencies.py` before platform builds; an approved dependency
   change must update its baseline in the same reviewed change.
@@ -98,7 +98,7 @@ timed link, after its timer stops.
 
 The manual-only `.github/workflows/clang-link-replay.yml` owns hosted replay. It builds baseline
 `6ec92be6674d026e74f7524271fbcbce68b50a39` and the candidate from separate non-git source archives
-with Rust 1.95.0, requires identical `non-git-build` linker-version output so `.comment` provenance
+with Rust 1.97.1, requires identical `non-git-build` linker-version output so `.comment` provenance
 cannot create a false artifact delta, validates the checked lock, downloads its asset, runs the
 gate, and uploads the report plus retained identity-failure evidence. Do not add this workload to
 the public benchmark matrix.
@@ -119,7 +119,7 @@ and `BASELINE_SHA`); it must never use blanket sudo environment preservation. Pu
 always the exact `github.event.pull_request.base.sha`, never a branch name or floating revision.
 
 The workflow builds both reld binaries from separate non-git source archives under the same pinned
-Rust 1.95.0 toolchain, provisions external linkers from the checked
+Rust 1.97.1 toolchain, provisions external linkers from the checked
 `ci/linux-linker-comparators.lock.json`, then invokes:
 
 ```sh

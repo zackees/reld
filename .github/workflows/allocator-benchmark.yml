@@ -30,7 +30,7 @@ jobs:
   allocator-linux:
     runs-on: ubuntu-24.04
     container:
-      image: rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+      image: rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -53,12 +53,12 @@ jobs:
           test "$(git rev-parse 'e2d6be5ae31350862c562d24da01e2147cd5c125^{tree}')" = 24bb072b12b3e2e49dfe8e729195f51bc5f8e93d
           sha256sum /tmp/reld-e0868677.tar /tmp/reld-e2d6be5a.tar | tee allocator-evidence/source-archives.sha256
         env:
-          RUSTUP_TOOLCHAIN: 1.95.0
+          RUSTUP_TOOLCHAIN: 1.97.1
 
       - name: Run correctness-gated allocator benchmark
         run: bash ci/allocator_benchmark.sh
         env:
-          RUSTUP_TOOLCHAIN: 1.95.0
+          RUSTUP_TOOLCHAIN: 1.97.1
           RELD_ALLOCATOR_BENCHMARK_OUTPUT: allocator-evidence/timing.json
           RELD_ALLOCATOR_SOURCE_ARCHIVE: /tmp/reld-e0868677.tar
           RELD_ALLOCATOR_BASELINE_ARCHIVE: /tmp/reld-e2d6be5a.tar
@@ -68,7 +68,7 @@ jobs:
       - name: Collect diagnostic allocator profiles
         run: bash ci/allocator_profiles.sh
         env:
-          RUSTUP_TOOLCHAIN: 1.95.0
+          RUSTUP_TOOLCHAIN: 1.97.1
           RELD_ALLOCATOR_PROFILE_OUTPUT: allocator-evidence/profiles.json
           RELD_ALLOCATOR_SOURCE_ARCHIVE: /tmp/reld-e0868677.tar
           RELD_PINNED_CARGO_BIN: /usr/local/cargo/bin

@@ -10,9 +10,9 @@ rust-version.workspace = true
 edition.workspace = true
 
 [dependencies]
-reld-layout-schema = { path = "../reld-layout-schema", version = "0.1.0" }
-reld-trace = { path = "../reld-trace", version = "0.1.0" }
-reld-reloc = { path = "../reld-reloc", version = "0.1.0" }
+reld-layout-schema = { path = "../reld-layout-schema", version = "0.2.0" }
+reld-trace = { path = "../reld-trace", version = "0.2.0" }
+reld-reloc = { path = "../reld-reloc", version = "0.2.0" }
 anyhow.workspace = true
 atomic-take.workspace = true
 bitflags.workspace = true

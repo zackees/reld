@@ -30,7 +30,7 @@ common_env=(
   "HOME=/tmp/reld-allocator-profile-home"
   "CARGO_HOME=${state}/cargo-home"
   "RUSTUP_HOME=${RELD_PINNED_RUSTUP_HOME:-/usr/local/rustup}"
-  "RUSTUP_TOOLCHAIN=1.95.0"
+  "RUSTUP_TOOLCHAIN=1.97.1"
   "CC=/usr/bin/clang"
   "CXX=/usr/bin/clang++"
   "SOURCE_DATE_EPOCH=0"
@@ -38,7 +38,7 @@ common_env=(
 mkdir -p /tmp/reld-allocator-profile-home
 mkdir -p "${state}/cargo-home"
 test "$(command -v cargo)" = "${RELD_PINNED_CARGO_BIN:-/usr/local/cargo/bin}/cargo"
-test -x "${RELD_PINNED_RUSTUP_HOME:-/usr/local/rustup}/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc"
+test -x "${RELD_PINNED_RUSTUP_HOME:-/usr/local/rustup}/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc"
 
 for mode in default pprof dhat; do
   features=fork,plugins,zstd

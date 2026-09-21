@@ -14,9 +14,9 @@ resolver = "2"
 [workspace.package]
 repository = "https://github.com/zackees/reld"
 license = "MIT OR Apache-2.0"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
-rust-version = "1.95"
+rust-version = "1.97.1"
 edition = "2024"
 authors = ["zackees"]
 

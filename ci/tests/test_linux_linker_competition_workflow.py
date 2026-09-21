@@ -38,7 +38,7 @@ def test_competition_workflow_pins_actions_rust_and_comparator_provisioning() ->
     assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in text
     assert "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in text
     assert "dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582" in text
-    assert "toolchain: 1.95.0" in text
+    assert "toolchain: 1.97.1" in text
     assert "COMPARATOR_LOCK: ci/linux-linker-comparators.lock.json" in text
     assert "ci.linux_linker_competition validate-lock --lock \"$COMPARATOR_LOCK\"" in text
     provision_at = text.index("ci.linux_linker_competition provision")

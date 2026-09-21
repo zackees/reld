@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 180
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTUP_TOOLCHAIN: 1.95.0
+      RUSTUP_TOOLCHAIN: 1.97.1
       CORPUS_LOCK: ci/clang-link-corpus.lock.json
       COMPARATOR_LOCK: ci/linux-linker-comparators.lock.json
       COMPARATORS_DIR: /tmp/reld-linker-comparators-${{ github.run_id }}-${{ github.run_attempt }}
@@ -58,9 +58,9 @@ jobs:
           version: "0.12.3"
           python-version: "3.12.11"
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.97.1
         with:
-          toolchain: 1.95.0
+          toolchain: 1.97.1
 
       - name: Sync pinned Python tooling
         shell: bash

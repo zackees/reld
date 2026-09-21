@@ -16,14 +16,14 @@ jobs:
   replay-linux:
     runs-on: ubuntu-24.04
     container:
-      image: rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+      image: rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
     timeout-minutes: 120
     env:
       BASELINE_SHA: 6ec92be6674d026e74f7524271fbcbce68b50a39
       CORPUS_LOCK: ci/clang-link-corpus.lock.json
       EVIDENCE_DIR: clang-replay-evidence
       REPLAY_WORKDIR: target/clang-link-replay
-      RUSTUP_TOOLCHAIN: 1.95.0
+      RUSTUP_TOOLCHAIN: 1.97.1
       CARGO_INCREMENTAL: "0"
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
     steps:

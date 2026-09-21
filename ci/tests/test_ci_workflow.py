@@ -1,14 +1,177 @@
+import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
-from ci import windows_ci
+from ci import release_manifest, windows_ci
 
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml"
 REPO_ROOT = WORKFLOW.parents[2]
 
 
-def test_normal_toolchains_pin_the_rust_195_msrv():
+def test_release_manifest_uses_immutable_download_urls_and_exact_platforms():
+    assets = [
+        {
+            "name": f"reld-v0.2.0-{triple}.{'zip' if 'windows' in triple else 'tar.gz'}",
+            "size": 123,
+            "sha256": f"{index:064x}",
+        }
+        for index, triple in enumerate(release_manifest.PLATFORMS, start=1)
+    ]
+
+    document = release_manifest.release_document(
+        repository="zackees/reld", tag="v0.2.0", published_at="2026-09-21T00:00:00Z", assets=assets
+    )
+
+    assert document["$schema"] == release_manifest.SCHEMA
+    assert document["kind"] == "Release"
+    assert document["version"] == "0.2.0"
+    assert document["source"]["ref"] == "v0.2.0"
+    assert {entry["platform"]["os"] for entry in document["platforms"]} == {"linux", "windows", "darwin"}
+    for entry in document["platforms"]:
+        url = entry["asset"]["urls"][0]
+        assert url.startswith("https://github.com/zackees/reld/releases/download/v0.2.0/")
+        assert entry["asset"]["sha256"] in {asset["sha256"] for asset in assets}
+
+
+def test_release_site_workflow_deploys_a_catalog_from_published_releases(tmp_path: Path):
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release-site.yml").read_text(encoding="utf-8")
+    assert "workflows: [Release]" in workflow
+    assert "types: [completed]" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
+    assert "github.event.workflow_run.event == 'push'" in workflow
+    assert "gh api --paginate --slurp" in workflow
+    assert "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa" in workflow
+    assert "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e" in workflow
+
+    assets = [
+        {
+            "name": f"reld-v0.2.0-{triple}.{'zip' if 'windows' in triple else 'tar.gz'}",
+            "size": 123,
+            "digest": f"sha256:{index:064x}",
+        }
+        for index, triple in enumerate(release_manifest.PLATFORMS, start=1)
+    ]
+    # This is the exact nested shape emitted by `gh api --paginate --slurp`.
+    releases = [[{"tag_name": "v0.2.0", "published_at": "2026-09-21T00:00:00Z", "assets": assets}]]
+    releases_path = tmp_path / "releases.json"
+    releases_path.write_text(json.dumps(releases), encoding="utf-8")
+    output_dir = tmp_path / "site"
+    release_manifest.build_catalog(
+        SimpleNamespace(
+            repository="zackees/reld",
+            releases_json=releases_path,
+            online_url="https://zackees.github.io/reld/manifest.json",
+            template=REPO_ROOT / "site" / "index.html",
+            output_dir=output_dir,
+        )
+    )
+    catalog = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert catalog["channels"]["latest-stable"] == "0.2.0"
+    assert (output_dir / "index.html").is_file()
+
+
+def test_catalog_allows_an_older_release_to_have_a_smaller_platform_matrix():
+    def github_assets(version: str, triples: list[str]) -> list[dict[str, object]]:
+        return [
+            {
+                "name": f"reld-v{version}-{triple}.{'zip' if 'windows' in triple else 'tar.gz'}",
+                "size": 123,
+                "digest": f"sha256:{index:064x}",
+            }
+            for index, triple in enumerate(triples, start=1)
+        ]
+
+    releases = [
+        {
+            "tag_name": "v0.2.0",
+            "published_at": "2026-09-21T00:00:00Z",
+            "assets": github_assets("0.2.0", list(release_manifest.PLATFORMS)),
+        },
+        {
+            "tag_name": "v0.1.0",
+            "published_at": "2026-09-17T00:00:00Z",
+            "assets": github_assets("0.1.0", ["x86_64-unknown-linux-gnu"]),
+        },
+    ]
+
+    catalog = release_manifest.catalog_document(
+        repository="zackees/reld",
+        releases=releases,
+        online_url="https://zackees.github.io/reld/manifest.json",
+    )
+
+    assert [release["version"] for release in catalog["releases"]] == ["0.2.0", "0.1.0"]
+    assert len(catalog["releases"][1]["platforms"]) == 1
+
+
+def test_catalog_channel_uses_highest_version_when_an_older_version_was_published_later():
+    def github_assets(version: str) -> list[dict[str, object]]:
+        return [
+            {
+                "name": f"reld-v{version}-{triple}.{'zip' if 'windows' in triple else 'tar.gz'}",
+                "size": 123,
+                "digest": f"sha256:{index:064x}",
+            }
+            for index, triple in enumerate(release_manifest.PLATFORMS, start=1)
+        ]
+
+    catalog = release_manifest.catalog_document(
+        repository="zackees/reld",
+        releases=[
+            {"tag_name": "v0.2.0", "published_at": "2026-09-21T00:00:00Z", "assets": github_assets("0.2.0")},
+            {"tag_name": "v0.1.0", "published_at": "2026-09-22T00:00:00Z", "assets": github_assets("0.1.0")},
+        ],
+        online_url="https://zackees.github.io/reld/manifest.json",
+    )
+
+    assert catalog["channels"]["latest-stable"] == "0.2.0"
+    assert [release["version"] for release in catalog["releases"]] == ["0.1.0", "0.2.0"]
+
+
+def test_catalog_rejects_a_historical_release_with_no_recognized_archives():
+    complete_assets = [
+        {
+            "name": f"reld-v0.2.0-{triple}.{'zip' if 'windows' in triple else 'tar.gz'}",
+            "size": 123,
+            "digest": f"sha256:{index:064x}",
+        }
+        for index, triple in enumerate(release_manifest.PLATFORMS, start=1)
+    ]
+    releases = [
+        {"tag_name": "v0.2.0", "published_at": "2026-09-21T00:00:00Z", "assets": complete_assets},
+        {
+            "tag_name": "v0.1.0",
+            "published_at": "2026-09-17T00:00:00Z",
+            "assets": [{"name": "SHA256SUMS", "size": 123, "digest": f"sha256:{1:064x}"}],
+        },
+    ]
+
+    try:
+        release_manifest.catalog_document(
+            repository="zackees/reld",
+            releases=releases,
+            online_url="https://zackees.github.io/reld/manifest.json",
+        )
+    except ValueError as error:
+        assert "no recognized reld archives" in str(error)
+    else:
+        raise AssertionError("historical stable releases without reld archives must be rejected")
+
+
+def test_github_asset_with_no_digest_is_rejected():
+    release = {"assets": [{"name": "reld-v0.2.0-x86_64-unknown-linux-gnu.tar.gz", "size": 123, "digest": None}]}
+
+    try:
+        release_manifest._github_assets(release)
+    except ValueError as error:
+        assert "did not provide a SHA-256 digest" in str(error)
+    else:
+        raise AssertionError("missing GitHub asset digest must be rejected")
+
+
+def test_normal_toolchains_pin_the_rust_1971_msrv():
     rust_toolchain = (REPO_ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
     manifest = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
     workflow_texts = [
@@ -16,10 +179,10 @@ def test_normal_toolchains_pin_the_rust_195_msrv():
         for name in ("ci.yml", "linker-modes.yml", "stress.yml", "benchmark-stats.yml")
     ]
 
-    assert 'rust-version = "1.95"' in manifest
-    assert 'channel = "1.95.0"' in rust_toolchain
-    assert "RUST_VERSION: 1.95.0" in workflow_texts[0]
-    assert all("e081816240890017053eacbb1bdf337761dc5582 # 1.95.0" in text for text in workflow_texts)
+    assert 'rust-version = "1.97.1"' in manifest
+    assert 'channel = "1.97.1"' in rust_toolchain
+    assert "RUST_VERSION: 1.97.1" in workflow_texts[0]
+    assert all("e081816240890017053eacbb1bdf337761dc5582 # 1.97.1" in text for text in workflow_texts)
 
 
 def test_ci_caches_linux_reference_linkers():

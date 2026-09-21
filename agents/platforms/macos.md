@@ -5,7 +5,7 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
 
 ## Current architecture and references
 
-- Rust 1.95 is the MSRV; normal local and CI builds use the exact 1.95.0 pin, not floating
+- Rust 1.97.1 is the MSRV; normal local and CI builds use the exact 1.97.1 pin, not floating
   `stable`.
 - Shared CI runs `python3 ci/check_dependencies.py` before platform builds; an approved dependency
   change must update its baseline in the same reviewed change.

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>reld downloads</title>
+  </head>
+  <body>
+    <main>
+      <h1>reld downloads</h1>
+      <p>Versioned, checksum-verified binaries for Linux, Windows, and macOS.</p>
+      <p><a href="manifest.json">Machine-readable manifest.json catalog</a> · <a href="https://github.com/zackees/reld/releases">All GitHub releases</a></p>
+      <p id="status">Loading the latest stable release…</p>
+      <ul id="assets"></ul>
+    </main>
+    <script>
+      fetch("manifest.json")
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then((catalog) => {
+          const version = catalog.channels["latest-stable"];
+          const release = catalog.releases.find((candidate) => candidate.version === version);
+          document.querySelector("#status").textContent = `Latest stable: ${version}`;
+          for (const entry of release.platforms) {
+            const link = document.createElement("a");
+            link.href = entry.asset.urls[0];
+            link.textContent = entry.asset.filename;
+            const item = document.createElement("li");
+            item.append(link, ` (${entry.asset.sha256})`);
+            document.querySelector("#assets").append(item);
+          }
+        })
+        .catch((error) => { document.querySelector("#status").textContent = `Unable to load catalog: ${error}`; });
+    </script>
+  </body>
+</html>
