@@ -41,7 +41,7 @@ jobs:
       - name: Sync Python tooling
         run: uv sync --extra dev
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.97.1
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
 
       - name: Free runner disk
         env:

@@ -182,7 +182,7 @@ def test_normal_toolchains_pin_the_rust_1971_msrv():
     assert 'rust-version = "1.97.1"' in manifest
     assert 'channel = "1.97.1"' in rust_toolchain
     assert "RUST_VERSION: 1.97.1" in workflow_texts[0]
-    assert all("e081816240890017053eacbb1bdf337761dc5582 # 1.97.1" in text for text in workflow_texts)
+    assert all("4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1" in text for text in workflow_texts)
 
 
 def test_ci_caches_linux_reference_linkers():
