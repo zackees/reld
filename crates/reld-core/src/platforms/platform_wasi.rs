@@ -108,6 +108,10 @@ pub mod linker_plugin {
 }
 
 pub mod path {
+    /// Environment variable the host's dynamic loader searches for shared libraries, and the
+    /// toolchain-root-relative directory rustup prepends to it for the tools it runs.
+    pub const TOOLCHAIN_DYLIB_SEARCH: (&str, &str) = ("LD_LIBRARY_PATH", "lib");
+
     use std::ffi::OsStr;
     use std::os::wasi::ffi::OsStrExt as _;
     use std::path::Path;

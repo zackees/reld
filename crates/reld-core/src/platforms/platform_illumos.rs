@@ -61,6 +61,10 @@ pub mod linker_plugin {
 }
 
 pub mod path {
+    /// Environment variable the host's dynamic loader searches for shared libraries, and the
+    /// toolchain-root-relative directory rustup prepends to it for the tools it runs.
+    pub const TOOLCHAIN_DYLIB_SEARCH: (&str, &str) = ("LD_LIBRARY_PATH", "lib");
+
     pub use crate::platforms::platform_unix::path::path_from_bytes;
 }
 

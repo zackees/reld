@@ -132,6 +132,10 @@ pub mod linker_plugin {
 }
 
 pub mod path {
+    /// Environment variable the host's dynamic loader searches for shared libraries, and the
+    /// toolchain-root-relative directory rustup prepends to it for the tools it runs.
+    pub const TOOLCHAIN_DYLIB_SEARCH: (&str, &str) = ("PATH", "bin");
+
     use std::path::PathBuf;
 
     /// Converts path bytes (e.g. an archive member name), which must be UTF-8, to a path.
