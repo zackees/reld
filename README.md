@@ -199,6 +199,16 @@ disables it. Without it â€” a musl build, a triple with no prebuilt, or `off` â€
 subprocess bridge below, so nothing breaks when the library is absent.
 `RELD_LOG_ENGINE=1` shows which path a link took.
 
+### Runtime DLL deployment on Windows
+
+After a successful MinGW or `lld-link` link, reld copies the toolchain runtime DLLs the output
+imports (`libc++.dll`, `libunwind.dll`, `libwinpthread-1.dll`, ...) next to it, in-process and
+best-effort. It never fails the link. It searches `RELD_RUNTIME_DIR` first, then the linker's
+toolchain `<triple>/bin` and `bin`. Disable it with `RELD_NO_DEPLOY_LIBS`, `RELD_NO_AUTO`, or (for
+`.dll` outputs) `RELD_NO_DEPLOY_SHARED_LIB`. Warnings are printed only with
+`RELD_LIB_DEPLOY_VERBOSE` or `RELD_LOG_ENGINE`. See
+[`agents/platforms/windows.md`](agents/platforms/windows.md).
+
 ### Bridge dependency
 
 The Windows and macOS bridge resolves the concrete linker to delegate to in this order:

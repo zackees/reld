@@ -61,6 +61,7 @@ pub(crate) mod platform;
 pub mod platforms;
 pub(crate) mod program_segments;
 pub(crate) mod resolution;
+pub mod runtime_dlls;
 pub(crate) mod save_dir;
 pub(crate) mod sframe;
 pub(crate) mod sharding;
