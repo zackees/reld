@@ -1873,11 +1873,13 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
+        let env_linker = std::env::var_os(RELD_BRIDGE_LINKER_ENV).map(PathBuf::from);
+        deploy_runtime_dlls_after_link(&forwarded, engine.format, env_linker.as_deref());
         return Ok(());
     }
 
     let linker = discover_linker(engine)?;
-    let child_args = child_command_line(&linker, engine, forwarded);
+    let child_args = child_command_line(&linker, engine, forwarded.clone());
 
     if route_logging_enabled() {
         eprintln!(
@@ -1925,7 +1927,85 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
         std::process::exit(code);
     }
 
+    deploy_runtime_dlls_after_link(&forwarded, engine.format, Some(&linker));
     Ok(())
+}
+
+/// Prints runtime-DLL deployment warnings even without `RELD_LOG_ENGINE`.
+pub const RELD_LIB_DEPLOY_VERBOSE_ENV: &str = "RELD_LIB_DEPLOY_VERBOSE";
+
+/// The output path a successful PE/COFF link wrote, parsed from the forwarded linker args.
+///
+/// GNU spellings (`-o <path>`, `-o<path>`, `--output=<path>`, `--output <path>`) apply to MinGW;
+/// `lld-link` uses `/OUT:<path>` or `-out:<path>` (case-insensitive). The last occurrence wins.
+/// A MinGW link without `-o` writes `a.exe`. ELF and Mach-O links return `None`.
+fn link_output_path(args: &[OsString], format: BridgeTarget) -> Option<PathBuf> {
+    match format {
+        BridgeTarget::MinGw => {
+            let mut output = None;
+            let mut iter = args.iter();
+            while let Some(arg) = iter.next() {
+                let text = arg.to_string_lossy();
+                if text == "-o" || text == "--output" {
+                    if let Some(value) = iter.next() {
+                        output = Some(PathBuf::from(value));
+                    }
+                } else if let Some(value) = text.strip_prefix("--output=") {
+                    output = Some(PathBuf::from(value));
+                } else if !text.starts_with("--")
+                    && let Some(value) = text.strip_prefix("-o").filter(|v| !v.is_empty())
+                {
+                    output = Some(PathBuf::from(value));
+                }
+            }
+            Some(output.unwrap_or_else(|| PathBuf::from("a.exe")))
+        }
+        BridgeTarget::Coff => {
+            let mut output = None;
+            for arg in args {
+                let text = arg.to_string_lossy();
+                let lower = text.to_ascii_lowercase();
+                if lower.starts_with("/out:") || lower.starts_with("-out:") {
+                    output = Some(PathBuf::from(&text[5..]));
+                }
+            }
+            output
+        }
+        BridgeTarget::Elf | BridgeTarget::MachO => None,
+    }
+}
+
+/// Best-effort runtime-DLL deployment after a successful PE/COFF link (reld#208). Never changes
+/// the link's exit status; silent unless `RELD_LOG_ENGINE` or `RELD_LIB_DEPLOY_VERBOSE` is set.
+fn deploy_runtime_dlls_after_link(
+    forwarded: &[OsString],
+    format: BridgeTarget,
+    linker: Option<&Path>,
+) {
+    let Some(output) = link_output_path(forwarded, format) else {
+        return;
+    };
+    let report = crate::runtime_dlls::deploy_runtime_dlls(&output, linker);
+    let log = route_logging_enabled();
+    let name = |path: &PathBuf| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    if log {
+        for path in &report.deployed {
+            eprintln!("reld: deployed runtime DLL {}", name(path));
+        }
+        for path in &report.up_to_date {
+            eprintln!("reld: runtime DLL up to date {}", name(path));
+        }
+    }
+    if log || std::env::var_os(RELD_LIB_DEPLOY_VERBOSE_ENV).is_some() {
+        for warning in &report.warnings {
+            eprintln!("reld: warning: {warning}");
+        }
+    }
 }
 
 /// Offer a COFF or MinGW link to an in-process llvm-ld-coff (reld#96). Returns the exit code when llvm-ld
@@ -1984,6 +2064,49 @@ mod tests {
     // Environment variable mutation isn't thread-safe, so serialize the tests that touch
     // linker-control environment variables.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn os_args(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn link_output_path_mingw_spellings() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["-o", "x.exe", "a.o"], "x.exe"),
+            (&["-ox.exe", "a.o"], "x.exe"),
+            (&["--output=x.exe", "a.o"], "x.exe"),
+            (&["--output", "x.exe", "a.o"], "x.exe"),
+            (&["-o", "first.exe", "-o", "last.dll"], "last.dll"),
+            (&["a.o", "-lfoo"], "a.exe"),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(
+                link_output_path(&os_args(args), BridgeTarget::MinGw),
+                Some(PathBuf::from(expected)),
+                "args: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_output_path_lld_link_spellings() {
+        assert_eq!(
+            link_output_path(&os_args(&["/OUT:x.exe", "a.obj"]), BridgeTarget::Coff),
+            Some(PathBuf::from("x.exe"))
+        );
+        assert_eq!(
+            link_output_path(&os_args(&["-out:y.dll", "a.obj"]), BridgeTarget::Coff),
+            Some(PathBuf::from("y.dll"))
+        );
+        assert_eq!(
+            link_output_path(&os_args(&["a.obj"]), BridgeTarget::Coff),
+            None
+        );
+        assert_eq!(
+            link_output_path(&os_args(&["-o", "x"]), BridgeTarget::Elf),
+            None
+        );
+    }
 
     struct EnvVarGuard {
         key: &'static str,

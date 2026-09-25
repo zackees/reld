@@ -50,6 +50,41 @@ This is the proof that `reld-link.exe` was actually hit; `PATH`, compiler config
 command text alone is insufficient. Then run `xsv count`, the full pinned PCRE2 CTest suite, and the
 C++ name-mangling CTest natively.
 
+## Runtime DLL deployment (reld#208)
+
+After a **successful** PE/COFF link (MinGW `ld.lld -m i386pep` or `lld-link`, in-process
+llvm-ld-coff or subprocess bridge), reld copies the toolchain runtime DLLs the output needs
+(`libc++.dll`, `libunwind.dll`, `libwinpthread-1.dll`, sanitizer runtimes, ...) next to the
+`.exe`/`.dll`, so it runs without the toolchain on `PATH`. It is native and in-process
+(`crates/reld-core/src/runtime_dlls.rs`): reld reads the output's import and delay-load tables,
+keeps only toolchain runtime names, walks their imports transitively and copies anything missing or
+stale. No Python, no subprocess.
+
+The output path comes from the forwarded args (`-o <path>`, `-o<path>`, `--output=<path>`,
+`--output <path>`; `/OUT:`/`-out:` for lld-link); a MinGW link without `-o` writes `a.exe`.
+
+Search order for each DLL:
+
+1. `RELD_RUNTIME_DIR`, if set.
+2. `<toolchain root>/<arch triple>/bin`, where the root is the parent of the linker's directory.
+3. `<toolchain root>/bin`.
+
+The linker is the discovered bridge linker, or `RELD_BRIDGE_LINKER` for the in-process path.
+
+Environment:
+
+- `RELD_NO_DEPLOY_LIBS` — disable deployment.
+- `RELD_NO_AUTO` — disable all automatic post-link conveniences, including this one.
+- `RELD_NO_DEPLOY_SHARED_LIB` — skip deployment when the output is a `.dll`.
+- `RELD_RUNTIME_DIR` — search this directory first.
+- `RELD_LIB_DEPLOY_VERBOSE` — print deployment warnings.
+- `RELD_LOG_ENGINE` — also report `reld: deployed runtime DLL <name>` and
+  `reld: runtime DLL up to date <name>` lines plus warnings.
+
+Deployment is best-effort: a missing DLL or copy failure is a warning, never an error, and the
+link's exit status is never changed. A clean successful link prints nothing unless one of the two
+logging variables is set.
+
 ## Where Windows policy lives
 
 - Bridge and routing implementation: `crates/reld/src/` and `crates/reld-core/src/`
