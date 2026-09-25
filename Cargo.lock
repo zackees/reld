@@ -1280,7 +1280,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reld"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ar",
  "bitflags",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "reld-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "ar",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "reld-diff"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "reld-layout-schema"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "postcard",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "reld-reloc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "leb128",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "reld-testkit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "reld-trace"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "postcard",
