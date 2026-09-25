@@ -42,6 +42,7 @@ use crate::bail;
 use crate::error::Context;
 use crate::error::Result;
 use crate::platforms::path::EXE_SUFFIX;
+use crate::platforms::path::TOOLCHAIN_DYLIB_SEARCH;
 use crate::target_probe::Signal;
 use crate::target_probe::TargetFamily;
 use std::ffi::OsStr;
@@ -1448,6 +1449,49 @@ fn rustlib_bin_dir() -> Option<PathBuf> {
     )
 }
 
+/// The root of the Rust toolchain that ships `linker`, when `linker` lives in that toolchain's
+/// `lib/rustlib/<host>/bin` directory (`rust-lld`) or its `gcc-ld` subdirectory.
+fn toolchain_root_of(linker: &Path) -> Option<&Path> {
+    fn parent_named<'a>(path: &'a Path, name: &str) -> Option<&'a Path> {
+        path.file_name()
+            .is_some_and(|file_name| file_name == name)
+            .then_some(path)
+            .and_then(Path::parent)
+    }
+    let mut bin = linker.parent()?;
+    if let Some(parent) = parent_named(bin, "gcc-ld") {
+        bin = parent;
+    }
+    let rustlib = parent_named(bin, "bin")?.parent()?;
+    parent_named(parent_named(rustlib, "rustlib")?, "lib")
+}
+
+/// The dynamic-loader search-path entry the child linker needs when it is a toolchain's own
+/// `rust-lld`, as `(variable, value)` with the toolchain's shared-library directory prepended.
+///
+/// Since Rust 1.98 the Apple toolchains link `rust-lld` against `@rpath/libLLVM.dylib` with an rpath
+/// of `@loader_path/../lib`, i.e. `lib/rustlib/<host>/lib`, but the `rustc` component ships the
+/// library only as `<toolchain>/lib/libLLVM.dylib` (rust-lang/rust#157205). The toolchain works
+/// under rustup only because rustup's proxies prepend `<toolchain>/lib` to the loader search path of
+/// every tool they launch; a linker spawned by reld is not launched by a proxy, so reld does the
+/// same thing (reld#206). The entry is added only when the directory exists.
+fn toolchain_dylib_search_env(
+    linker: &Path,
+    current: Option<OsString>,
+) -> Option<(&'static str, OsString)> {
+    let (variable, relative_dir) = TOOLCHAIN_DYLIB_SEARCH;
+    let dir = toolchain_root_of(linker)?.join(relative_dir);
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut entries = vec![dir];
+    if let Some(current) = current.filter(|value| !value.is_empty()) {
+        entries.extend(std::env::split_paths(&current));
+    }
+    let value = std::env::join_paths(entries).ok()?;
+    Some((variable, value))
+}
+
 /// Searches `PATH` for an executable with the given file name.
 fn find_on_path(file_name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
@@ -1849,6 +1893,11 @@ pub fn run_bridge<I: IntoIterator<Item = OsString>>(argv: I, route: Route) -> Re
 
     let mut command = std::process::Command::new(&linker);
     command.args(child_args);
+    if let Some((variable, value)) =
+        toolchain_dylib_search_env(&linker, std::env::var_os(TOOLCHAIN_DYLIB_SEARCH.0))
+    {
+        command.env(variable, value);
+    }
 
     command.stdin(std::process::Stdio::inherit());
     command.stdout(std::process::Stdio::inherit());
@@ -1993,6 +2042,60 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    /// reld#206: a toolchain `rust-lld` gets the toolchain's shared-library directory prepended to
+    /// the host loader search path, ahead of whatever the caller already had there.
+    #[test]
+    fn toolchain_rust_lld_gets_toolchain_dylib_dir_on_loader_path() {
+        let root = unique_temp_path("toolchain");
+        let bin = root
+            .join("lib")
+            .join("rustlib")
+            .join("aarch64-apple-darwin")
+            .join("bin");
+        std::fs::create_dir_all(bin.join("gcc-ld")).unwrap();
+        let dylib_dir = root.join(TOOLCHAIN_DYLIB_SEARCH.1);
+        std::fs::create_dir_all(&dylib_dir).unwrap();
+        let (variable, _) = TOOLCHAIN_DYLIB_SEARCH;
+
+        for linker in [
+            bin.join(format!("rust-lld{EXE_SUFFIX}")),
+            bin.join("gcc-ld").join(format!("ld64.lld{EXE_SUFFIX}")),
+        ] {
+            assert_eq!(toolchain_root_of(&linker), Some(root.as_path()));
+            let (name, value) = toolchain_dylib_search_env(&linker, None).unwrap();
+            assert_eq!(name, variable);
+            assert_eq!(value, dylib_dir.clone().into_os_string());
+
+            let existing = unique_temp_path("existing");
+            let current = std::env::join_paths([existing.clone()]).unwrap();
+            let (_, value) = toolchain_dylib_search_env(&linker, Some(current)).unwrap();
+            assert_eq!(
+                std::env::split_paths(&value).collect::<Vec<_>>(),
+                vec![dylib_dir.clone(), existing]
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn non_toolchain_linker_gets_no_loader_path_entry() {
+        let dir = unique_temp_path("plain");
+        std::fs::create_dir_all(&dir).unwrap();
+        let linker = dir.join(format!("ld64.lld{EXE_SUFFIX}"));
+        assert_eq!(toolchain_root_of(&linker), None);
+        assert_eq!(toolchain_dylib_search_env(&linker, None), None);
+        // A toolchain-shaped path whose library directory does not exist adds nothing either.
+        let missing = dir
+            .join("lib")
+            .join("rustlib")
+            .join("x")
+            .join("bin")
+            .join("rust-lld");
+        assert_eq!(toolchain_root_of(&missing), Some(dir.as_path()));
+        assert_eq!(toolchain_dylib_search_env(&missing, None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
