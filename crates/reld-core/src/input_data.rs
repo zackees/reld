@@ -1002,6 +1002,27 @@ impl Input {
                         original: p.as_ref().to_owned(),
                     });
                 }
+                // A bare filename (no directory component, e.g. a CRT startup object like
+                // `Scrt1.o`) that a driver couldn't resolve to a full path itself (its own
+                // toolchain/sysroot detection failed, e.g. an unwrapped compiler on a non-FHS
+                // host) falls back the same way `-l<name>` does: search the explicit `-L` path,
+                // then the host toolchain's own directories.
+                if self.search_first.is_none()
+                    && p.parent()
+                        .is_some_and(|parent| parent.as_os_str().is_empty())
+                    && file_system.file_type(p).is_err()
+                    && let Some(path) = search_for_file_with_host_fallback(
+                        file_system,
+                        args.lib_search_path(),
+                        None,
+                        p.as_ref(),
+                    )
+                {
+                    return Ok(InputPath {
+                        absolute: std::path::absolute(path)?,
+                        original: p.as_ref().to_owned(),
+                    });
+                }
                 Ok(InputPath {
                     absolute: p.as_ref().to_owned(),
                     original: p.as_ref().to_owned(),
@@ -1010,7 +1031,7 @@ impl Input {
             InputSpec::Lib(lib_name) => {
                 if self.modifiers.allow_shared {
                     let filename = format!("lib{lib_name}.so");
-                    if let Some(path) = search_for_file(
+                    if let Some(path) = search_for_file_with_host_fallback(
                         file_system,
                         args.lib_search_path(),
                         self.search_first.as_ref(),
@@ -1023,7 +1044,7 @@ impl Input {
                     }
                 }
                 let filename = format!("lib{lib_name}.a");
-                if let Some(path) = search_for_file(
+                if let Some(path) = search_for_file_with_host_fallback(
                     file_system,
                     args.lib_search_path(),
                     self.search_first.as_ref(),
@@ -1035,7 +1056,7 @@ impl Input {
                     });
                 }
                 let filename = format!("lib{lib_name}.tbd");
-                if let Some(path) = search_for_file(
+                if let Some(path) = search_for_file_with_host_fallback(
                     file_system,
                     args.lib_search_path(),
                     self.search_first.as_ref(),
@@ -1049,7 +1070,7 @@ impl Input {
                 bail!("Couldn't find library `{lib_name}` on library search path");
             }
             InputSpec::Search(filename) => {
-                if let Some(path) = search_for_file(
+                if let Some(path) = search_for_file_with_host_fallback(
                     file_system,
                     args.lib_search_path(),
                     self.search_first.as_ref(),
@@ -1080,6 +1101,29 @@ fn search_for_file(
         }
     }
     for dir in lib_search_path {
+        let path = dir.join(filename);
+        if file_system.file_type(&path).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Like [`search_for_file`], but if the explicit search path (`-L` / `search_first`) misses,
+/// retries against the host toolchain's own library directories (see [`crate::host_lib_search`]).
+/// That fallback is empty except on Linux hosts, so a link that already resolves everything
+/// through `-L` never pays for the retry.
+fn search_for_file_with_host_fallback(
+    file_system: &impl FileSystem,
+    lib_search_path: &[Box<Path>],
+    search_first: Option<&PathBuf>,
+    filename: impl AsRef<Path>,
+) -> Option<PathBuf> {
+    let filename = filename.as_ref();
+    if let Some(found) = search_for_file(file_system, lib_search_path, search_first, filename) {
+        return Some(found);
+    }
+    for dir in crate::host_lib_search::fallback_library_dirs() {
         let path = dir.join(filename);
         if file_system.file_type(&path).is_ok() {
             return Some(path);
@@ -1366,4 +1410,108 @@ fn dependent_library_input_resolves_in_lld_order() {
     }
 
     assert!(dependent_library_input(b"does-not-exist", modifiers, &args, &file_system).is_none());
+}
+
+/// Test-only: points the host fallback's env sources at `dir` and pins `CC` to a nonexistent
+/// compiler, so the compiler-query source can't interfere and the test is hermetic. Caller must
+/// hold `host_lib_search::test_support::ENV_LOCK` for the guards' lifetime.
+#[cfg(test)]
+fn set_host_fallback_env_for_test(
+    dir: &Path,
+) -> (
+    crate::host_lib_search::test_support::EnvVarGuard,
+    crate::host_lib_search::test_support::EnvVarGuard,
+    crate::host_lib_search::test_support::EnvVarGuard,
+) {
+    use crate::host_lib_search::test_support::EnvVarGuard;
+    let library_path = EnvVarGuard::set("LIBRARY_PATH", &dir.display().to_string());
+    let nix_ldflags = EnvVarGuard::set("NIX_LDFLAGS", "");
+    let cc = EnvVarGuard::set("CC", "reld-host-lib-search-test-nonexistent-compiler");
+    crate::host_lib_search::reset_cache_for_test();
+    (library_path, nix_ldflags, cc)
+}
+
+/// RED before the fix: `-lgcc_s`-style resolution only ever consulted `-L` / `search_first`, so on
+/// a Linux host where the driver didn't pass the directory containing `libgcc_s.so` (e.g. an
+/// unwrapped clang on NixOS invoking reld directly, see reld host-library-search-paths issue),
+/// `Input::path` bailed with "Couldn't find library" even though the host's own C toolchain knows
+/// exactly where that library lives. GREEN after `search_for_file_with_host_fallback` retries
+/// against `host_lib_search::fallback_library_dirs`, which (on Linux) also honours `LIBRARY_PATH`.
+#[test]
+fn library_resolves_via_host_fallback_when_missing_from_explicit_search_path() {
+    let _env_lock = crate::host_lib_search::test_support::ENV_LOCK
+        .lock()
+        .unwrap();
+    if !matches!(
+        crate::platforms::host::os(),
+        crate::platforms::host::HostOs::Linux
+    ) {
+        return; // The host fallback is Linux-only by design.
+    }
+
+    // Named on `-L` but deliberately empty, mirroring the unwrapped-clang-on-NixOS repro where
+    // no `-L` names the Nix store directory that actually has `libgcc_s.so`.
+    let explicit_dir = tempfile::tempdir().expect("failed to create temp dir");
+    // Only reachable through the host fallback's `LIBRARY_PATH` source.
+    let fallback_dir = tempfile::tempdir().expect("failed to create temp dir");
+    std::fs::write(fallback_dir.path().join("libhostfallbacktest.so"), b"").unwrap();
+    let _env = set_host_fallback_env_for_test(fallback_dir.path());
+
+    let mut args = crate::args::elf::ElfArgs::default();
+    args.lib_search_path.push(Box::from(explicit_dir.path()));
+    let file_system = crate::OsFileSystem::new();
+    let input = Input {
+        spec: InputSpec::Lib(Box::from("hostfallbacktest")),
+        search_first: None,
+        modifiers: Modifiers::default(),
+    };
+
+    let result = input.path(&args, &file_system);
+    crate::host_lib_search::reset_cache_for_test();
+
+    let resolved = result.expect("expected the host fallback to resolve `-lhostfallbacktest`");
+    assert_eq!(
+        resolved.absolute,
+        std::path::absolute(fallback_dir.path().join("libhostfallbacktest.so")).unwrap()
+    );
+}
+
+/// RED before the fix: a CRT startup object such as `Scrt1.o` reaches `Input::path` as a bare
+/// `InputSpec::File` positional argument (no `-l`) whenever the driver couldn't resolve it to a
+/// full path itself (e.g. an unwrapped compiler with no sysroot detection on a non-FHS host).
+/// Only `-l<name>` got the host/`-L` fallback before this test; a bare CRT filename fell straight
+/// through to "No such file or directory". GREEN after `InputSpec::File` also retries bare
+/// filenames through `search_for_file_with_host_fallback`.
+#[test]
+fn bare_crt_object_filename_resolves_via_host_fallback() {
+    let _env_lock = crate::host_lib_search::test_support::ENV_LOCK
+        .lock()
+        .unwrap();
+    if !matches!(
+        crate::platforms::host::os(),
+        crate::platforms::host::HostOs::Linux
+    ) {
+        return;
+    }
+
+    let fallback_dir = tempfile::tempdir().expect("failed to create temp dir");
+    std::fs::write(fallback_dir.path().join("HostFallbackScrt1.o"), b"").unwrap();
+    let _env = set_host_fallback_env_for_test(fallback_dir.path());
+
+    let args = crate::args::elf::ElfArgs::default();
+    let file_system = crate::OsFileSystem::new();
+    let input = Input {
+        spec: InputSpec::File(Box::from(Path::new("HostFallbackScrt1.o"))),
+        search_first: None,
+        modifiers: Modifiers::default(),
+    };
+
+    let result = input.path(&args, &file_system);
+    crate::host_lib_search::reset_cache_for_test();
+
+    let resolved = result.expect("expected the host fallback to resolve the bare CRT filename");
+    assert_eq!(
+        resolved.absolute,
+        std::path::absolute(fallback_dir.path().join("HostFallbackScrt1.o")).unwrap()
+    );
 }
