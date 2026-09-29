@@ -85,6 +85,12 @@ pub(crate) trait Arch: Send + Sync + 'static {
     /// Override this for architectures that need a different default.
     const DEFAULT_LOAD_ADDRESS: u64 = 0x400_000;
 
+    /// Whether every debug relocation overwrites its bytes with a value that doesn't depend on
+    /// what was there before. When it does, debug relocations can be applied speculatively in
+    /// parallel and simply reapplied in order if that fails. Architectures with add/subtract
+    /// debug relocations (RISC-V, LoongArch) must leave this false.
+    const DEBUG_RELOCATIONS_OVERWRITE: bool = false;
+
     /// Returns the identifier to be written into the output file that identifies the file as
     /// belonging to this architecture. e.g. for ELF, this is the header magic for the architecture.
     fn arch_identifier() -> <Self::Platform as Platform>::ArchIdentifier;
