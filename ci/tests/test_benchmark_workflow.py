@@ -123,7 +123,7 @@ def test_benchmark_workflow_cross_builds_windows_and_macos_drivers():
     # shipped in as an artifact; only the Linux leg still builds natively.
     assert "cross-build-benchmark-driver:" in text
     assert "needs: cross-build-benchmark-driver" in text
-    assert "zackees/setup-soldr@main" in text
+    assert "zackees/setup-soldr@v0" in text
     assert "soldr build --package reld --bin ${{ matrix.bin }}" in text
     assert '"bin":"reld-link"' in text
     assert '"bin":"reld"' in text

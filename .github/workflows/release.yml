@@ -249,7 +249,7 @@ jobs:
 
       - name: Setup Soldr (prepare cross toolchain)
         id: setup
-        uses: zackees/setup-soldr@main
+        uses: zackees/setup-soldr@v0 # v0.9.82 or later (floating major)
         with:
           version: 0.9.18
           cross-targets: ${{ matrix.target }}
