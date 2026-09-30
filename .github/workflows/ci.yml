@@ -46,6 +46,53 @@ env:
   NEXTEST_VERSION: "0.9.140"
 
 jobs:
+  # Verified-reuse decision (zackees/ci.yml GEN-021, rollout zackees/ci.yml#162), SHADOW mode:
+  # on a main push it reports whether a green pull_request run on a tree-identical PR head already
+  # proved every job below, in the job summary. It never sets reuse=true, nothing consumes its
+  # outputs, and it cannot fail the run, so CI behavior is unchanged. It runs on every event (the
+  # design's dedicated-job shape) with push-only steps. Keep the --required-job names equal to this
+  # workflow's job display names; a stale name only shows up as required-job-missing.
+  reuse-decision:
+    name: Verified reuse decision (shadow)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Check out ci-lint
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zackees/ci.yml
+          ref: b93b8c4a20ce3cd476c75a278ad01a31bde2438b
+          path: .ci-lint
+          persist-credentials: false
+
+      - name: Verified reuse decision (GEN-021, shadow)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        working-directory: .ci-lint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # Plain scalar with the command on the run: line, like hygiene's `run: python3 ci/...`:
+        # ci-lint is stdlib-only, so this job needs no uv (ci/tests/test_ci_workflow.py).
+        run: python3 -m ci_lint reuse-check --workflow ci.yml --mode shadow --github-output
+          --required-job "Format, clippy, and licenses"
+          --required-job "Dylint host-platform boundary"
+          --required-job "Phase 1 / linux-gnu x86_64"
+          --required-job "Phase 1 / linux-gnu aarch64"
+          --required-job "Phase 1 / windows-gnu x86_64"
+          --required-job "Phase 1 cross build (linux -> windows-msvc)"
+          --required-job "Phase 1 cross build (linux -> macos-arm64)"
+          --required-job "Phase 1 / windows-msvc x86_64"
+          --required-job "Phase 1 / macos arm64"
+          --required-job "Python"
+          --required-job "Cross release (linux -> x86_64-pc-windows-gnu)"
+
   hygiene:
     name: Format, clippy, and licenses
     runs-on: ubuntu-24.04
