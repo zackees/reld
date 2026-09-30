@@ -488,7 +488,7 @@ jobs:
       # toolchain installs (mirrors cross-ship.yml's cross-build job).
       - name: Setup Soldr (prepare cross toolchain)
         id: setup
-        uses: zackees/setup-soldr@main
+        uses: zackees/setup-soldr@v0 # v0.9.82 or later (floating major)
         with:
           # 0.9.18 ships the win-gnu prepare fix (soldr#3259); pinned to match
           # cross-ship.yml. cargo-nextest is installed at NEXTEST_VERSION in the
@@ -814,7 +814,7 @@ jobs:
       # runs `soldr prepare` for the triple and exports the compiler/linker/SDK/
       # sysroot/env plan -- no manual CC_/CXX_/AR_ wiring and no apt mingw install.
       - name: Setup Soldr (prepare cross toolchain)
-        uses: zackees/setup-soldr@main
+        uses: zackees/setup-soldr@v0 # v0.9.82 or later (floating major)
         with:
           # 0.9.18 ships the win-gnu prepare fix (soldr#3259): `soldr prepare
           # --target x86_64-pc-windows-gnu` captures the mingw-w64-cross

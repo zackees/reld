@@ -208,7 +208,7 @@ def test_ci_cross_compiles_release_on_linux():
     # Release cross-compile of the Windows target on a Linux runner, via the
     # blessed soldr front door (matches cross-ship.yml's proven shape).
     assert "cross-release:" in text
-    assert "zackees/setup-soldr@main" in text
+    assert "zackees/setup-soldr@v0" in text
     assert "cross-targets: ${{ matrix.target }}" in text
     assert "soldr build --package reld --bin reld --release --locked" in text
     assert "x86_64-pc-windows-gnu" in text
@@ -286,7 +286,7 @@ def test_phase1_msvc_and_macos_compile_on_linux_and_only_replay_on_target():
 
     cross_build = blocks["phase1-cross-build"]
     assert "runs-on: ubuntu-24.04" in cross_build
-    assert "zackees/setup-soldr@main" in cross_build
+    assert "zackees/setup-soldr@v0" in cross_build
     assert "version: 0.9.18" in cross_build
     assert "soldr cargo nextest archive" in cross_build
     assert "x86_64-pc-windows-msvc" in cross_build
