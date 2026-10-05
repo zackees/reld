@@ -1,0 +1,154 @@
+# ci.toml — reld's CI contract. Checked and planned by ci-lint (zackees/ci.yml).
+# This file generates no YAML: it bounds what the workflows may do, declares the
+# cache families they actually save, and proves the whole steady footprint fits
+# under the 10 GB per-repository Actions cache cap.
+schema  = 3
+profile = "rust-bin-app"            # a shipped Rust binary (a linker), not a PyPI distribution
+linter  = "zackees/ci.yml@92106df315bd28de24ef1808c893c91a5859122d"
+
+# ── Platforms ──────────────────────────────────────────────────────────────────
+# Taken from the `runs-on`/`target` pairs the workflows actually use. reld compiles
+# every platform on Linux via Soldr cross (`cross-ship.yml`) and also runs native
+# Linux/Windows/macOS lanes (`ci.yml`). Each id generates a [ci-<id>] tag and
+# `group` generates [ci-<group>].
+[platforms]
+linux-x64        = { target = "x86_64-unknown-linux-gnu",   runs-on = "ubuntu-24.04",     group = "linux" }
+linux-arm64      = { target = "aarch64-unknown-linux-gnu",  runs-on = "ubuntu-24.04-arm", group = "linux" }
+linux-musl-x64   = { target = "x86_64-unknown-linux-musl",  runs-on = "ubuntu-24.04",     group = "linux" }
+linux-musl-arm64 = { target = "aarch64-unknown-linux-musl", runs-on = "ubuntu-24.04-arm", group = "linux" }
+windows-x64      = { target = "x86_64-pc-windows-msvc",     runs-on = "windows-2022",     group = "windows" }
+windows-x64-gnu  = { target = "x86_64-pc-windows-gnu",      runs-on = "windows-2022",     group = "windows" }
+windows-arm64    = { target = "aarch64-pc-windows-msvc",    runs-on = "windows-11-arm",   group = "windows" }
+macos-arm64      = { target = "aarch64-apple-darwin",       runs-on = "macos-14",         group = "macos" }
+macos-x64        = { target = "x86_64-apple-darwin",        runs-on = "windows-2022",     group = "macos" }
+
+# ── Suites ─────────────────────────────────────────────────────────────────────
+# The commands `ci.yml` really runs. Only `unit` gates a merge.
+[suites]
+unit      = { run = "cargo test",                     required = true }
+nextest   = { run = "soldr cargo nextest archive --locked --workspace" }
+py        = { run = "uv run --no-sync pytest ci/tests" }
+selfhost  = { run = "uv run --no-sync python ci/selfhost.py", cache = "none" }  # from zero: proves caches mask nothing
+dylint    = { run = "cargo dylint --path dylints/ban_platform_cfg_outside_boundary --workspace -- --all-targets" }
+
+# ── Flows ──────────────────────────────────────────────────────────────────────
+[flow.pr]
+platforms = ["linux-x64"]
+suites    = ["unit", "nextest"]
+dylint    = "all-platforms"
+budget    = { critical-path = "12m" }
+
+# The ONLY cache writer. `pre-prune = true` removes the lockfile-change peak term
+# from the CACHE-004 budget proof; the steady total + PR budget must still fit.
+[flow.main]
+extends   = "pr"
+platforms = "all"
+cache     = "write"
+pre-prune = true
+
+[flow.release]
+platforms = "all"
+suites    = "all"
+publish   = "rehearsal"
+
+[flow.nightly]
+extends   = "release"
+schedule  = "weekly"
+cache     = "write"
+pre-prune = true
+publish   = "none"
+
+# ── Tags that are not derived ──────────────────────────────────────────────────
+[tags]
+ci-full    = { add = { platforms = "all", suites = ["selfhost"] } }
+ci-py      = { add = { suites = ["py"] } }
+no-test    = { remove = { suites = ["unit"] } }   # any removal => not mergeable
+release    = { flow = "release", publish = "rehearsal" }
+
+# ── Caches ─────────────────────────────────────────────────────────────────────
+# Measured 2026-10-05 against the live repository (`gh api
+# repos/zackees/reld/actions/caches`): 34 entries, 5031.7 MB = 4.91 GiB.
+# Every `max` below is sized at or ABOVE the largest entry actually observed in
+# that family, because `ci-lint cache janitor` LRU-evicts an `evict = "lru"`
+# family down to `max x cardinality` — under-stating a `max` would truncate live
+# caches, while over-stating one only costs declared budget.
+[cache]
+budget   = "9.5GB"                   # worst case must fit; leaves headroom under GitHub's 10 GB cap
+write-on = ["main"]                   # base layers: default branch only (setup-soldr#527, RUST-010)
+never    = ["llvm-ld-tarballs", "nextest-archives", "release-artifacts", "corpus-checkouts", "bench-results"]
+retired  = ["cook-delta-v2"]          # retired fleet-wide (setup-soldr#533); no live entry today
+pr       = { mode = "none", families = [], max-per-pr = "0MB", budget = "0MB", trim = "on-close" }
+
+[cache.family]
+# `setup-soldr:cross-targets` — the largest family. cross-ship.yml calls it once
+# per cross target (msvc/macos/win-gnu) and release.yml adds aarch64-msvc and
+# x86_64-apple-darwin. Observed 5 entries, 634.9 MB each for the four large
+# targets and 134.8 MB for win-gnu, so the per-shape form is the honest one:
+# the SUM is the footprint and the shape count is the cardinality.
+# `setup-soldr:cross-targets` — the largest family. cross-ship.yml calls it once per
+# cross target (msvc / macos / win-gnu) and release.yml adds aarch64-msvc and
+# x86_64-apple-darwin. Observed 5 entries: 634.9, 583.1, 550.0, 549.8 MB for the
+# four large targets and 134.8 MB for win-gnu, so one ceiling cannot describe the
+# family and the per-shape form is the honest one. NOTE: CACHE-004 reads `shapes`
+# (the footprint is the SUM), but `ci-lint cache janitor` still LRU-trims an
+# `evict = "lru"` family at `max x cardinality`, so `max` is deliberately set to the
+# largest shape (650MB) and `per` over-counts the platforms -- both directions must
+# clear the family's live 2452.7 MB or the janitor would delete live entries.
+cross-prepare = { via = "setup-soldr:cross-targets", max = "650MB", per = "cross-platform", evict = "lru", shapes = { "x86_64-pc-windows-msvc" = { max = "650MB" }, "aarch64-pc-windows-msvc" = { max = "650MB" }, "x86_64-apple-darwin" = { max = "650MB" }, "aarch64-apple-darwin" = { max = "650MB" }, "x86_64-pc-windows-gnu" = { max = "140MB" } } }
+
+# `setup-soldr:build-cache` — compile cache. Observed 3 entries: 301.6 MB (linux),
+# 143.3 MB (windows), 126.2 MB (macos). One ceiling per host shape; `max` is the
+# largest shape so the janitor's max x cardinality still clears the live 571.2 MB.
+compile = { via = "setup-soldr:build-cache", max = "310MB", lockfile = true, per = "cross-platform", evict = "lru", shapes = { "linux-x64" = { max = "310MB" }, "windows-x64" = { max = "150MB" }, "macos-arm64" = { max = "135MB" } } }
+
+# `setup-soldr:solo-toolchain` — Observed 8 entries at 145.8-211.0 MB, all from
+# the Linux/Windows/macOS host shapes. Sized on the largest (211.0 MB) rounded up.
+solo-toolchain = { via = "setup-soldr:solo-toolchain", max = "260MB", per = "platform", evict = "lru" }
+
+# `setup-soldr:cargo-registry` — one host, one entry, 36.5 MB.
+registry = { via = "setup-soldr:cargo-registry", max = "40MB", lockfile = true, per = "none" }
+
+# `setup-soldr:cook` — `prebuild-deps: soldr-cook` in cross-ship.yml/release.yml.
+# One entry, 139.9 MB.
+deps = { via = "setup-soldr:cook", max = "145MB", lockfile = true, per = "none" }
+
+# `setup-soldr:soldr-mini` — 4 entries at 10.1-12.1 MB.
+soldr-mini = { via = "setup-soldr:soldr-mini", max = "15MB", per = "cross-platform", evict = "lru" }
+
+# astral-sh/setup-uv's own built-in cache. Observed 5 entries at 6.1-8.1 MB.
+uv = { via = "setup-uv", max = "10MB", per = "cross-platform" }
+
+# Nearest-ancestor promotion is explicitly OFF: setup-soldr's ancestor mechanism
+# (zackees/setup-soldr#566) is an unreleased opt-in pilot whose `auto-key` input
+# defaults to "false" and no fleet repository has a live
+# `setup-soldr-ancestor-build-v1-*` entry. Declaring "ancestor" here would be a
+# promise nothing implements, and CACHE-030 would (correctly) report it.
+[cache.promote]
+mode = "off"
+
+# ── Local runs ─────────────────────────────────────────────────────────────────
+# reld ships no `[local.gate]` table and runs no `local-gate` surface today, so
+# none is declared here: adding one would switch `ci-lint local-gate` to read gate
+# config from this file and demand a complete gate definition.
+[local]
+runner = "bosn-act"
+lanes  = ["precheck", "fast"]
+cache  = "machine"
+
+# ── Allowlists ─────────────────────────────────────────────────────────────────
+[allow]
+workflows         = { "ci.yml" = ["pull_request", "push:main", "workflow_dispatch"], "cross-ship.yml" = ["push:main", "schedule", "workflow_dispatch"], "linker-artifacts.yml" = ["pull_request", "push:main"], "linker-modes.yml" = ["pull_request", "push:main"], "release.yml" = ["push:tags"] }
+actions           = ["actions/checkout", "actions/upload-artifact", "actions/download-artifact", "zackees/setup-soldr", "astral-sh/setup-uv", "msys2/setup-msys2"]
+# reld calls `zackees/setup-soldr` directly from workflow steps (no composite
+# wrapper action), so `only-in` stays empty and the wrapper check does not apply.
+setup-soldr       = { only-in = "", require = { solo-toolchain-cache = "false", cook-delta = "false" } }
+setup-uv          = { require = { save-cache = "plan" } }
+tools             = ["soldr", "cargo", "uv", "python3", "git"]
+secrets           = []
+platform-selector = "crates/reld/src/platform.rs"
+platform-code     = ["crates/reld/src/platforms/**", "crates/reld-link/src/platforms/**"]
+permissions       = { "id-token: write" = ["release"], "actions: write" = ["cache-maint"] }
+
+# ── Publish ────────────────────────────────────────────────────────────────────
+# reld ships release binaries and a release site; it publishes nothing to PyPI.
+[publish]
