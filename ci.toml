@@ -38,13 +38,20 @@ suites    = ["unit", "nextest"]
 dylint    = "all-platforms"
 budget    = { critical-path = "12m" }
 
-# The ONLY cache writer. `pre-prune = true` removes the lockfile-change peak term
-# from the CACHE-004 budget proof; the steady total + PR budget must still fit.
+# The ONLY cache writer.
+#
+# NO `pre-prune = true` here, deliberately (zackees/ci.yml#352, CACHE-034). The waiver drops
+# CACHE-004's lockfile-change-peak term, so declaring it without a workflow step that actually
+# runs `ci-lint cache preprune` bought a smaller modelled footprint for free. No workflow here
+# runs preprune, so the declaration was not true. Removed instead of wired: the honest arithmetic
+# still fits. steady 6,354,370,560 B + lockfile peak 817,889,280 B = 7,172,259,840 B against a
+# 9.5GB (10,200,547,328 B) budget -- 2.8 GiB of headroom, so the waiver bought nothing reld needed.
+# If a pre-prune step is ever added to a writer flow, put `pre-prune = true` back here AND in
+# [flow.nightly] (CACHE-004 requires it on EVERY writer flow) in the same change.
 [flow.main]
 extends   = "pr"
 platforms = "all"
 cache     = "write"
-pre-prune = true
 
 [flow.release]
 platforms = "all"
@@ -55,7 +62,6 @@ publish   = "rehearsal"
 extends   = "release"
 schedule  = "weekly"
 cache     = "write"
-pre-prune = true
 publish   = "none"
 
 # ── Tags that are not derived ──────────────────────────────────────────────────
