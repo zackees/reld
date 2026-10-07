@@ -349,6 +349,67 @@ def exercise_logging_equivalence(
     require_exact_output(executed, stdout="", description="logging-equivalence executable")
 
 
+
+def exercise_mingw_equivalence(
+    host: Host, linker: Path, work_dir: Path, *, cc: str,
+) -> None:
+    if host.name != "windows":
+        return
+    print("== GNU COFF: direct-link equivalence and unresolved-symbol enforcement ==", flush=True)
+    fixture = work_dir / "mingw-equivalence"
+    fixture.mkdir()
+    compiler = require_tool(cc)
+    backend = require_tool("ld.lld")
+    source = fixture / "main.c"
+    object_file = fixture / "main.o"
+    executable = fixture / "main.exe"
+    invocation_log = work_dir / "mingw-invocations.jsonl"
+    source.write_text("int mainCRTStartup(void) { return 0; }\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["RELD_BRIDGE_LINKER"] = backend
+    env["RELD_INVOCATION_LOG"] = str(invocation_log)
+    compile_args = [compiler, "--target=x86_64-w64-windows-gnu", "-ffreestanding",
+                    "-fno-stack-protector", "-c", source, "-o", object_file]
+    run_checked(compile_args, cwd=fixture, env=env)
+    # Disable exactly the PE timestamp on both sides; compare every output byte.
+    args = ["-m", "i386pep", "--no-insert-timestamp", "-e", "mainCRTStartup",
+            object_file, "-o", executable]
+    # The packaged Windows binary is the MSVC-dispatch alias reld-link.exe.
+    # Override that alias explicitly for this GNU command line.
+    baseline: bytes | None = None
+    response = fixture / "compat.rsp"
+    response.write_text("--allow-shlib-undefined\n", encoding="utf-8")
+    for command in ([backend, *args], [backend, *args],
+                    [linker, "-flavor", "gnu", *args, "--allow-shlib-undefined"],
+                    [linker, "-flavor", "gnu", *args, "@" + str(response)]):
+        run_checked(command, cwd=fixture, env=env)
+        artifact = executable.read_bytes()
+        if baseline is None:
+            baseline = artifact
+        elif artifact != baseline:
+            raise AcceptanceError("GNU COFF direct/reld replay changed executable bytes")
+        executed = run_checked([executable], cwd=fixture, env=env)
+        require_exact_output(executed, stdout="", description="GNU COFF executable")
+    records = read_invocations(invocation_log)
+    successful = [record for record in records if record.get("schema") == 1
+                  and record.get("status") == "success"
+                  and record.get("route_kind") == "bridge"
+                  and record.get("engine") == "lld-mingw"
+                  and record_output(record) == executable.resolve()]
+    if len(successful) != 2:
+        raise AcceptanceError("GNU COFF fixture did not record both lld-mingw links")
+
+    source.write_text("extern int missing_symbol(void);\n"
+                      "int mainCRTStartup(void) { return missing_symbol(); }\n", encoding="utf-8")
+    run_checked(compile_args, cwd=fixture, env=env)
+    for command in ([backend, *args], [linker, "-flavor", "gnu", *args, "--allow-shlib-undefined"]):
+        result = subprocess.run([os.fspath(item) for item in command], cwd=fixture,
+                                env=env, text=True, capture_output=True,
+                                errors="replace", check=False)
+        if result.returncode == 0 or "missing_symbol" not in result.stderr:
+            raise AcceptanceError("GNU COFF failed to reject the unresolved missing_symbol")
+
+
 def checkout_pinned(repository: str, commit: str, destination: Path, env: Mapping[str, str]) -> None:
     destination.mkdir(parents=True)
     git = require_tool("git")
@@ -574,6 +635,7 @@ def run_acceptance(
         raise AcceptanceError(f"work directory must be empty: {work_dir}")
     work_dir.mkdir(parents=True, exist_ok=True)
     exercise_logging_equivalence(host, linker, work_dir, cc=cc)
+    exercise_mingw_equivalence(host, linker, work_dir, cc=cc)
     exercise_rust(host, linker, work_dir)
     exercise_c(host, linker, work_dir, cc=cc)
     exercise_cpp(host, linker, work_dir, cc=cc, cxx=cxx)

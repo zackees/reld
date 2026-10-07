@@ -15,8 +15,11 @@ and the root [`AGENTS.md`](../../AGENTS.md) first.
   directly with the same effective arguments, inputs, environment, and deterministic options.
 - Pin the LLVM/Rust toolchain that supplies `lld-link`. `link.exe` is a compatibility reference,
   not a byte-identity reference, because it has different PE/COFF and PDB policies.
-- `x86_64-pc-windows-gnu` is compile-checked from Linux but is not yet a consumer-acceptance
-  route or advertised runtime platform; its GNU-dialect acceptance work remains tracked by #90.
+- The GNU COFF compatibility fixture in `ci.consumer_acceptance` uses the workflow-pinned LLVM
+  18.1.8 `ld.lld -m i386pep` as its direct reference. It compares two direct links and two reld
+  links byte-for-byte, disabling only the PE timestamp with `--no-insert-timestamp` on both sides,
+  runs each executable natively, and checks that unresolved symbols still fail. This fixture does
+  not advertise a general `x86_64-pc-windows-gnu` consumer platform; broader acceptance remains #90.
 
 ## Required evidence
 

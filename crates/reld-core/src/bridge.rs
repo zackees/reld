@@ -1681,7 +1681,13 @@ fn forwarded_args_for_engine<I: IntoIterator<Item = OsString>>(
 ) -> Result<(Vec<OsString>, Vec<String>)> {
     let dropped_tokens = drop_reld_dispatch_tokens(argv);
     if !engine.native && matches!(engine.format, BridgeTarget::Elf | BridgeTarget::MinGw) {
-        let expanded = expand_and_strip_driver_lto(dropped_tokens, 0)?;
+        let mut expanded = expand_and_strip_driver_lto(dropped_tokens, 0)?;
+        if engine.format == BridgeTarget::MinGw {
+            // Meson can add this ELF-only option after a no-input capability probe.
+            // PE/COFF has no ELF shared-object undefined-symbol policy; leave its
+            // normal unresolved-symbol enforcement and every other option intact.
+            expanded.retain(|arg| arg != "--allow-shlib-undefined");
+        }
         return Ok(strip_reld_only_flags(expanded));
     }
     Ok(strip_reld_only_flags(dropped_tokens))
@@ -2936,6 +2942,46 @@ mod tests {
                 forwarded_args_for_engine(argv, route.engine).unwrap().0,
                 vec![response_arg.clone()]
             );
+        }
+    }
+
+    #[test]
+    fn mingw_ignores_elf_allow_shlib_undefined_without_relaxing_undefined_checks() {
+        let response = TempFile::create_with_contents(
+            "mingw-elf-compat-response",
+            b"--allow-shlib-undefined --no-undefined foo.o",
+        );
+        let argv = [
+            OsString::from("ld.reld"),
+            OsString::from("--allow-shlib-undefined"),
+            OsString::from(format!("@{}", response.path().display())),
+            OsString::from("--no-allow-shlib-undefined"),
+            OsString::from("-o"),
+            OsString::from("out.dll"),
+        ];
+        let forwarded = forwarded_args_for_engine(argv, Engine::find("lld-mingw").unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(
+            forwarded,
+            os_args(&[
+                "--no-undefined",
+                "foo.o",
+                "--no-allow-shlib-undefined",
+                "-o",
+                "out.dll",
+            ])
+        );
+    }
+
+    #[test]
+    fn non_mingw_bridges_keep_elf_allow_shlib_undefined() {
+        for name in ["lld", "lld-link", "ld64.lld"] {
+            let argv = os_args(&["reld", "--allow-shlib-undefined", "foo.o"]);
+            let forwarded = forwarded_args_for_engine(argv, Engine::find(name).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(forwarded, os_args(&["--allow-shlib-undefined", "foo.o"]));
         }
     }
 
