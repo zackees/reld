@@ -374,12 +374,14 @@ def exercise_mingw_equivalence(
     # Disable exactly the PE timestamp on both sides; compare every output byte.
     args = ["-m", "i386pep", "--no-insert-timestamp", "-e", "mainCRTStartup",
             object_file, "-o", executable]
+    # The packaged Windows binary is the MSVC-dispatch alias reld-link.exe.
+    # Override that alias explicitly for this GNU command line.
     baseline: bytes | None = None
     response = fixture / "compat.rsp"
     response.write_text("--allow-shlib-undefined\n", encoding="utf-8")
     for command in ([backend, *args], [backend, *args],
-                    [linker, *args, "--allow-shlib-undefined"],
-                    [linker, *args, "@" + str(response)]):
+                    [linker, "-flavor", "gnu", *args, "--allow-shlib-undefined"],
+                    [linker, "-flavor", "gnu", *args, "@" + str(response)]):
         run_checked(command, cwd=fixture, env=env)
         artifact = executable.read_bytes()
         if baseline is None:
@@ -400,7 +402,7 @@ def exercise_mingw_equivalence(
     source.write_text("extern int missing_symbol(void);\n"
                       "int mainCRTStartup(void) { return missing_symbol(); }\n", encoding="utf-8")
     run_checked(compile_args, cwd=fixture, env=env)
-    for command in ([backend, *args], [linker, *args, "--allow-shlib-undefined"]):
+    for command in ([backend, *args], [linker, "-flavor", "gnu", *args, "--allow-shlib-undefined"]):
         result = subprocess.run([os.fspath(item) for item in command], cwd=fixture,
                                 env=env, text=True, capture_output=True,
                                 errors="replace", check=False)
